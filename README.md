@@ -31,17 +31,39 @@ app/src/main/java/com/example/minimalapk/
 
 ## 自动构建
 
-推送到 `main`、发起 Pull Request 或在 Actions 页面手动触发 `Build APK` 工作流，即可得到 `minimal-apk-debug` 构建产物（`app-debug.apk`）。
+推送到 `main`、发起 Pull Request 或在 Actions 页面手动触发 `Build APK` 工作流，即可得到两个构建产物：
+
+- `minimal-apk-debug`：`app-debug.apk`
+- `minimal-apk-release`：经过 R8 代码压缩与资源裁剪的 `app-release.apk`
+- `minimal-apk-release-mapping`：release 的 `mapping.txt`，用于还原混淆后的崩溃堆栈
 
 ## 本地构建
 
 ```bash
-./gradlew assembleDebug
+./gradlew assembleDebug assembleRelease
 ```
 
-产物位于 `app/build/outputs/apk/debug/app-debug.apk`。
+产物位于：
 
-需要 JDK 17 与 Android SDK（`compileSdk = 35`）。
+- `app/build/outputs/apk/debug/app-debug.apk`
+- `app/build/outputs/apk/release/app-release.apk`
+
+需要 JDK 17 与 Android SDK（`compileSdk = 35`）。Gradle 配置已启用构建缓存与配置缓存，重复构建会明显加快。
+
+## Release 签名
+
+Release 包默认使用本地 debug 签名，可直接安装测试；但该签名仅适合本地验证，不同机器或不同 CI 运行生成的签名不一致，无法覆盖安装升级。
+
+如需正式签名，设置以下环境变量后再构建：
+
+| 变量 | 说明 |
+| --- | --- |
+| `RELEASE_STORE_FILE` | keystore 文件路径（相对路径以仓库根目录为基准） |
+| `RELEASE_STORE_PASSWORD` | keystore 密码 |
+| `RELEASE_KEY_ALIAS` | 密钥别名 |
+| `RELEASE_KEY_PASSWORD` | 密钥密码 |
+
+在 CI 中，可在仓库 Secrets 配置 `RELEASE_KEYSTORE_BASE64`（keystore 的 Base64 编码）以及上述三个密码/别名变量，工作流会自动解码并启用正式签名；未配置时回退到 debug 签名。
 
 ## 自定义
 
