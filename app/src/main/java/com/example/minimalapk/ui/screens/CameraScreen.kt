@@ -206,7 +206,6 @@ private suspend fun Context.awaitCameraProvider(): ProcessCameraProvider =
             },
             ContextCompat.getMainExecutor(this),
         )
-        continuation.invokeOnCancellation { future.cancel(true) }
     }
 
 private fun Context.openAppSettings() {

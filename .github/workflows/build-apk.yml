@@ -17,10 +17,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+      RELEASE_KEYSTORE_BASE64: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.RELEASE_KEYSTORE_BASE64 || '' }}
+      RELEASE_STORE_PASSWORD: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.RELEASE_STORE_PASSWORD || '' }}
+      RELEASE_KEY_ALIAS: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.RELEASE_KEY_ALIAS || '' }}
+      RELEASE_KEY_PASSWORD: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.RELEASE_KEY_PASSWORD || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -65,5 +65,4 @@ jobs:
         with:
           name: minimal-apk-release-mapping
           path: app/build/outputs/mapping/release/mapping.txt
-          if-no-files-found: warn
-          retention-days: 7
+          if-no-files-found: error
