@@ -24,6 +24,7 @@ import com.example.minimalapk.R
 import com.example.minimalapk.ui.screens.CameraScreen
 import com.example.minimalapk.ui.screens.ConfigScreen
 import com.example.minimalapk.ui.screens.PluginsScreen
+import com.example.minimalapk.ui.screens.PoseScreen
 import com.example.minimalapk.ui.screens.StatusScreen
 
 private class Tab(
@@ -34,6 +35,7 @@ private class Tab(
 private val tabs = listOf(
     Tab("状态") { Icon(Icons.Filled.Home, contentDescription = "状态") },
     Tab("相机") { Icon(painterResource(R.drawable.ic_camera), contentDescription = "相机") },
+    Tab("体测") { Icon(painterResource(R.drawable.ic_body), contentDescription = "体测") },
     Tab("插件") { Icon(Icons.Filled.Build, contentDescription = "插件") },
     Tab("配置") { Icon(Icons.Filled.Settings, contentDescription = "配置") },
 )
@@ -66,8 +68,9 @@ fun MinimalApkApp() {
                 when (selectedTab) {
                     0 -> StatusScreen()
                     1 -> CameraScreen()
-                    2 -> PluginsScreen()
-                    3 -> ConfigScreen()
+                    2 -> PoseScreen()
+                    3 -> PluginsScreen()
+                    4 -> ConfigScreen()
                 }
             }
         }

@@ -177,11 +177,11 @@ private fun CameraPreview(modifier: Modifier = Modifier) {
     }
 }
 
-private fun Context.hasCameraPermission(): Boolean =
+internal fun Context.hasCameraPermission(): Boolean =
     ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
         PackageManager.PERMISSION_GRANTED
 
-private fun Context.cameraPermanentlyDenied(granted: Boolean, requested: Boolean): Boolean =
+internal fun Context.cameraPermanentlyDenied(granted: Boolean, requested: Boolean): Boolean =
     isCameraPermanentlyDenied(
         granted = granted,
         requested = requested,
@@ -195,7 +195,7 @@ internal fun isCameraPermanentlyDenied(
     shouldShowRationale: Boolean?,
 ): Boolean = !granted && requested && shouldShowRationale == false
 
-private suspend fun Context.awaitCameraProvider(): ProcessCameraProvider =
+internal suspend fun Context.awaitCameraProvider(): ProcessCameraProvider =
     suspendCancellableCoroutine { continuation ->
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener(
@@ -209,7 +209,7 @@ private suspend fun Context.awaitCameraProvider(): ProcessCameraProvider =
         continuation.invokeOnCancellation { future.cancel(true) }
     }
 
-private fun Context.openAppSettings() {
+internal fun Context.openAppSettings() {
     startActivity(
         Intent(
             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,

@@ -4,12 +4,13 @@
 
 ## 功能
 
-底栏包含 4 个选项卡：
+底栏包含 5 个选项卡：
 
 | 选项卡 | 内容 |
 | --- | --- |
 | 状态 | 显示运行状态、应用版本、设备型号、系统版本与 ABI |
 | 相机 | 基于 CameraX 的后置摄像头实时预览，含权限申请 |
+| 体测 | 拍摄人物并输入身高，用 YOLO26-pose 关键点估算肩宽、臂长、髋宽与腿长 |
 | 插件 | 插件列表占位示例，可开关 |
 | 配置 | 自动更新、详细日志、服务端地址等设置占位 |
 
@@ -18,6 +19,9 @@
 ```
 app/src/main/java/com/example/minimalapk/
 ├── MainActivity.kt
+├── pose/
+│   ├── BodyMeasurements.kt       # 关键点距离到厘米的换算
+│   └── Yolo26PoseDetector.kt     # ONNX Runtime 推理与结果解析
 └── ui/
     ├── MinimalApkApp.kt          # 底栏与页面切换
     ├── theme/Theme.kt            # Material 3 主题
@@ -25,9 +29,31 @@ app/src/main/java/com/example/minimalapk/
         ├── Common.kt             # 共用组件
         ├── StatusScreen.kt
         ├── CameraScreen.kt
+        ├── PoseScreen.kt
         ├── PluginsScreen.kt
         └── ConfigScreen.kt
 ```
+
+## 体测模型
+
+体测页使用 ONNX Runtime 加载 YOLO26-pose，模型文件不随仓库提交（体积与授权原因），需要手动放入：
+
+```
+app/src/main/assets/yolo26-pose.onnx
+```
+
+模型要求为 end2end 导出的 17 关键点姿态模型：输入 `[1, 3, 640, 640]`（RGB，0..1），输出 `[1, 300, 57]`（`xyxy`、置信度、类别、17 组 `x, y, 置信度`，坐标归一化到 0..1，关键点置信度需乘以 640 还原）。可直接下载固定版本的现成导出（AGPL-3.0，仅用于本地验证）：
+
+```bash
+curl -L -o app/src/main/assets/yolo26-pose.onnx \
+  https://huggingface.co/onnx-community/yolo26n-pose-ONNX/resolve/8a9197eeec75fdb4953322a455126ca6d9780b41/onnx/model.onnx
+sha256sum app/src/main/assets/yolo26-pose.onnx
+# 期望：6ca5dc9681e0305708085715427f50779c761d5abfddaa0c38ac7c2d89b56085
+```
+
+其他来源的模型必须保持相同的输入输出约定（0..1 归一化、直接缩放到 640×640、end2end 输出）。缺少模型时，体测页会提示模型路径而不会崩溃。
+
+测量原理：以检测框高度作为用户输入身高的像素参考，按比例换算肩、肘、腕、髋、膝、踝之间的距离。手机需正对人物并尽量拍全全身，估算结果仅供演示参考。
 
 ## 自动构建
 

@@ -10,3 +10,4 @@ captures/
 *.apk
 *.aab
 .DS_Store
+app/src/main/assets/*.onnx

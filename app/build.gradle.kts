@@ -33,6 +33,9 @@ android {
         targetSdk { version = release(37) }
         versionCode = 1
         versionName = "1.0"
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     signingConfigs {
@@ -47,6 +50,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            ndk {
+                abiFilters += "x86_64"
+            }
+        }
         release {
             optimization {
                 enable = true
@@ -85,6 +93,7 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
+    implementation(libs.onnxruntime.android)
 
     testImplementation(libs.junit)
 }
