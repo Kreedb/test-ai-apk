@@ -1,8 +1,13 @@
 package com.example.minimalapk.ui.screens
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -34,10 +39,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlin.coroutines.suspendCoroutine
-
 @Composable
 fun CameraScreen() {
     val context = LocalContext.current
@@ -47,9 +52,17 @@ fun CameraScreen() {
                 PackageManager.PERMISSION_GRANTED,
         )
     }
+    var permanentlyDenied by remember { mutableStateOf(false) }
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
-        onResult = { granted = it },
+        onResult = { result ->
+            granted = result
+            if (!result) {
+                val activity = context.findActivity()
+                permanentlyDenied = activity != null &&
+                    !activity.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)
+            }
+        },
     )
 
     LaunchedEffect(Unit) {
@@ -85,14 +98,24 @@ fun CameraScreen() {
                 verticalArrangement = Arrangement.Center,
             ) {
                 Text(
-                    text = "需要相机权限才能预览",
+                    text = if (permanentlyDenied) {
+                        "相机权限已被拒绝，请在系统设置中开启"
+                    } else {
+                        "需要相机权限才能预览"
+                    },
                     style = MaterialTheme.typography.bodyLarge,
                 )
                 Button(
                     modifier = Modifier.padding(top = 12.dp),
-                    onClick = { launcher.launch(Manifest.permission.CAMERA) },
+                    onClick = {
+                        if (permanentlyDenied) {
+                            context.openAppSettings()
+                        } else {
+                            launcher.launch(Manifest.permission.CAMERA)
+                        }
+                    },
                 ) {
-                    Text("授予权限")
+                    Text(if (permanentlyDenied) "打开设置" else "授予权限")
                 }
             }
         }
@@ -114,6 +137,7 @@ private fun CameraPreview(modifier: Modifier = Modifier) {
     LaunchedEffect(previewView, lifecycleOwner) {
         try {
             val cameraProvider = context.awaitCameraProvider()
+            coroutineContext.ensureActive()
             provider = cameraProvider
 
             val preview = Preview.Builder().build().also {
@@ -154,7 +178,7 @@ private fun CameraPreview(modifier: Modifier = Modifier) {
 }
 
 private suspend fun Context.awaitCameraProvider(): ProcessCameraProvider =
-    suspendCoroutine { continuation ->
+    suspendCancellableCoroutine { continuation ->
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener(
             {
@@ -164,4 +188,20 @@ private suspend fun Context.awaitCameraProvider(): ProcessCameraProvider =
             },
             ContextCompat.getMainExecutor(this),
         )
+        continuation.invokeOnCancellation { future.cancel(true) }
     }
+
+private fun Context.openAppSettings() {
+    startActivity(
+        Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", packageName, null),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    )
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}

@@ -4,9 +4,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -17,26 +16,32 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
+import com.example.minimalapk.R
 import com.example.minimalapk.ui.screens.CameraScreen
 import com.example.minimalapk.ui.screens.ConfigScreen
 import com.example.minimalapk.ui.screens.PluginsScreen
 import com.example.minimalapk.ui.screens.StatusScreen
 
-private data class Tab(val label: String, val icon: ImageVector)
+private class Tab(
+    val label: String,
+    val icon: @Composable () -> Unit,
+)
 
 private val tabs = listOf(
-    Tab("状态", Icons.Filled.Home),
-    Tab("相机", Icons.Filled.PhotoCamera),
-    Tab("插件", Icons.Filled.Extension),
-    Tab("配置", Icons.Filled.Settings),
+    Tab("状态") { Icon(Icons.Filled.Home, contentDescription = "状态") },
+    Tab("相机") { Icon(painterResource(R.drawable.ic_camera), contentDescription = "相机") },
+    Tab("插件") { Icon(Icons.Filled.Build, contentDescription = "插件") },
+    Tab("配置") { Icon(Icons.Filled.Settings, contentDescription = "配置") },
 )
 
 @Composable
 fun MinimalApkApp() {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    val stateHolder = rememberSaveableStateHolder()
 
     Scaffold(
         bottomBar = {
@@ -45,7 +50,7 @@ fun MinimalApkApp() {
                     NavigationBarItem(
                         selected = selectedTab == index,
                         onClick = { selectedTab = index },
-                        icon = { Icon(tab.icon, contentDescription = tab.label) },
+                        icon = { tab.icon() },
                         label = { Text(tab.label) },
                     )
                 }
@@ -57,11 +62,13 @@ fun MinimalApkApp() {
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
-            when (selectedTab) {
-                0 -> StatusScreen()
-                1 -> CameraScreen()
-                2 -> PluginsScreen()
-                3 -> ConfigScreen()
+            stateHolder.SaveableStateProvider(selectedTab) {
+                when (selectedTab) {
+                    0 -> StatusScreen()
+                    1 -> CameraScreen()
+                    2 -> PluginsScreen()
+                    3 -> ConfigScreen()
+                }
             }
         }
     }

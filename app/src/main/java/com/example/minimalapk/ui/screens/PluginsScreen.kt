@@ -14,34 +14,35 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
-private data class PluginItem(
+private data class Plugin(
     val name: String,
     val description: String,
-    val enabled: Boolean,
+)
+
+private val plugins = listOf(
+    Plugin("核心模块", "提供模板的基础功能与系统接口"),
+    Plugin("相机增强", "为相机页面扩展更多能力"),
+    Plugin("日志导出", "导出运行日志用于问题排查"),
 )
 
 @Composable
 fun PluginsScreen() {
-    val plugins = remember {
-        mutableStateListOf(
-            PluginItem("核心模块", "提供模板的基础功能与系统接口", enabled = true),
-            PluginItem("相机增强", "为相机页面扩展更多能力", enabled = false),
-            PluginItem("日志导出", "导出运行日志用于问题排查", enabled = true),
-        )
-    }
+    var enabled by rememberSaveable { mutableStateOf(listOf(true, false, true)) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -56,6 +57,7 @@ fun PluginsScreen() {
         }
 
         itemsIndexed(plugins) { index, plugin ->
+            val isEnabled = enabled.getOrElse(index) { false }
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier
@@ -73,7 +75,7 @@ fun PluginsScreen() {
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
-                            imageVector = Icons.Filled.Extension,
+                            imageVector = Icons.Filled.Build,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onPrimaryContainer,
                         )
@@ -96,9 +98,9 @@ fun PluginsScreen() {
                     }
 
                     Switch(
-                        checked = plugin.enabled,
+                        checked = isEnabled,
                         onCheckedChange = { checked ->
-                            plugins[index] = plugin.copy(enabled = checked)
+                            enabled = enabled.toMutableList().also { it[index] = checked }
                         },
                     )
                 }
