@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
@@ -16,12 +15,16 @@ val releaseSigningReady =
 
 android {
     namespace = "com.example.minimalapk"
-    compileSdk = 35
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 2
+        }
+    }
 
     defaultConfig {
         applicationId = "com.example.minimalapk"
-        minSdk = 24
-        targetSdk = 35
+        minSdk { version = release(24) }
+        targetSdk { version = release(37) }
         versionCode = 1
         versionName = "1.0"
     }
@@ -39,12 +42,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro",
-            )
+            optimization {
+                enable = true
+            }
             signingConfig = if (releaseSigningReady) {
                 signingConfigs.getByName("release")
             } else {
@@ -56,10 +56,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = "17"
     }
 
     buildFeatures {
@@ -79,6 +75,7 @@ dependencies {
 
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.androidx.compose.material3)
 
     implementation(libs.androidx.camera.camera2)
