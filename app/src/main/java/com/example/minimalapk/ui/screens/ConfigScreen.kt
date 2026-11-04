@@ -2,18 +2,15 @@ package com.example.minimalapk.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,7 +27,6 @@ fun ConfigScreen() {
     var autoUpdate by rememberSaveable { mutableStateOf(true) }
     var verboseLog by rememberSaveable { mutableStateOf(false) }
     var endpoint by rememberSaveable { mutableStateOf("https://example.com/api") }
-    var saved by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -51,20 +47,14 @@ fun ConfigScreen() {
                     title = "自动检查更新",
                     subtitle = "启动时检查是否存在新版本",
                     checked = autoUpdate,
-                    onCheckedChange = {
-                        autoUpdate = it
-                        saved = false
-                    },
+                    onCheckedChange = { autoUpdate = it },
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                 SwitchRow(
                     title = "详细日志",
                     subtitle = "记录更多调试信息",
                     checked = verboseLog,
-                    onCheckedChange = {
-                        verboseLog = it
-                        saved = false
-                    },
+                    onCheckedChange = { verboseLog = it },
                 )
             }
         }
@@ -80,10 +70,7 @@ fun ConfigScreen() {
                 )
                 OutlinedTextField(
                     value = endpoint,
-                    onValueChange = {
-                        endpoint = it
-                        saved = false
-                    },
+                    onValueChange = { endpoint = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Endpoint") },
@@ -91,32 +78,11 @@ fun ConfigScreen() {
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(
-                onClick = { saved = true },
-                enabled = endpoint.isNotBlank(),
-            ) {
-                Text("保存")
-            }
-            OutlinedButton(
-                onClick = {
-                    autoUpdate = true
-                    verboseLog = false
-                    endpoint = "https://example.com/api"
-                    saved = false
-                },
-            ) {
-                Text("重置")
-            }
-        }
-
-        if (saved) {
-            Text(
-                text = "配置已保存",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
+        Text(
+            text = "配置为占位示例，修改不会保存，也不会影响应用行为。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column(

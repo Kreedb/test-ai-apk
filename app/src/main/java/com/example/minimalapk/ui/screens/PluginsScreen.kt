@@ -27,6 +27,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
 private data class Plugin(
@@ -102,6 +104,7 @@ fun PluginsScreen() {
                         onCheckedChange = { checked ->
                             enabled = enabled.toMutableList().also { it[index] = checked }
                         },
+                        modifier = Modifier.semantics { contentDescription = plugin.name },
                     )
                 }
             }
