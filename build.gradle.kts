@@ -1,6 +1,6 @@
 buildscript {
     dependencies {
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.21")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.21") // Keep in sync with "kotlin" in gradle/libs.versions.toml.
     }
 }
 
