@@ -31,7 +31,7 @@ app/src/main/java/com/example/minimalapk/
 
 ## 自动构建
 
-推送到 `main`、发起 Pull Request 或在 Actions 页面手动触发 `Build APK` 工作流，即可得到两个构建产物：
+推送到 `main`、发起 Pull Request 或在 Actions 页面手动触发 `Build APK` 工作流，即可得到两个构建产物（工作流会同时运行 `lintDebug` 和单元测试）：
 
 - `minimal-apk-debug`：`app-debug.apk`
 - `minimal-apk-release`：经过 R8 代码压缩与资源裁剪的 `app-release.apk`
@@ -63,7 +63,7 @@ Release 包默认使用本地 debug 签名，可直接安装测试；但该签�
 | `RELEASE_KEY_ALIAS` | 密钥别名 |
 | `RELEASE_KEY_PASSWORD` | 密钥密码 |
 
-在 CI 中，可在仓库 Secrets 配置 `RELEASE_KEYSTORE_BASE64`（keystore 的 Base64 编码）以及上述三个密码/别名变量，工作流会自动解码并启用正式签名；未配置时回退到 debug 签名。
+在 CI 中，可在仓库 Secrets 配置 `RELEASE_KEYSTORE_BASE64`（keystore 的 Base64 编码）以及上述三个密码/别名变量，工作流会自动解码并启用正式签名；未配置时回退到 debug 签名。四个变量必须全部配置或全部留空，只配置一部分会让构建直接失败，避免误发布使用 debug 签名的 release 包。
 
 ## 自定义
 

@@ -7,11 +7,17 @@ val releaseStorePath = System.getenv("RELEASE_STORE_FILE")
 val releaseStorePassword = System.getenv("RELEASE_STORE_PASSWORD")
 val releaseKeyAlias = System.getenv("RELEASE_KEY_ALIAS")
 val releaseKeyPassword = System.getenv("RELEASE_KEY_PASSWORD")
-val releaseSigningReady =
-    releaseStorePath != null &&
-        releaseStorePassword != null &&
-        releaseKeyAlias != null &&
-        releaseKeyPassword != null
+val releaseSigningCount = listOf(
+    releaseStorePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).count { !it.isNullOrBlank() }
+check(releaseSigningCount == 0 || releaseSigningCount == 4) {
+    "Release signing is partially configured: set RELEASE_STORE_FILE, RELEASE_STORE_PASSWORD, " +
+        "RELEASE_KEY_ALIAS and RELEASE_KEY_PASSWORD together, or none of them."
+}
+val releaseSigningReady = releaseSigningCount == 4
 
 android {
     namespace = "com.example.minimalapk"
@@ -70,11 +76,9 @@ dependencies {
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
 
     implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.androidx.compose.material3)
 
@@ -82,5 +86,5 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
 
-    debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 }

@@ -40,8 +40,8 @@ jobs:
           echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
           echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
-      - name: Build debug and release APKs
-        run: ./gradlew assembleDebug assembleRelease --build-cache --parallel --console=plain
+      - name: Build, lint, and test
+        run: ./gradlew assembleDebug assembleRelease lintDebug testDebugUnitTest --build-cache --parallel --console=plain
 
       - name: Show APK sizes
         run: ls -lh app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk

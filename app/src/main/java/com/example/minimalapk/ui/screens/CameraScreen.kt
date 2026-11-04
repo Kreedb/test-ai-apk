@@ -38,6 +38,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -46,24 +47,23 @@ import kotlin.coroutines.resumeWithException
 @Composable
 fun CameraScreen() {
     val context = LocalContext.current
-    var granted by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-                PackageManager.PERMISSION_GRANTED,
-        )
-    }
+    var granted by remember { mutableStateOf(context.hasCameraPermission()) }
     var permanentlyDenied by remember { mutableStateOf(false) }
+    var requested by remember { mutableStateOf(false) }
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { result ->
+            requested = true
             granted = result
-            if (!result) {
-                val activity = context.findActivity()
-                permanentlyDenied = activity != null &&
-                    !activity.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)
-            }
+            permanentlyDenied = context.cameraPermanentlyDenied(result, requested = true)
         },
     )
+
+    LifecycleResumeEffect(Unit) {
+        granted = context.hasCameraPermission()
+        permanentlyDenied = context.cameraPermanentlyDenied(granted, requested)
+        onPauseOrDispose { }
+    }
 
     LaunchedEffect(Unit) {
         if (!granted) {
@@ -176,6 +176,24 @@ private fun CameraPreview(modifier: Modifier = Modifier) {
         }
     }
 }
+
+private fun Context.hasCameraPermission(): Boolean =
+    ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+        PackageManager.PERMISSION_GRANTED
+
+private fun Context.cameraPermanentlyDenied(granted: Boolean, requested: Boolean): Boolean =
+    isCameraPermanentlyDenied(
+        granted = granted,
+        requested = requested,
+        shouldShowRationale = findActivity()
+            ?.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA),
+    )
+
+internal fun isCameraPermanentlyDenied(
+    granted: Boolean,
+    requested: Boolean,
+    shouldShowRationale: Boolean?,
+): Boolean = !granted && requested && shouldShowRationale == false
 
 private suspend fun Context.awaitCameraProvider(): ProcessCameraProvider =
     suspendCancellableCoroutine { continuation ->
