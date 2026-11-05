@@ -20,13 +20,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.minimalapk.BuildConfig
 
 @Composable
-fun StatusScreen() {
+fun HomeScreen() {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -34,10 +33,18 @@ fun StatusScreen() {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        ScreenHeader(
-            title = "状态",
-            subtitle = "当前运行信息一览",
-        )
+        Column {
+            Text(
+                text = "首页",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "极简模板",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column(
@@ -48,17 +55,17 @@ fun StatusScreen() {
                     Box(
                         modifier = Modifier
                             .size(12.dp)
-                            .background(Color(0xFF2E7D32), CircleShape),
+                            .background(MaterialTheme.colorScheme.primary, CircleShape),
                     )
                     Text(
-                        text = "运行中",
+                        text = "模板已就绪",
                         modifier = Modifier.padding(start = 8.dp),
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
                 Text(
-                    text = "模板已就绪，可在此基础上扩展自己的功能。",
+                    text = "只有一个首页的纯壳模板，可在此基础上扩展自己的功能。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
