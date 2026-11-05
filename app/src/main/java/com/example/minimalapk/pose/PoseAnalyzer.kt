@@ -140,22 +140,19 @@ class PoseAnalyzer(context: Context) : AutoCloseable {
         return inputData
     }
 
-    // NNAPI dispatches supported ops to the vendor's GPU/NPU driver; the rest stay on ORT CPU.
-    // NNAPI needs API 27+, CPU_DISABLED needs 29+, and a device may still reject the EP,
-    // so fall back to a plain CPU session when creation fails.
+    // Try every EP that ships with onnxruntime-android, strongest first, and keep the first
+    // session that builds. NNAPI targets vendor GPU/NPU (API 27+; CPU_DISABLED needs 29+),
+    // WebGPU targets the GPU through Vulkan/Dawn, and XNNPACK accelerates CPU kernels.
+    // A device may reject an EP, so fall back to a plain CPU session if all of them fail.
     private fun loadSession(bytes: ByteArray): LoadedSession {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                EnumSet.of(NNAPIFlags.CPU_DISABLED)
-            } else {
-                EnumSet.noneOf(NNAPIFlags::class.java)
-            }
+        for (backend in backends) {
+            if (Build.VERSION.SDK_INT < backend.minSdk) continue
             runCatching {
                 OrtSession.SessionOptions().use { options ->
-                    options.addNnapi(flags)
+                    backend.add(options)
                     environment.createSession(bytes, options)
                 }
-            }.onSuccess { return LoadedSession(it, "NNAPI") }
+            }.onSuccess { return LoadedSession(it, backend.name) }
         }
         val session = OrtSession.SessionOptions().use { environment.createSession(bytes, it) }
         return LoadedSession(session, "CPU")
@@ -163,7 +160,41 @@ class PoseAnalyzer(context: Context) : AutoCloseable {
 
     private data class LoadedSession(val session: OrtSession, val provider: String)
 
+    private class Backend(
+        val name: String,
+        val minSdk: Int,
+        val add: (OrtSession.SessionOptions) -> Unit,
+    )
+
     companion object {
         const val MODEL_ASSET = "models/yolo26n-pose.onnx"
+
+        private val backends = listOf(
+            Backend("NNAPI", Build.VERSION_CODES.O_MR1) { options ->
+                options.addNnapi(
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        EnumSet.of(NNAPIFlags.CPU_DISABLED)
+                    } else {
+                        EnumSet.noneOf(NNAPIFlags::class.java)
+                    },
+                )
+            },
+            Backend("WebGPU", Build.VERSION_CODES.N) { it.addWebGPU(emptyMap()) },
+            // XNNPACK keeps its own thread pool, so disable ORT intra-op spinning and give
+            // XNNPACK the CPU cores, per the ORT XNNPACK provider's recommended config.
+            Backend("XNNPACK", Build.VERSION_CODES.N) { options ->
+                options.addConfigEntry("session.intra_op.allow_spinning", "0")
+                options.setIntraOpNumThreads(1)
+                options.addXnnpack(
+                    mapOf(
+                        "intra_op_num_threads" to
+                            Runtime.getRuntime().availableProcessors().toString(),
+                    ),
+                )
+            },
+        )
+
+        internal fun backendNames(apiLevel: Int): List<String> =
+            backends.filter { apiLevel >= it.minSdk }.map { it.name }
     }
 }
