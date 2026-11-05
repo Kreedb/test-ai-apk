@@ -15,9 +15,20 @@ import java.nio.FloatBuffer
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+private fun Long.nanosToMillis(): Float = this / 1_000_000f
+
+data class PoseTimings(
+    val preprocessMs: Float,
+    val inferenceMs: Float,
+    val postprocessMs: Float,
+) {
+    val totalMs: Float get() = preprocessMs + inferenceMs + postprocessMs
+}
+
 data class PoseFrame(
     val bitmap: Bitmap,
     val detections: List<PoseDetection>,
+    val timings: PoseTimings,
 )
 
 class PoseAnalyzer(context: Context) : AutoCloseable {
@@ -37,9 +48,23 @@ class PoseAnalyzer(context: Context) : AutoCloseable {
 
     fun analyze(source: Bitmap, rotationDegrees: Int): PoseFrame = synchronized(lock) {
         check(!closed) { "PoseAnalyzer is closed" }
+        val start = System.nanoTime()
         val input = createInput(source, rotationDegrees)
-        val output = runModel(input.toFloatArray())
-        PoseFrame(input, PoseDecoder.decode(output))
+        val features = input.toFloatArray()
+        val preprocessed = System.nanoTime()
+        val output = runModel(features)
+        val inferred = System.nanoTime()
+        val detections = PoseDecoder.decode(output)
+        val finished = System.nanoTime()
+        PoseFrame(
+            bitmap = input,
+            detections = detections,
+            timings = PoseTimings(
+                preprocessMs = (preprocessed - start).nanosToMillis(),
+                inferenceMs = (inferred - preprocessed).nanosToMillis(),
+                postprocessMs = (finished - inferred).nanosToMillis(),
+            ),
+        )
     }
 
     override fun close() {

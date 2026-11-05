@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -51,17 +52,23 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.minimalapk.pose.DeviceUsage
+import com.example.minimalapk.pose.DeviceUsageSampler
 import com.example.minimalapk.pose.PoseAnalyzer
 import com.example.minimalapk.pose.PoseDetection
 import com.example.minimalapk.pose.PoseFrame
 import com.example.minimalapk.pose.PoseMeasurement
 import com.example.minimalapk.pose.PoseNet
+import com.example.minimalapk.pose.PoseTimings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -164,10 +171,28 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
     val lifecycleOwner = LocalLifecycleOwner.current
     var frame by remember { mutableStateOf<PoseFrame?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var fps by remember { mutableFloatStateOf(0f) }
+    var usage by remember { mutableStateOf(DeviceUsage()) }
+    val frameTimes = remember { ArrayDeque<Long>() }
+    val usageSampler = remember { DeviceUsageSampler() }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
 
     DisposableEffect(Unit) {
         onDispose { analysisExecutor.shutdown() }
+    }
+
+    LaunchedEffect(lifecycleOwner) {
+        while (isActive) {
+            if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                usage = withContext(Dispatchers.IO) { usageSampler.sample() }
+                fps = frameRate(frameTimes, System.nanoTime())
+            } else {
+                usageSampler.reset()
+                frameTimes.clear()
+                fps = 0f
+            }
+            delay(1_000L)
+        }
     }
 
     LaunchedEffect(lifecycleOwner) {
@@ -213,9 +238,12 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
                     } finally {
                         bitmap.recycle()
                     }
+                    val completedNanos = System.nanoTime()
                     mainExecutor.execute {
                         errorMessage = null
                         frame = result
+                        frameTimes.addLast(completedNanos)
+                        fps = frameRate(frameTimes, completedNanos)
                     }
                 } catch (e: Exception) {
                     mainExecutor.execute { errorMessage = e.message ?: "姿态推理失败" }
@@ -263,6 +291,14 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
             PoseOverlay(
                 detection = detection,
                 modifier = Modifier.fillMaxSize(),
+            )
+            MetricsPanel(
+                fps = fps,
+                timings = current.timings,
+                usage = usage,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp),
             )
         } else if (errorMessage == null) {
             Text(
@@ -322,6 +358,38 @@ private fun MeasurementLine(text: String, color: Color = Color.White) {
 }
 
 @Composable
+private fun MetricsPanel(
+    fps: Float,
+    timings: PoseTimings,
+    usage: DeviceUsage,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        MetricLine("帧率", if (fps > 0f) "${format(fps)} FPS" else "—")
+        MetricLine("推理", "${format(timings.inferenceMs)} ms")
+        MetricLine("预处理", "${format(timings.preprocessMs)} ms")
+        MetricLine("总耗时", "${format(timings.totalMs)} ms")
+        MetricLine("CPU(应用)", formatPercent(usage.cpuPercent))
+        MetricLine("GPU", formatPercent(usage.gpuPercent))
+        MetricLine("NPU", formatPercent(usage.npuPercent))
+    }
+}
+
+@Composable
+private fun MetricLine(label: String, value: String) {
+    Text(
+        text = "$label $value",
+        style = MaterialTheme.typography.labelSmall,
+        color = Color.White,
+    )
+}
+
+@Composable
 private fun PoseOverlay(detection: PoseDetection?, modifier: Modifier = Modifier) {
     Canvas(modifier) {
         if (detection == null) return@Canvas
@@ -354,6 +422,21 @@ private fun PoseOverlay(detection: PoseDetection?, modifier: Modifier = Modifier
 }
 
 private fun format(value: Float): String = String.format(Locale.US, "%.1f", value)
+
+private fun formatPercent(value: Float?): String =
+    if (value != null) "${format(value)}%" else "N/A"
+
+private fun frameRate(timestamps: ArrayDeque<Long>, nowNanos: Long): Float {
+    while (timestamps.size > 1 && nowNanos - timestamps.first() > FPS_WINDOW_NANOS) {
+        timestamps.removeFirst()
+    }
+    if (timestamps.size < 2) return 0f
+    val spanNanos = (nowNanos - timestamps.first()).toFloat()
+    if (spanNanos <= 0f) return 0f
+    return (timestamps.size - 1) * 1_000_000_000f / spanNanos
+}
+
+private const val FPS_WINDOW_NANOS = 2_000_000_000L
 
 private fun Context.hasCameraPermission(): Boolean =
     ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
