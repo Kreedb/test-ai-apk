@@ -11,7 +11,7 @@
 | 状态 | 显示运行状态、应用版本、设备型号、系统版本与 ABI |
 | 相机 | 基于 CameraX 的后置摄像头实时预览，含权限申请 |
 | 插件 | 插件列表占位示例，可开关 |
-| 配置 | 自动更新、详细日志、服务端地址等设置占位 |
+| 设置 | 主题设置与关于 |
 
 ## 项目结构
 
@@ -20,7 +20,9 @@ app/src/main/java/com/example/minimalapk/
 ├── MainActivity.kt
 └── ui/
     ├── MinimalApkApp.kt          # 底栏与页面切换
-    ├── theme/Theme.kt            # Material 3 主题
+    ├── theme/
+    │   ├── Theme.kt              # Material 3 主题
+    │   └── ThemeMode.kt          # 主题模式持久化
     └── screens/
         ├── Common.kt             # 共用组件
         ├── StatusScreen.kt
