@@ -96,6 +96,7 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
 
     implementation(libs.onnxruntime.android)
+    implementation(libs.material.kolor)
 
     testImplementation(libs.junit)
 }

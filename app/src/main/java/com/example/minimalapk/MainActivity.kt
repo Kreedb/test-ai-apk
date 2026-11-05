@@ -8,21 +8,21 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import com.example.minimalapk.ui.MinimalApkApp
 import com.example.minimalapk.ui.theme.MinimalApkTheme
-import com.example.minimalapk.ui.theme.ThemeMode
+import com.example.minimalapk.ui.theme.ThemeSettings
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            var themeMode by rememberSaveable { mutableStateOf(ThemeMode.load(this)) }
-            val darkTheme = themeMode.isDark(isSystemInDarkTheme())
+            var themeSettings by remember { mutableStateOf(ThemeSettings.load(this)) }
+            val darkTheme = themeSettings.mode.isDark(isSystemInDarkTheme())
             val view = LocalView.current
 
             if (!view.isInEditMode) {
@@ -34,12 +34,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            MinimalApkTheme(darkTheme = darkTheme) {
+            MinimalApkTheme(settings = themeSettings) {
                 MinimalApkApp(
-                    themeMode = themeMode,
-                    onThemeModeChange = { mode ->
-                        themeMode = mode
-                        ThemeMode.save(this, mode)
+                    themeSettings = themeSettings,
+                    onThemeSettingsChange = { settings ->
+                        themeSettings = settings
+                        ThemeSettings.save(this, settings)
                     },
                 )
             }

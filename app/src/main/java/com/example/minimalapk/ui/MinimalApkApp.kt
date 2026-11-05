@@ -25,7 +25,7 @@ import com.example.minimalapk.ui.screens.CameraScreen
 import com.example.minimalapk.ui.screens.ConfigScreen
 import com.example.minimalapk.ui.screens.PluginsScreen
 import com.example.minimalapk.ui.screens.StatusScreen
-import com.example.minimalapk.ui.theme.ThemeMode
+import com.example.minimalapk.ui.theme.ThemeSettings
 
 private class Tab(
     val label: String,
@@ -41,8 +41,8 @@ private val tabs = listOf(
 
 @Composable
 fun MinimalApkApp(
-    themeMode: ThemeMode,
-    onThemeModeChange: (ThemeMode) -> Unit,
+    themeSettings: ThemeSettings,
+    onThemeSettingsChange: (ThemeSettings) -> Unit,
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     val stateHolder = rememberSaveableStateHolder()
@@ -72,8 +72,8 @@ fun MinimalApkApp(
                     1 -> CameraScreen()
                     2 -> PluginsScreen()
                     3 -> ConfigScreen(
-                        themeMode = themeMode,
-                        onThemeModeChange = onThemeModeChange,
+                        themeSettings = themeSettings,
+                        onThemeSettingsChange = onThemeSettingsChange,
                     )
                 }
             }
