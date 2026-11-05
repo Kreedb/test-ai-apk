@@ -48,7 +48,7 @@ app/src/main/java/com/example/minimalapk/
 - `app/build/outputs/apk/debug/app-debug.apk`
 - `app/build/outputs/apk/release/app-release.apk`
 
-需要 JDK 17 与 Android SDK（`compileSdk = 37`）。Gradle 配置已启用构建缓存与配置缓存，重复构建会明显加快。
+需要 JDK 21 与 Android SDK（`compileSdk = 37`）。Gradle 配置已启用构建缓存与配置缓存，重复构建会明显加快。
 
 ## Release 签名
 
