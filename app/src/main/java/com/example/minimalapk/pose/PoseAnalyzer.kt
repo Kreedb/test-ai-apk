@@ -3,6 +3,7 @@ package com.example.minimalapk.pose
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.providers.NNAPIFlags
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -10,8 +11,10 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
+import android.os.Build
 import androidx.core.graphics.createBitmap
 import java.nio.FloatBuffer
+import java.util.EnumSet
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -33,12 +36,11 @@ data class PoseFrame(
 
 class PoseAnalyzer(context: Context) : AutoCloseable {
     private val environment = OrtEnvironment.getEnvironment()
-    private val session: OrtSession = context.assets.open(MODEL_ASSET).use { asset ->
-        val bytes = asset.readBytes()
-        OrtSession.SessionOptions().use { options ->
-            environment.createSession(bytes, options)
-        }
+    private val loaded = context.assets.open(MODEL_ASSET).use { asset ->
+        loadSession(asset.readBytes())
     }
+    private val session = loaded.session
+    val executionProvider: String = loaded.provider
     private val inputName = session.inputNames.first()
     private val lock = Any()
     private var closed = false
@@ -137,6 +139,29 @@ class PoseAnalyzer(context: Context) : AutoCloseable {
         }
         return inputData
     }
+
+    // NNAPI dispatches supported ops to the vendor's GPU/NPU driver; the rest stay on ORT CPU.
+    // NNAPI needs API 27+, CPU_DISABLED needs 29+, and a device may still reject the EP,
+    // so fall back to a plain CPU session when creation fails.
+    private fun loadSession(bytes: ByteArray): LoadedSession {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                EnumSet.of(NNAPIFlags.CPU_DISABLED)
+            } else {
+                EnumSet.noneOf(NNAPIFlags::class.java)
+            }
+            runCatching {
+                OrtSession.SessionOptions().use { options ->
+                    options.addNnapi(flags)
+                    environment.createSession(bytes, options)
+                }
+            }.onSuccess { return LoadedSession(it, "NNAPI") }
+        }
+        val session = OrtSession.SessionOptions().use { environment.createSession(bytes, it) }
+        return LoadedSession(session, "CPU")
+    }
+
+    private data class LoadedSession(val session: OrtSession, val provider: String)
 
     companion object {
         const val MODEL_ASSET = "models/yolo26n-pose.onnx"

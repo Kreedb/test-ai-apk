@@ -36,6 +36,7 @@ app/src/main/java/com/example/minimalapk/
 相机页集成了 [Ultralytics YOLO26n-pose](https://docs.ultralytics.com) 的 ONNX 模型，模型文件位于 `app/src/main/assets/models/yolo26n-pose.onnx`，通过 ONNX Runtime 在设备端完成推理，运行过程不需要网络。
 
 - 模型输入为 `1x3x640x640`，输出为 `1x300x57`（框、置信度、类别与 17 个 COCO 关键点），推理后按置信度过滤。
+- 推理优先注册 ONNX Runtime 的 NNAPI 执行提供器，由厂商驱动把支持的算子交给 GPU/NPU（需要 Android 8.1+；Android 15 起 NNAPI 已弃用，实际效果取决于设备驱动）。不支持的算子回落到 ORT 的 CPU 内核，NNAPI 会话创建失败时整体回落到 CPU。性能面板中的“加速器”显示本次注册的执行提供器。
 - 输入身高用于把像素换算成厘米：`cm/px = 身高 / 人体检测框高度`，再据此估算臂展、双眼间距、肩线/髋线倾斜与肩髋横向偏移。
 - 使用条件会影响精度：需要全身入镜、正对镜头、双臂平举，且人物应尽量站直。单目 2D 关键点无法给出临床意义上的脊柱侧弯角度，界面结果仅供筛查参考，不能用于医学诊断。
 - 预览右上角显示性能指标：分析帧率、预处理/推理/总耗时，以及 CPU、GPU、NPU 利用率。Android 不向普通应用开放系统级占用：CPU 显示本进程占设备总 CPU 算力的比例（0–100%），GPU/NPU 会尝试读取常见厂商的 sysfs 节点，设备不暴露时显示 `N/A`。

@@ -173,6 +173,7 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var fps by remember { mutableFloatStateOf(0f) }
     var usage by remember { mutableStateOf(DeviceUsage()) }
+    var executionProvider by remember { mutableStateOf<String?>(null) }
     val frameTimes = remember { ArrayDeque<Long>() }
     val usageSampler = remember { DeviceUsageSampler() }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
@@ -212,6 +213,7 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
             errorMessage = e.message ?: "模型加载失败"
             return@LaunchedEffect
         }
+        executionProvider = analyzer.executionProvider
         val mainExecutor = ContextCompat.getMainExecutor(context)
         var analysis: ImageAnalysis? = null
         try {
@@ -296,6 +298,7 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
                 fps = fps,
                 timings = current.timings,
                 usage = usage,
+                executionProvider = executionProvider,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(8.dp),
@@ -362,6 +365,7 @@ private fun MetricsPanel(
     fps: Float,
     timings: PoseTimings,
     usage: DeviceUsage,
+    executionProvider: String?,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -374,6 +378,7 @@ private fun MetricsPanel(
         MetricLine("推理", "${format(timings.inferenceMs)} ms")
         MetricLine("预处理", "${format(timings.preprocessMs)} ms")
         MetricLine("总耗时", "${format(timings.totalMs)} ms")
+        MetricLine("加速器", executionProvider ?: "—")
         MetricLine("CPU(应用)", formatPercent(usage.cpuPercent))
         MetricLine("GPU", formatPercent(usage.gpuPercent))
         MetricLine("NPU", formatPercent(usage.npuPercent))
