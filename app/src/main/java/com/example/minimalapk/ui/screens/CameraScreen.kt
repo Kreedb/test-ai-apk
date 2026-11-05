@@ -57,6 +57,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.minimalapk.pose.DeviceUsage
 import com.example.minimalapk.pose.DeviceUsageSampler
+import com.example.minimalapk.pose.InferenceBackend
 import com.example.minimalapk.pose.PoseAnalyzer
 import com.example.minimalapk.pose.PoseDetection
 import com.example.minimalapk.pose.PoseFrame
@@ -206,7 +207,9 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
             return@LaunchedEffect
         }
         val analyzer = try {
-            withContext(Dispatchers.IO) { PoseAnalyzer(context) }
+            withContext(Dispatchers.IO) {
+                PoseAnalyzer(context, InferenceBackend.load(context))
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

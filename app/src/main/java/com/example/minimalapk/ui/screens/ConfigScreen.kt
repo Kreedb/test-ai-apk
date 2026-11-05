@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
@@ -16,13 +17,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.example.minimalapk.BuildConfig
 import com.example.minimalapk.R
+import com.example.minimalapk.pose.InferenceBackend
 import com.example.minimalapk.ui.theme.ThemeSettings
 
 private enum class SettingsPage {
@@ -36,11 +40,16 @@ fun ConfigScreen(
     themeSettings: ThemeSettings,
     onThemeSettingsChange: (ThemeSettings) -> Unit,
 ) {
+    val context = LocalContext.current
     var page by rememberSaveable { mutableStateOf(SettingsPage.ROOT) }
+    var backend by remember { mutableStateOf(InferenceBackend.load(context)) }
+    var showBackendDialog by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = page != SettingsPage.ROOT) { page = SettingsPage.ROOT }
 
     when (page) {
         SettingsPage.ROOT -> SettingsList(
+            backend = backend,
+            onOpenBackend = { showBackendDialog = true },
             onOpenTheme = { page = SettingsPage.THEME },
             onOpenAbout = { page = SettingsPage.ABOUT },
         )
@@ -53,10 +62,27 @@ fun ConfigScreen(
 
         SettingsPage.ABOUT -> AboutScreen(onBack = { page = SettingsPage.ROOT })
     }
+
+    if (showBackendDialog) {
+        OptionDialog(
+            title = "推理后端",
+            options = InferenceBackend.entries,
+            selected = backend,
+            label = { it.label },
+            onSelect = { selected ->
+                backend = selected
+                InferenceBackend.save(context, selected)
+                showBackendDialog = false
+            },
+            onDismiss = { showBackendDialog = false },
+        )
+    }
 }
 
 @Composable
 private fun SettingsList(
+    backend: InferenceBackend,
+    onOpenBackend: () -> Unit,
     onOpenTheme: () -> Unit,
     onOpenAbout: () -> Unit,
 ) {
@@ -69,11 +95,18 @@ private fun SettingsList(
     ) {
         ScreenHeader(
             title = "设置",
-            subtitle = "主题与关于",
+            subtitle = "推理、主题与关于",
         )
 
         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column {
+                SettingRow(
+                    icon = { Icon(Icons.Filled.Build, contentDescription = null) },
+                    title = "推理后端",
+                    subtitle = backend.label,
+                    onClick = onOpenBackend,
+                )
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                 SettingRow(
                     icon = {
                         Icon(

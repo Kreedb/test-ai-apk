@@ -294,7 +294,7 @@ private fun KeyColorItem(
 }
 
 @Composable
-private fun <T> OptionDialog(
+internal fun <T> OptionDialog(
     title: String,
     options: List<T>,
     selected: T,

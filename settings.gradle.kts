@@ -11,6 +11,10 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // The AoE ncnn runtime was published to JCenter; this mirror still serves it.
+        maven("https://repo.huaweicloud.com/repository/maven/") {
+            content { includeGroup("com.didi.aoe") }
+        }
     }
 }
 
