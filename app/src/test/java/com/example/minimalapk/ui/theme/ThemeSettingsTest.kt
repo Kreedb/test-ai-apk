@@ -25,9 +25,17 @@ class ThemeSettingsTest {
     }
 
     @Test
-    fun amoledIsDark() {
-        assertTrue(ThemeMode.DARK_AMOLED.isDark(false))
+    fun modesResolveDarkMode() {
+        assertTrue(ThemeMode.DARK.isDark(false))
         assertFalse(ThemeMode.LIGHT.isDark(true))
         assertTrue(ThemeMode.SYSTEM.isDark(true))
+    }
+
+    @Test
+    fun storedModeFallsBackAndMigratesAmoled() {
+        assertEquals(ThemeMode.LIGHT, themeModeFromStorage("LIGHT"))
+        assertEquals(ThemeMode.DARK, themeModeFromStorage("DARK_AMOLED"))
+        assertEquals(ThemeMode.SYSTEM, themeModeFromStorage("unknown"))
+        assertEquals(ThemeMode.SYSTEM, themeModeFromStorage(null))
     }
 }

@@ -31,6 +31,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -44,11 +47,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
-import com.example.minimalapk.R
 import com.example.minimalapk.ui.theme.ThemeMode
 import com.example.minimalapk.ui.theme.ThemeSettings
 import com.example.minimalapk.ui.theme.label
@@ -80,7 +80,6 @@ fun ThemeSettingsScreen(
     onSettingsChange: (ThemeSettings) -> Unit,
     onBack: () -> Unit,
 ) {
-    var showModeDialog by rememberSaveable { mutableStateOf(false) }
     var showStyleDialog by rememberSaveable { mutableStateOf(false) }
     var showSpecDialog by rememberSaveable { mutableStateOf(false) }
 
@@ -94,6 +93,30 @@ fun ThemeSettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             ThemePreview(settings)
+
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                ThemeMode.entries.forEachIndexed { index, mode ->
+                    SegmentedButton(
+                        selected = settings.mode == mode,
+                        onClick = { onSettingsChange(settings.copy(mode = mode)) },
+                        shape = SegmentedButtonDefaults.itemShape(
+                            index = index,
+                            count = ThemeMode.entries.size,
+                        ),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = MaterialTheme.colorScheme.primary,
+                            activeContentColor = MaterialTheme.colorScheme.onPrimary,
+                            activeBorderColor = MaterialTheme.colorScheme.primary,
+                            inactiveContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            inactiveContentColor = MaterialTheme.colorScheme.onSurface,
+                            inactiveBorderColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        ),
+                        icon = {},
+                    ) {
+                        Text(text = mode.label())
+                    }
+                }
+            }
 
             Column {
                 Text(text = "主题颜色", style = MaterialTheme.typography.titleMedium)
@@ -121,18 +144,6 @@ fun ThemeSettingsScreen(
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column {
                     SettingRow(
-                        icon = {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_palette),
-                                contentDescription = null,
-                            )
-                        },
-                        title = "主题模式",
-                        subtitle = settings.mode.label(),
-                        onClick = { showModeDialog = true },
-                    )
-                    HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                    SettingRow(
                         title = "色彩风格",
                         subtitle = settings.paletteStyle.name,
                         onClick = { showStyleDialog = true },
@@ -148,20 +159,6 @@ fun ThemeSettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
         }
-    }
-
-    if (showModeDialog) {
-        OptionDialog(
-            title = "主题模式",
-            options = ThemeMode.entries,
-            selected = settings.mode,
-            label = { it.label() },
-            onSelect = {
-                onSettingsChange(settings.copy(mode = it))
-                showModeDialog = false
-            },
-            onDismiss = { showModeDialog = false },
-        )
     }
 
     if (showStyleDialog) {
@@ -211,7 +208,7 @@ private fun ThemePreview(settings: ThemeSettings) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = stringResource(R.string.app_name),
+                text = "配色预览",
                 style = MaterialTheme.typography.titleMedium,
                 color = colorScheme.onSurface,
             )

@@ -8,24 +8,27 @@ import com.materialkolor.dynamiccolor.ColorSpec
 enum class ThemeMode {
     SYSTEM,
     LIGHT,
-    DARK,
-    DARK_AMOLED;
+    DARK;
 
     fun isDark(systemInDarkTheme: Boolean): Boolean = when (this) {
         SYSTEM -> systemInDarkTheme
         LIGHT -> false
-        DARK, DARK_AMOLED -> true
+        DARK -> true
     }
-
-    val isAmoled: Boolean get() = this == DARK_AMOLED
 }
 
 fun ThemeMode.label(): String = when (this) {
     ThemeMode.SYSTEM -> "跟随系统"
     ThemeMode.LIGHT -> "浅色"
     ThemeMode.DARK -> "深色"
-    ThemeMode.DARK_AMOLED -> "纯黑"
 }
+
+internal fun themeModeFromStorage(value: String?): ThemeMode =
+    if (value == "DARK_AMOLED") {
+        ThemeMode.DARK
+    } else {
+        value?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
+    } ?: ThemeMode.SYSTEM
 
 data class ThemeSettings(
     val mode: ThemeMode = ThemeMode.SYSTEM,
@@ -42,9 +45,7 @@ data class ThemeSettings(
 
         fun load(context: Context): ThemeSettings {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val mode = prefs.getString(KEY_THEME_MODE, null)
-                ?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
-                ?: ThemeMode.SYSTEM
+            val mode = themeModeFromStorage(prefs.getString(KEY_THEME_MODE, null))
             val paletteStyle = prefs.getString(KEY_COLOR_STYLE, null)
                 ?.let { runCatching { PaletteStyle.valueOf(it) }.getOrNull() }
                 ?: PaletteStyle.TonalSpot
