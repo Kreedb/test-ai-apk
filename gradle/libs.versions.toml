@@ -6,6 +6,7 @@ coreKtx = "1.19.1"
 activityCompose = "1.13.0"
 lifecycle = "2.11.0"
 camera = "1.6.2"
+onnxruntime = "1.31.1"
 junit = "4.13.2"
 
 [libraries]
@@ -19,8 +20,10 @@ androidx-compose-material-icons-core = { module = "androidx.compose.material:mat
 androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
 
 androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camera" }
+androidx-camera-core = { module = "androidx.camera:camera-core", version.ref = "camera" }
 androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camera" }
-androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "camera" }
+
+onnxruntime-android = { module = "com.microsoft.onnxruntime:onnxruntime-android", version.ref = "onnxruntime" }
 
 junit = { module = "junit:junit", version.ref = "junit" }
 

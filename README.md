@@ -9,7 +9,7 @@
 | 选项卡 | 内容 |
 | --- | --- |
 | 状态 | 显示运行状态、应用版本、设备型号、系统版本与 ABI |
-| 相机 | 基于 CameraX 的后置摄像头实时预览，含权限申请 |
+| 相机 | 基于 CameraX 的后置摄像头实时预览，内置 YOLO26-pose 离线姿态测量 |
 | 插件 | 插件列表占位示例，可开关 |
 | 配置 | 自动更新、详细日志、服务端地址等设置占位 |
 
@@ -29,12 +29,21 @@ app/src/main/java/com/example/minimalapk/
         └── ConfigScreen.kt
 ```
 
+## 姿态测量（YOLO26-pose）
+
+相机页集成了 [Ultralytics YOLO26n-pose](https://docs.ultralytics.com) 的 ONNX 模型，模型文件位于 `app/src/main/assets/models/yolo26n-pose.onnx`，通过 ONNX Runtime 在设备端完成推理，运行过程不需要网络。
+
+- 模型输入为 `1x3x640x640`，输出为 `1x300x57`（框、置信度、类别与 17 个 COCO 关键点），推理后按置信度过滤。
+- 输入身高用于把像素换算成厘米：`cm/px = 身高 / 人体检测框高度`，再据此估算臂展、双眼间距、肩线/髋线倾斜与肩髋横向偏移。
+- 使用条件会影响精度：需要全身入镜、正对镜头、双臂平举，且人物应尽量站直。单目 2D 关键点无法给出临床意义上的脊柱侧弯角度，界面结果仅供筛查参考，不能用于医学诊断。
+- 模型来自 Ultralytics，许可为 AGPL-3.0；许可全文与模型来源见 `app/src/main/assets/models/NOTICE.txt` 和 `app/src/main/assets/models/LICENSE-AGPL-3.0.txt`。
+
 ## 自动构建
 
-推送到 `main`、发起 Pull Request 或在 Actions 页面手动触发 `Build APK` 工作流，即可得到两个构建产物（工作流会同时运行 `lintDebug` 和单元测试）：
+推送到 `main`、发起 Pull Request 或在 Actions 页面手动触发 `Build APK` 工作流，即可得到构建产物（工作流会同时运行 `lintDebug` 和单元测试）。APK 按 ABI 拆分为 `arm64-v8a` 与 `x86_64` 两个包，避免把 ONNX Runtime 的全部原生库都打进一个包：
 
-- `minimal-apk-debug`：`app-debug.apk`
-- `minimal-apk-release`：经过 R8 代码压缩与资源裁剪的 `app-release.apk`
+- `minimal-apk-debug`：`app-arm64-v8a-debug.apk`、`app-x86_64-debug.apk`
+- `minimal-apk-release`：经过 R8 代码压缩与资源裁剪的 `app-arm64-v8a-release.apk`、`app-x86_64-release.apk`
 - `minimal-apk-release-mapping`：release 的 `mapping.txt`，用于还原混淆后的崩溃堆栈
 
 ## 本地构建
@@ -45,8 +54,10 @@ app/src/main/java/com/example/minimalapk/
 
 产物位于：
 
-- `app/build/outputs/apk/debug/app-debug.apk`
-- `app/build/outputs/apk/release/app-release.apk`
+- `app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`、`app/build/outputs/apk/debug/app-x86_64-debug.apk`
+- `app/build/outputs/apk/release/app-arm64-v8a-release.apk`、`app/build/outputs/apk/release/app-x86_64-release.apk`
+
+默认只构建 `arm64-v8a` 与 `x86_64`，以控制 ONNX Runtime 原生库带来的体积；如需支持 32 位设备，在 `app/build.gradle.kts` 的 `splits.abi.include` 中补充对应 ABI。
 
 需要 JDK 21 与 Android SDK（`compileSdk = 37`）。Gradle 配置已启用构建缓存与配置缓存，重复构建会明显加快。
 
