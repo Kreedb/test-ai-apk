@@ -7,7 +7,12 @@ internal object NcnnPose {
         System.loadLibrary("ncnnpose")
     }
 
-    external fun create(assets: AssetManager, paramAsset: String, modelAsset: String): Long
+    external fun create(
+        assets: AssetManager,
+        paramAsset: String,
+        modelAsset: String,
+        useGpu: Boolean,
+    ): Long
 
     external fun analyze(handle: Long, pixels: IntArray): FloatArray
 

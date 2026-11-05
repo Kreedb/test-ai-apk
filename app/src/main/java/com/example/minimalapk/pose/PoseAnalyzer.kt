@@ -7,7 +7,11 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
+import android.util.Log
 import androidx.core.graphics.createBitmap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -27,8 +31,7 @@ data class PoseFrame(
     val timings: PoseTimings,
 )
 
-class PoseAnalyzer(context: Context) : AutoCloseable {
-    private val handle = NcnnPose.create(context.assets, PARAM_ASSET, MODEL_ASSET)
+class PoseAnalyzer private constructor(private val handle: Long) : AutoCloseable {
     val executionProvider: String =
         if (NcnnPose.isGpuEnabled(handle)) "ncnn (Vulkan)" else "ncnn (CPU)"
     private val lock = Any()
@@ -119,5 +122,48 @@ class PoseAnalyzer(context: Context) : AutoCloseable {
     companion object {
         const val PARAM_ASSET = "models/yolo26n_pose.ncnn.param"
         const val MODEL_ASSET = "models/yolo26n_pose.ncnn.bin"
+
+        private const val TAG = "PoseAnalyzer"
+        private const val GPU_LOAD_TIMEOUT_MS = 10_000L
+
+        // Some Vulkan drivers block inside model loading forever. Skipping Vulkan for the rest of
+        // the process keeps later camera visits from starting another stuck load.
+        @Volatile
+        private var gpuAvailable = true
+        private val openLock = Any()
+
+        fun open(context: Context): PoseAnalyzer = synchronized(openLock) {
+            val gpu = if (gpuAvailable) {
+                loadWithTimeout { NcnnPose.create(context.assets, PARAM_ASSET, MODEL_ASSET, true) }
+            } else {
+                0L
+            }
+            if (gpu != 0L) return PoseAnalyzer(gpu)
+
+            gpuAvailable = false
+            val handle = NcnnPose.create(context.assets, PARAM_ASSET, MODEL_ASSET, false)
+            check(handle != 0L) { "无法加载 ncnn 模型" }
+            PoseAnalyzer(handle)
+        }
+
+        private fun loadWithTimeout(load: () -> Long): Long {
+            val executor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "ncnn-gpu-load").apply { isDaemon = true }
+            }
+            val future = executor.submit<Long> { load() }
+            return try {
+                future.get(GPU_LOAD_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            } catch (e: TimeoutException) {
+                // The blocked call cannot be interrupted; a late result is abandoned (one net
+                // leaked per process).
+                Log.w(TAG, "Vulkan model load timed out, falling back to CPU")
+                0L
+            } catch (e: Exception) {
+                Log.w(TAG, "Vulkan model load failed, falling back to CPU", e)
+                0L
+            } finally {
+                executor.shutdown()
+            }
+        }
     }
 }

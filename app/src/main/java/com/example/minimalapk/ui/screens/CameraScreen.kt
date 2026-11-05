@@ -206,7 +206,7 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
             return@LaunchedEffect
         }
         val analyzer = try {
-            withContext(Dispatchers.IO) { PoseAnalyzer(context) }
+            withContext(Dispatchers.IO) { PoseAnalyzer.open(context) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

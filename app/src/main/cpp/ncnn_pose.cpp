@@ -7,8 +7,6 @@
 #include <gpu.h>
 #include <net.h>
 
-#include <pthread.h>
-
 #include <vector>
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "ncnnpose", __VA_ARGS__)
@@ -31,12 +29,6 @@ const char* getUtf(JNIEnv* env, jstring value) {
     return value == nullptr ? nullptr : env->GetStringUTFChars(value, nullptr);
 }
 
-void createGpuInstance() {
-    ncnn::create_gpu_instance();
-}
-
-pthread_once_t gpu_instance_once = PTHREAD_ONCE_INIT;
-
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -45,7 +37,8 @@ Java_com_example_minimalapk_pose_NcnnPose_create(
     jobject,
     jobject assetManager,
     jstring paramAsset,
-    jstring modelAsset) {
+    jstring modelAsset,
+    jboolean useGpu) {
     AAssetManager* manager = AAssetManager_fromJava(env, assetManager);
     if (manager == nullptr) {
         throwIllegalState(env, "AssetManager is unavailable");
@@ -61,12 +54,9 @@ Java_com_example_minimalapk_pose_NcnnPose_create(
         return 0;
     }
 
-    // ncnn's Vulkan instance is process-wide: create it once and keep it for the app lifetime.
-    pthread_once(&gpu_instance_once, createGpuInstance);
-
     auto* net = new ncnn::Net();
-    // Without a Vulkan device ncnn stays on CPU instead of failing to load the model.
-    net->opt.use_vulkan_compute = ncnn::get_gpu_count() > 0;
+    // useGpu is false for the CPU fallback, so the short-circuit keeps that path off Vulkan.
+    net->opt.use_vulkan_compute = useGpu && ncnn::get_gpu_count() > 0;
 
     int result = net->load_param(manager, paramPath);
     if (result == 0) {
