@@ -2,6 +2,7 @@ package com.example.minimalapk.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -10,6 +11,9 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import com.materialkolor.PaletteStyle
+import com.materialkolor.dynamiccolor.ColorSpec
+import com.materialkolor.rememberDynamicColorScheme
 
 private val LightColors = lightColorScheme(
     primary = Color(0xFF2E7D32),
@@ -25,18 +29,58 @@ private val DarkColors = darkColorScheme(
 
 @Composable
 fun MinimalApkTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    settings: ThemeSettings,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColors
-        else -> LightColors
+    val darkTheme = settings.mode.isDark(isSystemInDarkTheme())
+    MaterialTheme(colorScheme = rememberThemeColorScheme(settings, darkTheme), content = content)
+}
+
+@Composable
+fun rememberThemeColorScheme(settings: ThemeSettings, darkTheme: Boolean): ColorScheme {
+    val context = LocalContext.current
+    val dynamicSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val dynamicSeed = if (dynamicSupported) {
+        (if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)).primary
+    } else {
+        if (darkTheme) DarkColors.primary else LightColors.primary
+    }
+    val seed = if (settings.keyColor == 0) dynamicSeed else Color(settings.keyColor)
+    return rememberDynamicColorScheme(
+        seedColor = seed,
+        isDark = darkTheme,
+        isAmoled = settings.mode.isAmoled,
+        style = settings.paletteStyle,
+        specVersion = settings.colorSpec.effectiveFor(settings.paletteStyle),
+    ).amoledBackground(settings.mode.isAmoled)
+}
+
+private fun ColorScheme.amoledBackground(amoled: Boolean): ColorScheme =
+    if (!amoled) {
+        this
+    } else {
+        copy(
+            background = Color.Black,
+            surface = Color.Black,
+            surfaceDim = Color.Black,
+            surfaceContainerLowest = Color.Black,
+            surfaceContainerLow = Color.Black,
+            surfaceContainer = Color.Black,
+            surfaceContainerHigh = Color.Black,
+            surfaceContainerHighest = Color.Black,
+        )
     }
 
-    MaterialTheme(colorScheme = colorScheme, content = content)
-}
+internal fun ColorSpec.SpecVersion.effectiveFor(style: PaletteStyle): ColorSpec.SpecVersion =
+    if (this == ColorSpec.SpecVersion.SPEC_2025 && style !in SPEC_2025_STYLES) {
+        ColorSpec.SpecVersion.SPEC_2021
+    } else {
+        this
+    }
+
+private val SPEC_2025_STYLES = setOf(
+    PaletteStyle.TonalSpot,
+    PaletteStyle.Neutral,
+    PaletteStyle.Vibrant,
+    PaletteStyle.Expressive,
+)
