@@ -4,7 +4,10 @@
 #include <android/asset_manager_jni.h>
 #include <android/log.h>
 
+#include <gpu.h>
 #include <net.h>
+
+#include <pthread.h>
 
 #include <vector>
 
@@ -27,6 +30,12 @@ void throwIllegalState(JNIEnv* env, const char* message) {
 const char* getUtf(JNIEnv* env, jstring value) {
     return value == nullptr ? nullptr : env->GetStringUTFChars(value, nullptr);
 }
+
+void createGpuInstance() {
+    ncnn::create_gpu_instance();
+}
+
+pthread_once_t gpu_instance_once = PTHREAD_ONCE_INIT;
 
 }  // namespace
 
@@ -52,8 +61,12 @@ Java_com_example_minimalapk_pose_NcnnPose_create(
         return 0;
     }
 
+    // ncnn's Vulkan instance is process-wide: create it once and keep it for the app lifetime.
+    pthread_once(&gpu_instance_once, createGpuInstance);
+
     auto* net = new ncnn::Net();
-    net->opt.use_vulkan_compute = false;
+    // Without a Vulkan device ncnn stays on CPU instead of failing to load the model.
+    net->opt.use_vulkan_compute = ncnn::get_gpu_count() > 0;
 
     int result = net->load_param(manager, paramPath);
     if (result == 0) {
@@ -131,6 +144,12 @@ Java_com_example_minimalapk_pose_NcnnPose_analyze(
             result, 0, kExpectedValues, reinterpret_cast<const jfloat*>(output.data));
     }
     return result;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_minimalapk_pose_NcnnPose_isGpuEnabled(JNIEnv*, jobject, jlong handle) {
+    auto* net = reinterpret_cast<ncnn::Net*>(handle);
+    return net != nullptr && net->opt.use_vulkan_compute ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL

@@ -35,9 +35,10 @@ app/src/main/java/com/example/minimalapk/
 
 相机页集成了 [Ultralytics YOLO26n-pose](https://docs.ultralytics.com) 的模型，模型文件位于 `app/src/main/assets/models/yolo26n_pose.ncnn.param` 与 `.bin`，通过 [ncnn](https://github.com/Tencent/ncnn) 在设备端完成推理，运行过程不需要网络。
 
-- ncnn 以固定版本（`20261020`）源码子模块引入，构建时用 CMake 为 `arm64-v8a` 与 `x86_64` 编译静态库，再静态链接进单个 `libncnnpose.so`，APK 不会额外携带 `libncnn.so`、`libomp.so` 或 `libc++_shared.so`。
+- ncnn 使用官方 `20261020` Android Vulkan 预编译静态库（`ncnn-android-vulkan.zip`，校验 SHA-256），构建时下载一次并静态链接进单个 `libncnnpose.so`，APK 不会额外携带 `libncnn.so`、`libomp.so` 或 `libc++_shared.so`。
 - 模型输入为 `1x3x640x640`，输出为 `1x8400x56` 的原始姿态头（框、置信度与 17 个 COCO 关键点）；应用内按置信度选出前 300 个候选并补上类别 0，再按 `0.35` 阈值过滤。检测结果与原有 `1x300x57` 布局一致。
-- 推理使用 ncnn CPU 后端，线程数由 ncnn 按设备自动选择。性能面板中的“加速器”显示为 `ncnn (CPU)`。
+- 模型权重由原始 ONNX 经 pnnx `20261020` 转换，不使用外部提供的 ncnn 权重。
+- 推理优先使用 Vulkan GPU；设备没有可用的 Vulkan 时自动回退到 CPU。性能面板中的“加速器”会显示 `ncnn (Vulkan)` 或 `ncnn (CPU)`。
 - 输入身高用于把像素换算成厘米：`cm/px = 身高 / 人体检测框高度`，再据此估算臂展、双眼间距、肩线/髋线倾斜与肩髋横向偏移。
 - 使用条件会影响精度：需要全身入镜、正对镜头、双臂平举，且人物应尽量站直。单目 2D 关键点无法给出临床意义上的脊柱侧弯角度，界面结果仅供筛查参考，不能用于医学诊断。
 - 预览右上角显示性能指标：分析帧率、预处理/推理/总耗时，以及 CPU、GPU、NPU 利用率。Android 不向普通应用开放系统级占用：CPU 显示本进程占设备总 CPU 算力的比例（0–100%），GPU/NPU 会尝试读取常见厂商的 sysfs 节点，设备不暴露时显示 `N/A`。
@@ -54,7 +55,6 @@ app/src/main/java/com/example/minimalapk/
 ## 本地构建
 
 ```bash
-git submodule update --init
 ./gradlew assembleDebug assembleRelease
 ```
 
@@ -65,7 +65,7 @@ git submodule update --init
 
 默认只构建 `arm64-v8a` 与 `x86_64`；如需支持 32 位设备，在 `app/build.gradle.kts` 的 `splits.abi.include` 中补充对应 ABI。
 
-需要 JDK 21、Android NDK `27.3.13750724` 与 Android SDK（`compileSdk = 37`）。首次构建会从源码编译 ncnn（两个 ABI），耗时较长；Gradle 构建缓存、配置缓存以及 CI 中的 `app/.cxx` 缓存会让后续构建直接复用已编译的 ncnn 目标文件。
+需要 JDK 21、Android NDK `30.0.16248370` 与 Android SDK（`compileSdk = 37`）。首次构建会从 GitHub Releases 下载约 40MB 的 ncnn 预编译包并解压到 `app/build/ncnn`，之后直接复用。
 
 ## Release 签名
 

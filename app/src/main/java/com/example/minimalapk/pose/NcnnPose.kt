@@ -11,5 +11,7 @@ internal object NcnnPose {
 
     external fun analyze(handle: Long, pixels: IntArray): FloatArray
 
+    external fun isGpuEnabled(handle: Long): Boolean
+
     external fun close(handle: Long)
 }

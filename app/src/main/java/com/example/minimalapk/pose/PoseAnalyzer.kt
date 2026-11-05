@@ -29,7 +29,8 @@ data class PoseFrame(
 
 class PoseAnalyzer(context: Context) : AutoCloseable {
     private val handle = NcnnPose.create(context.assets, PARAM_ASSET, MODEL_ASSET)
-    val executionProvider: String = "ncnn (CPU)"
+    val executionProvider: String =
+        if (NcnnPose.isGpuEnabled(handle)) "ncnn (Vulkan)" else "ncnn (CPU)"
     private val lock = Any()
     private var closed = false
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
