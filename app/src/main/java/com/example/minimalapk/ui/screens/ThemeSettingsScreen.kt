@@ -47,10 +47,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
-import com.example.minimalapk.R
 import com.example.minimalapk.ui.theme.ThemeMode
 import com.example.minimalapk.ui.theme.ThemeSettings
 import com.example.minimalapk.ui.theme.label
@@ -96,22 +94,26 @@ fun ThemeSettingsScreen(
         ) {
             ThemePreview(settings)
 
-            Column {
-                Text(text = "主题模式", style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(8.dp))
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    ThemeMode.entries.forEachIndexed { index, mode ->
-                        SegmentedButton(
-                            selected = settings.mode == mode,
-                            onClick = { onSettingsChange(settings.copy(mode = mode)) },
-                            shape = SegmentedButtonDefaults.itemShape(
-                                index = index,
-                                count = ThemeMode.entries.size,
-                            ),
-                            icon = {},
-                        ) {
-                            Text(text = mode.label())
-                        }
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                ThemeMode.entries.forEachIndexed { index, mode ->
+                    SegmentedButton(
+                        selected = settings.mode == mode,
+                        onClick = { onSettingsChange(settings.copy(mode = mode)) },
+                        shape = SegmentedButtonDefaults.itemShape(
+                            index = index,
+                            count = ThemeMode.entries.size,
+                        ),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = MaterialTheme.colorScheme.primary,
+                            activeContentColor = MaterialTheme.colorScheme.onPrimary,
+                            activeBorderColor = MaterialTheme.colorScheme.primary,
+                            inactiveContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            inactiveContentColor = MaterialTheme.colorScheme.onSurface,
+                            inactiveBorderColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        ),
+                        icon = {},
+                    ) {
+                        Text(text = mode.label())
                     }
                 }
             }
@@ -206,7 +208,7 @@ private fun ThemePreview(settings: ThemeSettings) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = stringResource(R.string.app_name),
+                text = "配色预览",
                 style = MaterialTheme.typography.titleMedium,
                 color = colorScheme.onSurface,
             )
