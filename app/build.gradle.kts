@@ -33,6 +33,21 @@ android {
         targetSdk { version = release(37) }
         versionCode = 1
         versionName = "1.0"
+
+        externalNativeBuild {
+            cmake {
+                arguments.add("-DANDROID_STL=c++_static")
+                arguments.add("-DANDROID_USE_LEGACY_TOOLCHAIN_FILE=OFF")
+            }
+        }
+    }
+
+    ndkVersion = "27.3.13750724"
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
     }
 
     signingConfigs {
@@ -95,7 +110,6 @@ dependencies {
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.lifecycle)
 
-    implementation(libs.onnxruntime.android)
     implementation(libs.material.kolor)
 
     testImplementation(libs.junit)

@@ -24,6 +24,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          submodules: true
 
       - name: Setup Java
         uses: actions/setup-java@v6
@@ -33,6 +35,14 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
+
+      - name: Cache ncnn native build
+        uses: actions/cache@v6
+        with:
+          path: app/.cxx
+          key: ncnn-20261020-ndk-27.3.13750724-${{ hashFiles('app/src/main/cpp/**', 'app/build.gradle.kts', 'gradle/libs.versions.toml', 'ncnn/CMakeLists.txt') }}
+          restore-keys: |
+            ncnn-20261020-ndk-27.3.13750724-
 
       - name: Decode release keystore
         if: env.RELEASE_KEYSTORE_BASE64 != ''
