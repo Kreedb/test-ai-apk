@@ -151,9 +151,6 @@ class PoseAnalyzer(
             val session = runCatching { createSession(bytes, spec) }.getOrNull()
             if (session != null) return LoadedEngine(session, candidate.label)
         }
-        if (backend == InferenceBackend.AUTO) {
-            return LoadedEngine(createSession(bytes, null), InferenceBackend.CPU.label)
-        }
         error("${backend.label} 后端创建失败")
     }
 
@@ -259,13 +256,15 @@ private class OrtEngine(
 // exported with `yolo export format=ncnn` may need extra NMS handling before it qualifies.
 private class NcnnEngine(context: Context) : Engine {
     private val interpreter: Interpreter
-    private val input = ByteBuffer.allocateDirect(INPUT_BYTES).order(ByteOrder.nativeOrder())
-    private val output = ByteBuffer.allocateDirect(OUTPUT_BYTES).order(ByteOrder.nativeOrder())
+    private val input: ByteBuffer
+    private val output: ByteBuffer
 
     init {
         check(PoseAnalyzer.hasNcnnModel(context)) {
             "缺少 ncnn 模型 ${PoseAnalyzer.NCNN_PARAM_FILE}/${PoseAnalyzer.NCNN_MODEL_FILE}，请先导出并放入 assets/${PoseAnalyzer.NCNN_DIR}"
         }
+        input = ByteBuffer.allocateDirect(INPUT_BYTES).order(ByteOrder.nativeOrder())
+        output = ByteBuffer.allocateDirect(OUTPUT_BYTES).order(ByteOrder.nativeOrder())
         interpreter = runCatching {
             Interpreter(
                 Interpreter.Options().setNumberThreads(Runtime.getRuntime().availableProcessors()),
