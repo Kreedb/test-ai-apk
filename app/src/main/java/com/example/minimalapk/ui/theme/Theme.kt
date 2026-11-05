@@ -49,27 +49,10 @@ fun rememberThemeColorScheme(settings: ThemeSettings, darkTheme: Boolean): Color
     return rememberDynamicColorScheme(
         seedColor = seed,
         isDark = darkTheme,
-        isAmoled = settings.mode.isAmoled,
         style = settings.paletteStyle,
         specVersion = settings.colorSpec.effectiveFor(settings.paletteStyle),
-    ).amoledBackground(settings.mode.isAmoled)
+    )
 }
-
-private fun ColorScheme.amoledBackground(amoled: Boolean): ColorScheme =
-    if (!amoled) {
-        this
-    } else {
-        copy(
-            background = Color.Black,
-            surface = Color.Black,
-            surfaceDim = Color.Black,
-            surfaceContainerLowest = Color.Black,
-            surfaceContainerLow = Color.Black,
-            surfaceContainer = Color.Black,
-            surfaceContainerHigh = Color.Black,
-            surfaceContainerHighest = Color.Black,
-        )
-    }
 
 internal fun ColorSpec.SpecVersion.effectiveFor(style: PaletteStyle): ColorSpec.SpecVersion =
     if (this == ColorSpec.SpecVersion.SPEC_2025 && style !in SPEC_2025_STYLES) {
