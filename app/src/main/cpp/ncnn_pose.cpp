@@ -121,9 +121,12 @@ Java_com_example_minimalapk_pose_NcnnPose_analyze(
         throwIllegalState(env, "ncnn output blob out0 is missing");
         return nullptr;
     }
-    if (output.total() != kExpectedValues || output.elemsize != 4u || output.elempack != 1) {
-        LOGE("Unexpected output: total=%zu elemsize=%zu elempack=%d",
-             output.total(), output.elemsize, output.elempack);
+    // Check the axes too: a transposed 8400x56 head has the same value count but would decode
+    // as garbage, so total() alone is not enough.
+    if (output.dims != 2 || output.w != kValuesPerAnchor || output.h != kAnchorCount ||
+        output.elemsize != 4u || output.elempack != 1) {
+        LOGE("Unexpected output: dims=%d w=%d h=%d elemsize=%zu elempack=%d",
+             output.dims, output.w, output.h, output.elemsize, output.elempack);
         throwIllegalState(env, "Unexpected ncnn output shape");
         return nullptr;
     }

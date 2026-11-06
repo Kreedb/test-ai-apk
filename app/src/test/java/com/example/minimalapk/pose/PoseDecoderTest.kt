@@ -1,6 +1,7 @@
 package com.example.minimalapk.pose
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -25,6 +26,10 @@ class PoseDecoderTest {
 
     private fun pose(vararg points: Pair<Int, PoseKeypoint>): PoseDetection {
         val keypoints = MutableList(PoseNet.KEYPOINT_COUNT) { PoseKeypoint(0f, 0f, 0f) }
+        // Head and feet visible by default so measurement tests exercise the scale path.
+        listOf(PoseNet.NOSE, PoseNet.LEFT_ANKLE, PoseNet.RIGHT_ANKLE).forEach {
+            keypoints[it] = keypoint(100f, 500f)
+        }
         points.forEach { (index, keypoint) -> keypoints[index] = keypoint }
         return PoseDetection(
             left = 0f,
@@ -128,5 +133,25 @@ class PoseDecoderTest {
         val detection = pose(PoseNet.NOSE to keypoint(100f, 100f))
         assertNull(PoseMeasurement.measure(detection, heightCm = 0f))
         assertNull(PoseMeasurement.measure(detection, heightCm = 300f))
+    }
+
+    @Test
+    fun measurementWithholdsScaleWhenFeetAreCropped() {
+        val detection = pose(
+            PoseNet.NOSE to keypoint(100f, 50f),
+            PoseNet.LEFT_ANKLE to keypoint(100f, 640f, confidence = 0.001f),
+            PoseNet.RIGHT_ANKLE to keypoint(120f, 640f, confidence = 0.001f),
+        )
+
+        assertFalse(PoseMeasurement.isFullBodyVisible(detection))
+        assertNull(PoseMeasurement.measure(detection, heightCm = 170f))
+    }
+
+    @Test
+    fun fullBodyRequiresHeadAndFeetInsideFrame() {
+        assertTrue(PoseMeasurement.isFullBodyVisible(pose()))
+
+        val outside = pose(PoseNet.LEFT_ANKLE to keypoint(100f, 700f))
+        assertFalse(PoseMeasurement.isFullBodyVisible(outside))
     }
 }

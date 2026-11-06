@@ -18,7 +18,9 @@ internal object PosePostprocess {
         }
         require(count <= ANCHOR_COUNT) { "Cannot select $count of $ANCHOR_COUNT anchors" }
 
+        // Drop anchors the decoder would discard anyway before paying for a full sort.
         val selected = (0 until ANCHOR_COUNT)
+            .filter { raw[it * VALUES_PER_ANCHOR + 4] >= PoseNet.SCORE_THRESHOLD }
             .sortedByDescending { raw[it * VALUES_PER_ANCHOR + 4] }
             .take(count)
 

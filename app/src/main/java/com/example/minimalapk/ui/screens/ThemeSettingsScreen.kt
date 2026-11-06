@@ -4,7 +4,6 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,6 +47,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.example.minimalapk.ui.theme.ThemeMode
 import com.example.minimalapk.ui.theme.ThemeSettings
@@ -57,21 +58,21 @@ import com.materialkolor.PaletteStyle
 import com.materialkolor.dynamiccolor.ColorSpec
 
 private val keyColorOptions = listOf(
-    Color(0xFFF44336).toArgb(),
-    Color(0xFFE91E63).toArgb(),
-    Color(0xFF9C27B0).toArgb(),
-    Color(0xFF673AB7).toArgb(),
-    Color(0xFF3F51B5).toArgb(),
-    Color(0xFF2196F3).toArgb(),
-    Color(0xFF00BCD4).toArgb(),
-    Color(0xFF009688).toArgb(),
-    Color(0xFF4FAF50).toArgb(),
-    Color(0xFFFFEB3B).toArgb(),
-    Color(0xFFFFC107).toArgb(),
-    Color(0xFFFF9800).toArgb(),
-    Color(0xFF795548).toArgb(),
-    Color(0xFF607D8F).toArgb(),
-    Color(0xFFFF9CA8).toArgb(),
+    Color(0xFFF44336).toArgb() to "红色",
+    Color(0xFFE91E63).toArgb() to "粉色",
+    Color(0xFF9C27B0).toArgb() to "紫色",
+    Color(0xFF673AB7).toArgb() to "深紫色",
+    Color(0xFF3F51B5).toArgb() to "靛蓝色",
+    Color(0xFF2196F3).toArgb() to "蓝色",
+    Color(0xFF00BCD4).toArgb() to "青色",
+    Color(0xFF009688).toArgb() to "蓝绿色",
+    Color(0xFF4FAF50).toArgb() to "绿色",
+    Color(0xFFFFEB3B).toArgb() to "黄色",
+    Color(0xFFFFC107).toArgb() to "琥珀色",
+    Color(0xFFFF9800).toArgb() to "橙色",
+    Color(0xFF795548).toArgb() to "棕色",
+    Color(0xFF607D8F).toArgb() to "蓝灰色",
+    Color(0xFFFF9CA8).toArgb() to "粉红色",
 )
 
 @Composable
@@ -121,18 +122,23 @@ fun ThemeSettingsScreen(
             Column {
                 Text(text = "主题颜色", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(8.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                LazyRow(
+                    modifier = Modifier.selectableGroup(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
                     item {
                         KeyColorItem(
                             color = null,
+                            label = "跟随系统",
                             selected = settings.keyColor == 0,
                             settings = settings,
                             onClick = { onSettingsChange(settings.copy(keyColor = 0)) },
                         )
                     }
-                    items(keyColorOptions) { color ->
+                    items(keyColorOptions) { (color, label) ->
                         KeyColorItem(
                             color = Color(color),
+                            label = label,
                             selected = settings.keyColor == color,
                             settings = settings,
                             onClick = { onSettingsChange(settings.copy(keyColor = color)) },
@@ -242,6 +248,7 @@ private fun ThemePreview(settings: ThemeSettings) {
 @Composable
 private fun KeyColorItem(
     color: Color?,
+    label: String,
     selected: Boolean,
     settings: ThemeSettings,
     onClick: () -> Unit,
@@ -262,7 +269,12 @@ private fun KeyColorItem(
                 color = if (selected) colorScheme.primary else colorScheme.outlineVariant,
                 shape = RoundedCornerShape(16.dp),
             )
-            .clickable(onClick = onClick),
+            .selectable(
+                selected = selected,
+                onClick = onClick,
+                role = Role.RadioButton,
+            )
+            .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
         Canvas(modifier = Modifier.size(32.dp)) {
