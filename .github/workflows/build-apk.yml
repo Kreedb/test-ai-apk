@@ -17,10 +17,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      RELEASE_KEYSTORE_BASE64: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.RELEASE_KEYSTORE_BASE64 || '' }}
-      RELEASE_STORE_PASSWORD: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.RELEASE_STORE_PASSWORD || '' }}
-      RELEASE_KEY_ALIAS: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.RELEASE_KEY_ALIAS || '' }}
-      RELEASE_KEY_PASSWORD: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && secrets.RELEASE_KEY_PASSWORD || '' }}
+      # Only main-branch pushes may sign releases; a workflow_dispatch from any other branch
+      # runs that branch's Gradle code and must not receive the signing key.
+      RELEASE_KEYSTORE_BASE64: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.RELEASE_KEYSTORE_BASE64 || '' }}
+      RELEASE_STORE_PASSWORD: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.RELEASE_STORE_PASSWORD || '' }}
+      RELEASE_KEY_ALIAS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.RELEASE_KEY_ALIAS || '' }}
+      RELEASE_KEY_PASSWORD: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.RELEASE_KEY_PASSWORD || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7

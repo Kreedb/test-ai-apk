@@ -197,27 +197,35 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
     }
 
     LaunchedEffect(lifecycleOwner) {
-        val cameraProvider = try {
-            context.awaitCameraProvider()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            errorMessage = e.message ?: "相机初始化失败"
-            return@LaunchedEffect
-        }
-        val analyzer = try {
-            withContext(Dispatchers.IO) { PoseAnalyzer.open(context) }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            errorMessage = e.message ?: "模型加载失败"
-            return@LaunchedEffect
-        }
-        executionProvider = analyzer.executionProvider
-        val mainExecutor = ContextCompat.getMainExecutor(context)
+        var analyzer: PoseAnalyzer? = null
         var analysis: ImageAnalysis? = null
+        var cameraProvider: ProcessCameraProvider? = null
         try {
-            analysis = ImageAnalysis.Builder()
+            val provider = try {
+                context.awaitCameraProvider()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "相机初始化失败"
+                return@LaunchedEffect
+            }
+            cameraProvider = provider
+            // Assign inside the worker so a cancellation that discards the withContext result
+            // cannot leak the opened analyzer; the finally below still closes it.
+            val opened = try {
+                withContext(Dispatchers.IO) {
+                    PoseAnalyzer.open(context).also { analyzer = it }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "模型加载失败"
+                return@LaunchedEffect
+            }
+            analyzer = opened
+            executionProvider = opened.executionProvider
+            val mainExecutor = ContextCompat.getMainExecutor(context)
+            val imageAnalysis = ImageAnalysis.Builder()
                 .setResolutionSelector(
                     ResolutionSelector.Builder()
                         .setResolutionStrategy(
@@ -231,33 +239,45 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build()
-            analysis.setAnalyzer(analysisExecutor) { proxy ->
+            analysis = imageAnalysis
+            imageAnalysis.setAnalyzer(analysisExecutor) { proxy ->
                 val rotationDegrees = proxy.imageInfo.rotationDegrees
                 try {
                     val bitmap = proxy.toBitmap()
                     val result = try {
-                        analyzer.analyze(bitmap, rotationDegrees)
+                        opened.analyze(bitmap, rotationDegrees)
                     } finally {
                         bitmap.recycle()
                     }
                     val completedNanos = System.nanoTime()
+                    // Keep the frame open until the main thread consumes it so CameraX's
+                    // latest-frame limit also bounds pending display work.
                     mainExecutor.execute {
-                        errorMessage = null
-                        frame = result
-                        frameTimes.addLast(completedNanos)
-                        fps = frameRate(frameTimes, completedNanos)
+                        try {
+                            errorMessage = null
+                            frame = result
+                            frameTimes.addLast(completedNanos)
+                            fps = frameRate(frameTimes, completedNanos)
+                        } finally {
+                            proxy.close()
+                        }
                     }
                 } catch (e: Exception) {
-                    mainExecutor.execute { errorMessage = e.message ?: "姿态推理失败" }
-                } finally {
-                    proxy.close()
+                    mainExecutor.execute {
+                        try {
+                            errorMessage = e.message ?: "姿态推理失败"
+                            frame = null
+                        } finally {
+                            proxy.close()
+                        }
+                    }
                 }
             }
-            cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
+            provider.unbindAll()
+            provider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
-                analysis,
+                imageAnalysis,
             )
             awaitCancellation()
         } catch (e: CancellationException) {
@@ -267,8 +287,8 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
         } finally {
             analysis?.clearAnalyzer()
             analysisExecutor.shutdownNow()
-            cameraProvider.unbindAll()
-            withContext(NonCancellable + Dispatchers.IO) { analyzer.close() }
+            cameraProvider?.unbindAll()
+            analyzer?.let { withContext(NonCancellable + Dispatchers.IO) { it.close() } }
         }
     }
 
@@ -334,6 +354,8 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
                 MeasurementLine("请输入身高以换算尺寸")
             } else if (detection == null) {
                 MeasurementLine("未检测到人体")
+            } else if (!PoseMeasurement.isFullBodyVisible(detection)) {
+                MeasurementLine("请后退，确保全身入镜")
             } else if (measurement != null) {
                 measurement.armSpanCm?.let { MeasurementLine("腕距约 ${format(it)} cm（双臂平举，近似臂展）") }
                 measurement.eyeDistanceCm?.let { MeasurementLine("双眼间距约 ${format(it)} cm") }

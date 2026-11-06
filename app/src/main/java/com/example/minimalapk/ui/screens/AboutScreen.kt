@@ -1,5 +1,6 @@
 package com.example.minimalapk.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -23,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -36,7 +38,13 @@ private const val QQ_URL = "https://pd.qq.com/s/8lipl1brp"
 
 @Composable
 fun AboutScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
+    val openLink = { url: String ->
+        runCatching { uriHandler.openUri(url) }.onFailure {
+            Toast.makeText(context, "没有应用可以打开此链接", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         DetailTopBar(title = "关于", onBack = onBack)
@@ -75,17 +83,11 @@ fun AboutScreen(onBack: () -> Unit) {
 
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column {
-                    LinkRow(text = "在 GitHub 查看源码") {
-                        uriHandler.openUri(SOURCE_CODE_URL)
-                    }
+                    LinkRow(text = "在 GitHub 查看源码") { openLink(SOURCE_CODE_URL) }
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                    LinkRow(text = "加入我们的 Telegram 频道") {
-                        uriHandler.openUri(TELEGRAM_URL)
-                    }
+                    LinkRow(text = "加入我们的 Telegram 频道") { openLink(TELEGRAM_URL) }
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                    LinkRow(text = "加入我们的 QQ 频道") {
-                        uriHandler.openUri(QQ_URL)
-                    }
+                    LinkRow(text = "加入我们的 QQ 频道") { openLink(QQ_URL) }
                 }
             }
         }
