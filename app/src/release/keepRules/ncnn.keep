@@ -1,3 +1,6 @@
 -keep class com.example.minimalapk.pose.NcnnPose { *; }
 -keep class com.example.minimalapk.pose.MnnPose { *; }
 -keep class com.google.ai.edge.litert.** { *; }
+# LiteRT's Play model-delivery classes are kept above but their Play dependencies are excluded.
+-dontwarn com.google.android.gms.**
+-dontwarn com.google.android.play.**

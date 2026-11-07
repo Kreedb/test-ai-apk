@@ -95,6 +95,15 @@ android {
     }
 }
 
+// LiteRT's Play model-delivery module pulls in Play asset delivery, Play Services and
+// WorkManager. WorkManager 2.9.1 relies on Room 2.5.0, whose keep rule (`-keep class * extends
+// androidx.room.RoomDatabase`, no members) lets R8 strip WorkDatabase_Impl's constructor; its
+// androidx.startup initializer then crashes the app before the activity starts. This app only
+// loads bundled assets, so drop that unused subtree.
+configurations.configureEach {
+    exclude(group = "com.google.android.play", module = "ai-delivery")
+}
+
 dependencies {
     val composeBom = platform(libs.androidx.compose.bom)
     implementation(composeBom)
