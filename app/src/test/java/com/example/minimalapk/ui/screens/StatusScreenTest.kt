@@ -23,4 +23,20 @@ class StatusScreenTest {
         assertNull(cpuHardware("Hardware\t:   "))
         assertNull(cpuHardware(null))
     }
+
+    @Test
+    fun parsesSelinuxEnforceNode() {
+        assertEquals("Enforcing", selinuxStatus("1\n"))
+        assertEquals("Permissive", selinuxStatus("0"))
+        assertEquals("Enforcing", selinuxStatus(null))
+    }
+
+    @Test
+    fun parsesSeccompFromProcStatus() {
+        assertEquals("Filter", seccompStatus("Name:\tapp\nSeccomp:\t2\n"))
+        assertEquals("Strict", seccompStatus("Seccomp:\t1\n"))
+        assertEquals("Disabled", seccompStatus("Seccomp:\t0\n"))
+        assertEquals("Filter", seccompStatus("Name:\tapp\n"))
+        assertEquals("Filter", seccompStatus(null))
+    }
 }
