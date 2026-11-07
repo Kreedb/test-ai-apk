@@ -65,7 +65,7 @@ internal fun argbToRgbFloat(pixels: IntArray, out: FloatArray) {
     }
 }
 
-private fun transposeOutput(raw: FloatArray): FloatArray {
+internal fun transposeOutput(raw: FloatArray): FloatArray {
     require(raw.size == PosePostprocess.ANCHOR_COUNT * PosePostprocess.VALUES_PER_ANCHOR) {
         "Unexpected LiteRT output size: ${raw.size}"
     }

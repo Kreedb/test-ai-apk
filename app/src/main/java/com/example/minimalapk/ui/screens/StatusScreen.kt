@@ -157,7 +157,7 @@ private fun StatusCard(provider: String?, usage: DeviceUsage) {
             supportingContent = {
                 Text(
                     text = buildString {
-                        append(provider ?: "ncnn · Vulkan 优先，回退 CPU")
+                        append(provider ?: "未启动 · 自动选择 LiteRT、MNN 或 ncnn")
                         append(" · 本应用 CPU ")
                         append(formatUsage(usage.cpuPercent))
                         append(" · 系统 GPU ")
@@ -224,10 +224,10 @@ private fun InfoCard(systemInfo: SystemInfo, provider: String?) {
         )
         InfoGroup(
             listOf(
-                InfoRow("推理后端", provider ?: "ncnn · Vulkan 优先，回退 CPU") {
+                InfoRow("推理后端", provider ?: "未启动 · 自动选择 LiteRT、MNN 或 ncnn") {
                     Icon(painterResource(R.drawable.ic_developer_board), contentDescription = null)
                 },
-                InfoRow("推理框架", "ncnn") {
+                InfoRow("推理框架", "LiteRT / MNN / ncnn") {
                     Icon(painterResource(R.drawable.ic_label), contentDescription = null)
                 },
                 InfoRow("推理模型", "YOLO26n-pose 640×640") {
@@ -254,55 +254,119 @@ private fun SupportLinks() {
                 value = "在 GitHub 查看源码与更新",
                 onClick = { runCatching { uriHandler.openUri(REPO_URL) } },
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(12.dp)
-                            .background(
-                                color = if (provider != null) {
-                                    Color(0xFF2E7D32)
-                                } else {
-                                    MaterialTheme.colorScheme.outline
-                                },
-                                shape = CircleShape,
-                            ),
-                    )
-                    Text(
-                        text = "推理后端",
-                        modifier = Modifier.padding(start = 8.dp),
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                Text(
-                    text = provider ?: "未启动 · 自动选择 LiteRT、MNN 或 ncnn",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Icon(Icons.Filled.Favorite, contentDescription = null)
+            },
+            InfoRow(
+                label = "了解 ncnn",
+                value = "推理与 Vulkan 加速说明",
+                onClick = { runCatching { uriHandler.openUri(NCNN_URL) } },
+            ) {
+                Icon(Icons.Filled.Info, contentDescription = null)
+            },
+        ),
+    )
+}
+
+private class InfoRow(
+    val label: String,
+    val value: String,
+    val onClick: (() -> Unit)? = null,
+    val leading: @Composable () -> Unit,
+)
+
+@Composable
+private fun InfoGroup(rows: List<InfoRow>) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        rows.forEachIndexed { index, row ->
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceBright,
+                shape = segmentedShape(index, rows.size),
+            ) {
+                ListItem(
+                    modifier = if (row.onClick != null) {
+                        Modifier.clickable(role = Role.Button, onClick = row.onClick)
+                    } else {
+                        Modifier
+                    },
+                    leadingContent = row.leading,
+                    headlineContent = { Text(row.label, style = MaterialTheme.typography.bodyLarge) },
+                    supportingContent = {
+                        Text(
+                            text = row.value,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                    trailingContent = if (row.onClick != null) {
+                        {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                            )
+                        }
+                    } else {
+                        null
+                    },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                 )
             }
         }
     }
 }
 
-        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(vertical = 8.dp)) {
-                InfoRow("应用版本", BuildConfig.VERSION_NAME)
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                InfoRow("CPU", cpu)
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                InfoRow("GPU", gpu)
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                InfoRow("设备型号", Build.MODEL)
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                InfoRow("系统版本", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                InfoRow("ABI", Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown")
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                InfoRow("推理框架", "LiteRT / MNN / ncnn")
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                InfoRow("推理模型", "YOLO26n-pose 640×640")
-            }
-        }
+private fun segmentedShape(index: Int, count: Int): Shape {
+    val outer = 16.dp
+    val inner = 4.dp
+    return RoundedCornerShape(
+        topStart = if (index == 0) outer else inner,
+        topEnd = if (index == 0) outer else inner,
+        bottomStart = if (index == count - 1) outer else inner,
+        bottomEnd = if (index == count - 1) outer else inner,
+    )
+}
+
+private class SystemInfo(
+    val managerVersion: String,
+    val kernelVersion: String,
+    val deviceModel: String,
+    val fingerprint: String,
+    val selinux: String,
+    val seccomp: String,
+    val cpu: String,
+    val gpu: String,
+)
+
+private fun loadSystemInfo(): SystemInfo = SystemInfo(
+    managerVersion = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+    kernelVersion = System.getProperty("os.version") ?: Build.DISPLAY,
+    deviceModel = Build.MODEL,
+    fingerprint = Build.FINGERPRINT,
+    selinux = selinuxStatus(readSecureFile("/sys/fs/selinux/enforce")),
+    seccomp = seccompStatus(readSecureFile("/proc/self/status")),
+    cpu = cpuDescription(),
+    gpu = gpuDescription() ?: FAKE_GPU_MODEL,
+)
+
+private fun readSecureFile(path: String): String? =
+    runCatching { File(path).takeIf(File::canRead)?.readText() }.getOrNull()
+
+internal fun selinuxStatus(enforce: String?): String = when (enforce?.trim()) {
+    "0" -> "Permissive"
+    "1" -> "Enforcing"
+    else -> FAKE_SELINUX
+}
+
+internal fun seccompStatus(procStatus: String?): String {
+    val raw = procStatus?.lineSequence()
+        ?.firstOrNull { it.startsWith("Seccomp:") }
+        ?.substringAfter(':')
+        ?.trim()
+    return when (raw) {
+        "0" -> "Disabled"
+        "1" -> "Strict"
+        "2" -> "Filter"
+        else -> FAKE_SECCOMP
     }
 }
 

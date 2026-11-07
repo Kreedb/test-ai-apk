@@ -126,7 +126,11 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
         const val TFLITE_MODEL_ASSET = "models/yolo26n_pose.tflite"
 
         private const val TAG = "PoseAnalyzer"
-        private const val GPU_LOAD_TIMEOUT_MS = 10_000L
+
+        // The GPU probes share one budget: the backends all sit on the same OpenCL/Vulkan driver,
+        // so one blocked probe usually predicts the others. A single budget keeps a blocking
+        // driver from delaying the camera preview by one timeout per backend.
+        private const val GPU_PROBE_BUDGET_MS = 10_000L
 
         // Some Vulkan/OpenCL drivers block inside model loading forever. Skipping a backend that
         // failed for the rest of the process keeps later camera visits from starting another
@@ -154,9 +158,12 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
 
         fun open(context: Context): PoseAnalyzer = synchronized(openLock) {
             val assets = context.assets
+            val gpuDeadline = System.nanoTime() + GPU_PROBE_BUDGET_MS * 1_000_000L
             for ((name, load) in gpuBackends) {
                 if (name in unavailableGpuBackends) continue
-                val backend = loadWithTimeout(name) { load(assets) }
+                val remainingMs = (gpuDeadline - System.nanoTime()) / 1_000_000L
+                if (remainingMs <= 0L) break
+                val backend = loadWithTimeout(name, remainingMs) { load(assets) }
                 if (backend != null) return PoseAnalyzer(backend)
                 unavailableGpuBackends += name
             }
@@ -171,6 +178,7 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
 
         private fun loadWithTimeout(
             name: String,
+            timeoutMs: Long,
             load: () -> PoseBackend?,
         ): PoseBackend? {
             val executor = Executors.newSingleThreadExecutor { runnable ->
@@ -178,7 +186,7 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
             }
             val future = executor.submit<PoseBackend?> { load() }
             return try {
-                future.get(GPU_LOAD_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                future.get(timeoutMs, TimeUnit.MILLISECONDS)
             } catch (e: TimeoutException) {
                 // The blocked call cannot be interrupted; a late result is abandoned (one
                 // backend is leaked per process).
