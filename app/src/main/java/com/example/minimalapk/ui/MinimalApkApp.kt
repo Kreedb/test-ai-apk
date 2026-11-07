@@ -15,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
@@ -33,7 +34,7 @@ private class Tab(
 )
 
 private val tabs = listOf(
-    Tab("状态") { Icon(Icons.Filled.Home, contentDescription = "状态") },
+    Tab("主页") { Icon(Icons.Filled.Home, contentDescription = "主页") },
     Tab("相机") { Icon(painterResource(R.drawable.ic_camera), contentDescription = "相机") },
     Tab("插件") { Icon(Icons.Filled.Build, contentDescription = "插件") },
     Tab("设置") { Icon(Icons.Filled.Settings, contentDescription = "设置") },
@@ -45,6 +46,9 @@ fun MinimalApkApp(
     onThemeSettingsChange: (ThemeSettings) -> Unit,
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var showPose by rememberSaveable { mutableStateOf(true) }
+    var showHeightLine by rememberSaveable { mutableStateOf(true) }
+    var showArmSpan by rememberSaveable { mutableStateOf(false) }
     val stateHolder = rememberSaveableStateHolder()
 
     Scaffold(
@@ -69,8 +73,19 @@ fun MinimalApkApp(
             stateHolder.SaveableStateProvider(selectedTab) {
                 when (selectedTab) {
                     0 -> StatusScreen()
-                    1 -> CameraScreen()
-                    2 -> PluginsScreen()
+                    1 -> CameraScreen(
+                        showPose = showPose,
+                        showHeightLine = showHeightLine,
+                        showArmSpan = showArmSpan,
+                    )
+                    2 -> PluginsScreen(
+                        showPose = showPose,
+                        onShowPoseChange = { showPose = it },
+                        showHeightLine = showHeightLine,
+                        onShowHeightLineChange = { showHeightLine = it },
+                        showArmSpan = showArmSpan,
+                        onShowArmSpanChange = { showArmSpan = it },
+                    )
                     3 -> ConfigScreen(
                         themeSettings = themeSettings,
                         onThemeSettingsChange = onThemeSettingsChange,
