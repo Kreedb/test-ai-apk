@@ -157,7 +157,7 @@ private fun StatusCard(provider: String?, usage: DeviceUsage) {
             supportingContent = {
                 Text(
                     text = buildString {
-                        append(provider ?: "ncnn · Vulkan 优先，回退 CPU")
+                        append(provider ?: "未启动 · 自动选择 LiteRT、MNN 或 ncnn")
                         append(" · 本应用 CPU ")
                         append(formatUsage(usage.cpuPercent))
                         append(" · 系统 GPU ")
@@ -224,10 +224,10 @@ private fun InfoCard(systemInfo: SystemInfo, provider: String?) {
         )
         InfoGroup(
             listOf(
-                InfoRow("推理后端", provider ?: "ncnn · Vulkan 优先，回退 CPU") {
+                InfoRow("推理后端", provider ?: "未启动 · 自动选择 LiteRT、MNN 或 ncnn") {
                     Icon(painterResource(R.drawable.ic_developer_board), contentDescription = null)
                 },
-                InfoRow("推理框架", "ncnn") {
+                InfoRow("推理框架", "LiteRT / MNN / ncnn") {
                     Icon(painterResource(R.drawable.ic_label), contentDescription = null)
                 },
                 InfoRow("推理模型", "YOLO26n-pose 640×640") {

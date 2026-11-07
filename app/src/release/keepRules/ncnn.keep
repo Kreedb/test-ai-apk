@@ -1,1 +1,3 @@
 -keep class com.example.minimalapk.pose.NcnnPose { *; }
+-keep class com.example.minimalapk.pose.MnnPose { *; }
+-keep class com.google.ai.edge.litert.** { *; }

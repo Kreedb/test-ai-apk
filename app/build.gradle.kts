@@ -36,7 +36,8 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments.add("-DANDROID_STL=c++_static")
+                // MNN's prebuilt libraries (and LiteRT's) use the shared C++ runtime.
+                arguments.add("-DANDROID_STL=c++_shared")
                 arguments.add("-DANDROID_USE_LEGACY_TOOLCHAIN_FILE=OFF")
             }
         }
@@ -111,6 +112,9 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
 
     implementation(libs.material.kolor)
+
+    implementation(libs.litert)
+    implementation(libs.litert.gpu)
 
     testImplementation(libs.junit)
 }

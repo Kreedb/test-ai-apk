@@ -7,6 +7,7 @@ activityCompose = "1.13.0"
 lifecycle = "2.11.0"
 camera = "1.6.2"
 materialKolor = "5.0.1"
+litert = "2.3.2"
 junit = "4.13.2"
 
 [libraries]
@@ -24,6 +25,9 @@ androidx-camera-core = { module = "androidx.camera:camera-core", version.ref = "
 androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camera" }
 
 material-kolor = { module = "com.materialkolor:material-kolor", version.ref = "materialKolor" }
+
+litert = { module = "com.google.ai.edge.litert:litert", version.ref = "litert" }
+litert-gpu = { module = "com.google.ai.edge.litert:litert-gpu", version.ref = "litert" }
 
 junit = { module = "junit:junit", version.ref = "junit" }
 

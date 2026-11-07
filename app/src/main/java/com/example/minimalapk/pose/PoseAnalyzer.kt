@@ -1,6 +1,7 @@
 package com.example.minimalapk.pose
 
 import android.content.Context
+import android.content.res.AssetManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -31,16 +32,14 @@ data class PoseFrame(
     val timings: PoseTimings,
 )
 
-class PoseAnalyzer private constructor(private val handle: Long) : AutoCloseable {
-    val executionProvider: String =
-        if (NcnnPose.isGpuEnabled(handle)) "ncnn (Vulkan)" else "ncnn (CPU)"
+class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoCloseable {
+    val executionProvider: String = backend.name
     private val lock = Any()
     private var closed = false
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val pixels = IntArray(PoseNet.INPUT_SIZE * PoseNet.INPUT_SIZE)
 
     init {
-        check(handle != 0L) { "无法加载 ncnn 模型" }
         lastExecutionProvider = executionProvider
     }
 
@@ -77,12 +76,12 @@ class PoseAnalyzer private constructor(private val handle: Long) : AutoCloseable
         synchronized(lock) {
             if (closed) return
             closed = true
-            NcnnPose.close(handle)
+            backend.close()
         }
     }
 
     private fun runModel(pixels: IntArray): FloatArray =
-        PosePostprocess.topDetections(NcnnPose.analyze(handle, pixels))
+        PosePostprocess.topDetections(backend.analyze(pixels))
 
     private fun createInput(source: Bitmap, rotationDegrees: Int): Bitmap {
         val upright = if (rotationDegrees % 360 == 0) {
@@ -123,49 +122,79 @@ class PoseAnalyzer private constructor(private val handle: Long) : AutoCloseable
     companion object {
         const val PARAM_ASSET = "models/yolo26n_pose.ncnn.param"
         const val MODEL_ASSET = "models/yolo26n_pose.ncnn.bin"
+        const val MNN_MODEL_ASSET = "models/yolo26n_pose.mnn"
+        const val TFLITE_MODEL_ASSET = "models/yolo26n_pose.tflite"
 
         private const val TAG = "PoseAnalyzer"
-        private const val GPU_LOAD_TIMEOUT_MS = 10_000L
 
-        // Some Vulkan drivers block inside model loading forever. Skipping Vulkan for the rest of
-        // the process keeps later camera visits from starting another stuck load.
-        @Volatile
-        private var gpuAvailable = true
+        // The GPU probes share one budget: the backends all sit on the same OpenCL/Vulkan driver,
+        // so one blocked probe usually predicts the others. A single budget keeps a blocking
+        // driver from delaying the camera preview by one timeout per backend.
+        private const val GPU_PROBE_BUDGET_MS = 10_000L
+
+        // Some Vulkan/OpenCL drivers block inside model loading forever. Skipping a backend that
+        // failed for the rest of the process keeps later camera visits from starting another
+        // stuck load.
+        private val unavailableGpuBackends = mutableSetOf<String>()
         private val openLock = Any()
 
         @Volatile
         var lastExecutionProvider: String? = null
             private set
 
-        fun open(context: Context): PoseAnalyzer = synchronized(openLock) {
-            val gpu = if (gpuAvailable) {
-                loadWithTimeout { NcnnPose.create(context.assets, PARAM_ASSET, MODEL_ASSET, true) }
-            } else {
-                0L
-            }
-            if (gpu != 0L) return PoseAnalyzer(gpu)
+        // LiteRT and MNN are preferred over ncnn because ncnn's Vulkan backend is unstable on
+        // Adreno 840 (SM8850). MNN goes first because its session reports the real primary
+        // backend, while LiteRT may silently fall back to CPU.
+        private val gpuBackends = listOf<Pair<String, (AssetManager) -> PoseBackend?>>(
+            "MNN GPU" to { assets -> MnnBackend.open(assets, useGpu = true) },
+            "LiteRT GPU" to { assets -> LiteRtBackend.open(assets, useGpu = true) },
+            "ncnn Vulkan" to { assets -> NcnnBackend.open(assets, useGpu = true) },
+        )
+        private val cpuBackends = listOf<Pair<String, (AssetManager) -> PoseBackend?>>(
+            "LiteRT CPU" to { assets -> LiteRtBackend.open(assets, useGpu = false) },
+            "MNN CPU" to { assets -> MnnBackend.open(assets, useGpu = false) },
+            "ncnn CPU" to { assets -> NcnnBackend.open(assets, useGpu = false) },
+        )
 
-            gpuAvailable = false
-            val handle = NcnnPose.create(context.assets, PARAM_ASSET, MODEL_ASSET, false)
-            check(handle != 0L) { "无法加载 ncnn 模型" }
-            PoseAnalyzer(handle)
+        fun open(context: Context): PoseAnalyzer = synchronized(openLock) {
+            val assets = context.assets
+            val gpuDeadline = System.nanoTime() + GPU_PROBE_BUDGET_MS * 1_000_000L
+            for ((name, load) in gpuBackends) {
+                if (name in unavailableGpuBackends) continue
+                val remainingMs = (gpuDeadline - System.nanoTime()) / 1_000_000L
+                if (remainingMs <= 0L) break
+                val backend = loadWithTimeout(name, remainingMs) { load(assets) }
+                if (backend != null) return PoseAnalyzer(backend)
+                unavailableGpuBackends += name
+            }
+            for ((name, load) in cpuBackends) {
+                val backend = runCatching { load(assets) }
+                    .onFailure { Log.w(TAG, "$name load failed", it) }
+                    .getOrNull()
+                if (backend != null) return PoseAnalyzer(backend)
+            }
+            error("无法加载姿态模型")
         }
 
-        private fun loadWithTimeout(load: () -> Long): Long {
+        private fun loadWithTimeout(
+            name: String,
+            timeoutMs: Long,
+            load: () -> PoseBackend?,
+        ): PoseBackend? {
             val executor = Executors.newSingleThreadExecutor { runnable ->
-                Thread(runnable, "ncnn-gpu-load").apply { isDaemon = true }
+                Thread(runnable, "$name-load").apply { isDaemon = true }
             }
-            val future = executor.submit<Long> { load() }
+            val future = executor.submit<PoseBackend?> { load() }
             return try {
-                future.get(GPU_LOAD_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                future.get(timeoutMs, TimeUnit.MILLISECONDS)
             } catch (e: TimeoutException) {
-                // The blocked call cannot be interrupted; a late result is abandoned (one net
-                // leaked per process).
-                Log.w(TAG, "Vulkan model load timed out, falling back to CPU")
-                0L
+                // The blocked call cannot be interrupted; a late result is abandoned (one
+                // backend is leaked per process).
+                Log.w(TAG, "$name load timed out")
+                null
             } catch (e: Exception) {
-                Log.w(TAG, "Vulkan model load failed, falling back to CPU", e)
-                0L
+                Log.w(TAG, "$name load failed", e)
+                null
             } finally {
                 executor.shutdown()
             }
