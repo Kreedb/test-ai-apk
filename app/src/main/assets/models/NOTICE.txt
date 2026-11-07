@@ -1,10 +1,14 @@
-Model: yolo26n_pose.ncnn.param / yolo26n_pose.ncnn.bin
+Model: yolo26n_pose.ncnn.param / .ncnn.bin / .mnn / .tflite
 Source: https://github.com/ultralytics/assets/releases/tag/v8.4.0 (YOLO26n-pose)
 Metadata author: Ultralytics
 Metadata license: AGPL-3.0 License (https://ultralytics.com/license)
 License text: LICENSE-AGPL-3.0.txt (in this directory)
-Runtime: ncnn 20261020, BSD 3-Clause License (LICENSE-ncnn.txt in this directory)
-Conversion: pnnx 20261020 from the original ONNX model, exported at the raw pose head
+Runtime ncnn 20261020, BSD 3-Clause License (LICENSE-ncnn.txt in this directory)
+Runtime MNN 3.6.2, Apache-2.0 License (LICENSE-MNN.txt in this directory)
+Runtime LiteRT 2.3.2, Apache-2.0 License (LICENSE-LiteRT.txt in this directory)
+Conversion: pnnx 20261020 (ncnn), MNNConvert 3.6.2 (MNN), and onnx2tf 2.6.9 (TFLite)
+  from the ONNX raw pose head /model.23/Transpose_output_0
 Input: 1x3x640x640 float32 RGB, letterboxed with 114 padding
-Raw output: 1x8400x56 float32 (x1, y1, x2, y2, score, 17 keypoints x/y/confidence)
+Raw output ncnn/MNN: 1x8400x56 float32 (x1, y1, x2, y2, score, 17 keypoints x/y/confidence)
+Raw output TFLite: 1x56x8400 float32 (the transposed layout emitted by onnx2tf)
 Detection output: top 300 anchors, then 1x300x57 (raw values plus class index 0)

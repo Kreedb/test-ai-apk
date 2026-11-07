@@ -107,7 +107,7 @@ fun StatusScreen() {
                     )
                 }
                 Text(
-                    text = provider ?: "未启动 · ncnn Vulkan 优先，无可用 Vulkan 时回退 CPU",
+                    text = provider ?: "未启动 · 自动选择 LiteRT、MNN 或 ncnn",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -131,7 +131,7 @@ fun StatusScreen() {
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                 InfoRow("ABI", Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown")
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                InfoRow("推理框架", "ncnn")
+                InfoRow("推理框架", "LiteRT / MNN / ncnn")
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                 InfoRow("推理模型", "YOLO26n-pose 640×640")
             }
