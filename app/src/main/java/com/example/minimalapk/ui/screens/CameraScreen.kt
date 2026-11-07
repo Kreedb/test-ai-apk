@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -47,14 +49,17 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.minimalapk.pose.BodyMeasurement
 import com.example.minimalapk.pose.DeviceUsage
 import com.example.minimalapk.pose.DeviceUsageSampler
 import com.example.minimalapk.pose.PoseAnalyzer
@@ -75,10 +80,14 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlin.math.min
+import kotlin.math.max
 
 @Composable
-fun CameraScreen() {
+fun CameraScreen(
+    showPose: Boolean,
+    showHeightLine: Boolean,
+    showArmSpan: Boolean,
+) {
     val context = LocalContext.current
     var granted by remember { mutableStateOf(context.hasCameraPermission()) }
     var permanentlyDenied by remember { mutableStateOf(false) }
@@ -127,6 +136,9 @@ fun CameraScreen() {
             )
             PoseCamera(
                 heightCm = heightText.toFloatOrNull(),
+                showPose = showPose,
+                showHeightLine = showHeightLine,
+                showArmSpan = showArmSpan,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
@@ -166,7 +178,13 @@ fun CameraScreen() {
 }
 
 @Composable
-private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
+private fun PoseCamera(
+    heightCm: Float?,
+    showPose: Boolean,
+    showHeightLine: Boolean,
+    showArmSpan: Boolean,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var frame by remember { mutableStateOf<PoseFrame?>(null) }
@@ -307,11 +325,17 @@ private fun PoseCamera(heightCm: Float?, modifier: Modifier = Modifier) {
             Image(
                 bitmap = current.bitmap.asImageBitmap(),
                 contentDescription = null,
-                contentScale = ContentScale.Fit,
+                // Crop fills the preview window; the square input's letterbox edges are clipped.
+                contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
             PoseOverlay(
                 detection = detection,
+                measurement = measurement,
+                heightCm = heightCm,
+                showPose = showPose,
+                showHeightLine = showHeightLine,
+                showArmSpan = showArmSpan,
                 modifier = Modifier.fillMaxSize(),
             )
             MetricsPanel(
@@ -417,10 +441,22 @@ private fun MetricLine(label: String, value: String) {
 }
 
 @Composable
-private fun PoseOverlay(detection: PoseDetection?, modifier: Modifier = Modifier) {
+private fun PoseOverlay(
+    detection: PoseDetection?,
+    measurement: BodyMeasurement?,
+    heightCm: Float?,
+    showPose: Boolean,
+    showHeightLine: Boolean,
+    showArmSpan: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val labelPaint = remember {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD }
+    }
     Canvas(modifier) {
         if (detection == null) return@Canvas
-        val scale = min(size.width, size.height) / PoseNet.INPUT_SIZE
+        // ContentScale.Crop uses the larger axis to scale the square model input.
+        val scale = max(size.width, size.height) / PoseNet.INPUT_SIZE
         val left = (size.width - PoseNet.INPUT_SIZE * scale) / 2f
         val top = (size.height - PoseNet.INPUT_SIZE * scale) / 2f
         fun point(index: Int): Offset? {
@@ -429,22 +465,55 @@ private fun PoseOverlay(detection: PoseDetection?, modifier: Modifier = Modifier
             return Offset(left + keypoint.x * scale, top + keypoint.y * scale)
         }
 
-        val skeletonColor = Color(0xFF00E5FF)
-        PoseNet.skeletonEdges.forEach { (first, second) ->
-            val start = point(first) ?: return@forEach
-            val end = point(second) ?: return@forEach
-            drawLine(skeletonColor, start, end, strokeWidth = 3f)
+        fun label(text: String, x: Float, y: Float) {
+            labelPaint.color = android.graphics.Color.WHITE
+            labelPaint.textSize = 12.sp.toPx()
+            labelPaint.setShadowLayer(3f, 0f, 0f, android.graphics.Color.BLACK)
+            drawContext.canvas.nativeCanvas.drawText(text, x, y, labelPaint)
         }
-        detection.keypoints.indices.forEach { index ->
-            val keypoint = point(index) ?: return@forEach
-            drawCircle(Color(0xFFFFC107), radius = 5f, center = keypoint)
+
+        if (showPose) {
+            val skeletonColor = Color(0xFF00E5FF)
+            PoseNet.skeletonEdges.forEach { (first, second) ->
+                val start = point(first) ?: return@forEach
+                val end = point(second) ?: return@forEach
+                drawLine(skeletonColor, start, end, strokeWidth = 3f)
+            }
+            detection.keypoints.indices.forEach { index ->
+                val keypoint = point(index) ?: return@forEach
+                drawCircle(Color(0xFFFFC107), radius = 5f, center = keypoint)
+            }
+            drawRect(
+                color = Color(0x9900E5FF),
+                topLeft = Offset(left + detection.left * scale, top + detection.top * scale),
+                size = Size(detection.width * scale, detection.height * scale),
+                style = Stroke(width = 3f),
+            )
         }
-        drawRect(
-            color = Color(0x9900E5FF),
-            topLeft = Offset(left + detection.left * scale, top + detection.top * scale),
-            size = Size(detection.width * scale, detection.height * scale),
-            style = Stroke(width = 3f),
-        )
+
+        if (showHeightLine && measurement != null && heightCm != null) {
+            val centerX = left + (detection.left + detection.right) / 2f * scale
+            val start = Offset(centerX, top + detection.top * scale)
+            val end = Offset(centerX, top + detection.bottom * scale)
+            val lineColor = Color(0xFF76FF03)
+            drawLine(lineColor, start, end, strokeWidth = 4f)
+            drawCircle(lineColor, radius = 7f, center = start)
+            drawCircle(lineColor, radius = 7f, center = end)
+            label("${format(heightCm)} cm", centerX + 12f, (start.y + end.y) / 2f)
+        }
+
+        val armSpan = measurement?.armSpanCm
+        if (showArmSpan && armSpan != null) {
+            val start = point(PoseNet.LEFT_WRIST)
+            val end = point(PoseNet.RIGHT_WRIST)
+            if (start != null && end != null) {
+                val lineColor = Color(0xFFFF4081)
+                drawLine(lineColor, start, end, strokeWidth = 4f)
+                drawCircle(lineColor, radius = 7f, center = start)
+                drawCircle(lineColor, radius = 7f, center = end)
+                label("${format(armSpan)} cm", (start.x + end.x) / 2f + 12f, (start.y + end.y) / 2f)
+            }
+        }
     }
 }
 

@@ -41,6 +41,7 @@ class PoseAnalyzer private constructor(private val handle: Long) : AutoCloseable
 
     init {
         check(handle != 0L) { "无法加载 ncnn 模型" }
+        lastExecutionProvider = executionProvider
     }
 
     fun analyze(source: Bitmap, rotationDegrees: Int): PoseFrame = synchronized(lock) {
@@ -131,6 +132,10 @@ class PoseAnalyzer private constructor(private val handle: Long) : AutoCloseable
         @Volatile
         private var gpuAvailable = true
         private val openLock = Any()
+
+        @Volatile
+        var lastExecutionProvider: String? = null
+            private set
 
         fun open(context: Context): PoseAnalyzer = synchronized(openLock) {
             val gpu = if (gpuAvailable) {
