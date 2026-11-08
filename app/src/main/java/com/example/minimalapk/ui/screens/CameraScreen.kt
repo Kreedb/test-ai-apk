@@ -59,10 +59,12 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.pose.BodyMeasurement
 import com.example.minimalapk.pose.DeviceUsage
 import com.example.minimalapk.pose.DeviceUsageSampler
 import com.example.minimalapk.pose.PoseAnalyzer
+import com.example.minimalapk.pose.PoseBackendPreference
 import com.example.minimalapk.pose.PoseDetection
 import com.example.minimalapk.pose.PoseFrame
 import com.example.minimalapk.pose.PoseMeasurement
@@ -224,6 +226,7 @@ private fun PoseCamera(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                AppLog.e(TAG, "相机初始化失败", e)
                 errorMessage = e.message ?: "相机初始化失败"
                 return@LaunchedEffect
             }
@@ -232,11 +235,13 @@ private fun PoseCamera(
             // cannot leak the opened analyzer; the finally below still closes it.
             val opened = try {
                 withContext(Dispatchers.IO) {
-                    PoseAnalyzer.open(context).also { analyzer = it }
+                    PoseAnalyzer.open(context, PoseBackendPreference.load(context))
+                        .also { analyzer = it }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                AppLog.e(TAG, "模型加载失败", e)
                 errorMessage = e.message ?: "模型加载失败"
                 return@LaunchedEffect
             }
@@ -282,8 +287,10 @@ private fun PoseCamera(
                     }
                 } catch (e: Exception) {
                     mainExecutor.execute {
+                        val message = e.message ?: "姿态推理失败"
                         try {
-                            errorMessage = e.message ?: "姿态推理失败"
+                            if (errorMessage != message) AppLog.e(TAG, message, e)
+                            errorMessage = message
                             frame = null
                         } finally {
                             proxy.close()
@@ -297,10 +304,12 @@ private fun PoseCamera(
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 imageAnalysis,
             )
+            AppLog.i(TAG, "相机预览已启动：${opened.executionProvider}")
             awaitCancellation()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            AppLog.e(TAG, "相机初始化失败", e)
             errorMessage = e.message ?: "相机初始化失败"
         } finally {
             analysis?.clearAnalyzer()
@@ -423,6 +432,7 @@ private fun MetricsPanel(
         MetricLine("帧率", if (fps > 0f) "${format(fps)} FPS" else "—")
         MetricLine("推理", "${format(timings.inferenceMs)} ms")
         MetricLine("预处理", "${format(timings.preprocessMs)} ms")
+        MetricLine("后处理", "${format(timings.postprocessMs)} ms")
         MetricLine("总耗时", "${format(timings.totalMs)} ms")
         MetricLine("加速器", executionProvider ?: "—")
         MetricLine("CPU(应用)", formatPercent(usage.cpuPercent))
@@ -533,6 +543,7 @@ private fun frameRate(timestamps: ArrayDeque<Long>, nowNanos: Long): Float {
 }
 
 private const val FPS_WINDOW_NANOS = 2_000_000_000L
+private const val TAG = "Camera"
 
 private fun Context.hasCameraPermission(): Boolean =
     ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==

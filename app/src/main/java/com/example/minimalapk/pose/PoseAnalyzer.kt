@@ -8,8 +8,8 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
-import android.util.Log
 import androidx.core.graphics.createBitmap
+import com.example.minimalapk.log.AppLog
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -41,6 +41,7 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
 
     init {
         lastExecutionProvider = executionProvider
+        AppLog.i(TAG, "推理后端就绪：$executionProvider")
     }
 
     fun analyze(source: Bitmap, rotationDegrees: Int): PoseFrame = synchronized(lock) {
@@ -57,9 +58,10 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
             PoseNet.INPUT_SIZE,
         )
         val preprocessed = System.nanoTime()
-        val output = runModel(pixels)
+        val raw = backend.analyze(pixels)
         val inferred = System.nanoTime()
-        val detections = PoseDecoder.decode(output)
+        // topDetections selects the 300 best anchors and is CPU postprocessing, not inference.
+        val detections = PoseDecoder.decode(PosePostprocess.topDetections(raw))
         val finished = System.nanoTime()
         PoseFrame(
             bitmap = input,
@@ -79,9 +81,6 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
             backend.close()
         }
     }
-
-    private fun runModel(pixels: IntArray): FloatArray =
-        PosePostprocess.topDetections(backend.analyze(pixels))
 
     private fun createInput(source: Bitmap, rotationDegrees: Int): Bitmap {
         val upright = if (rotationDegrees % 360 == 0) {
@@ -156,23 +155,42 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
             "ncnn CPU" to { assets -> NcnnBackend.open(assets, useGpu = false) },
         )
 
-        fun open(context: Context): PoseAnalyzer = synchronized(openLock) {
+        /** Probe names, exposed so tests can keep [PoseBackendPreference.backendName] in sync. */
+        internal val gpuProbeNames: List<String> = gpuBackends.map { it.first }
+        internal val cpuProbeNames: List<String> = cpuBackends.map { it.first }
+
+        fun open(
+            context: Context,
+            preference: PoseBackendPreference = PoseBackendPreference.AUTO,
+        ): PoseAnalyzer = synchronized(openLock) {
             val assets = context.assets
+            val manualName = preference.backendName
+            AppLog.i(TAG, "推理后端偏好：${preference.label}")
+            // A manual CPU choice skips the GPU probes entirely, so it also skips their budget.
+            val gpuCandidates = if (manualName != null && !preference.gpu) {
+                emptyList()
+            } else {
+                gpuBackends.sortedByDescending { it.first == manualName }
+            }
             val gpuDeadline = System.nanoTime() + GPU_PROBE_BUDGET_MS * 1_000_000L
-            for ((name, load) in gpuBackends) {
-                if (name in unavailableGpuBackends) continue
+            for ((name, load) in gpuCandidates) {
+                if (name in unavailableGpuBackends) {
+                    if (name == manualName) AppLog.w(TAG, "$name 本次运行已加载失败，跳过")
+                    continue
+                }
                 val remainingMs = (gpuDeadline - System.nanoTime()) / 1_000_000L
                 if (remainingMs <= 0L) break
                 val backend = loadWithTimeout(name, remainingMs) { load(assets) }
                 if (backend != null) return PoseAnalyzer(backend)
                 unavailableGpuBackends += name
             }
-            for ((name, load) in cpuBackends) {
+            for ((name, load) in cpuBackends.sortedByDescending { it.first == manualName }) {
                 val backend = runCatching { load(assets) }
-                    .onFailure { Log.w(TAG, "$name load failed", it) }
+                    .onFailure { AppLog.w(TAG, "$name 加载失败", it) }
                     .getOrNull()
                 if (backend != null) return PoseAnalyzer(backend)
             }
+            AppLog.e(TAG, "没有可用的推理后端")
             error("无法加载姿态模型")
         }
 
@@ -185,15 +203,23 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
                 Thread(runnable, "$name-load").apply { isDaemon = true }
             }
             val future = executor.submit<PoseBackend?> { load() }
+            val started = System.nanoTime()
             return try {
-                future.get(timeoutMs, TimeUnit.MILLISECONDS)
+                val backend = future.get(timeoutMs, TimeUnit.MILLISECONDS)
+                if (backend == null) {
+                    AppLog.w(TAG, "$name 不可用")
+                } else {
+                    val elapsedMs = (System.nanoTime() - started).nanosToMillis().roundToInt()
+                    AppLog.i(TAG, "$name 加载成功：$elapsedMs ms")
+                }
+                backend
             } catch (e: TimeoutException) {
                 // The blocked call cannot be interrupted; a late result is abandoned (one
                 // backend is leaked per process).
-                Log.w(TAG, "$name load timed out")
+                AppLog.w(TAG, "$name 加载超时（$timeoutMs ms）")
                 null
             } catch (e: Exception) {
-                Log.w(TAG, "$name load failed", e)
+                AppLog.w(TAG, "$name 加载失败", e)
                 null
             } finally {
                 executor.shutdown()
