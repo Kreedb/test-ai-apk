@@ -224,7 +224,7 @@ private fun InfoCard(systemInfo: SystemInfo, provider: String?) {
         )
         InfoGroup(
             listOf(
-                InfoRow("推理后端", provider ?: "未启动 · 自动选择 LiteRT、MNN 或 ncnn") {
+                InfoRow("推理后端", provider ?: "未启动 · 自动选择 LiteRT（含 NPU）、MNN 或 ncnn") {
                     Icon(painterResource(R.drawable.ic_developer_board), contentDescription = null)
                 },
                 InfoRow("推理框架", "LiteRT / MNN / ncnn") {
