@@ -155,6 +155,10 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
             "ncnn CPU" to { assets -> NcnnBackend.open(assets, useGpu = false) },
         )
 
+        /** Probe names, exposed so tests can keep [PoseBackendPreference.backendName] in sync. */
+        internal val gpuProbeNames: List<String> = gpuBackends.map { it.first }
+        internal val cpuProbeNames: List<String> = cpuBackends.map { it.first }
+
         fun open(
             context: Context,
             preference: PoseBackendPreference = PoseBackendPreference.AUTO,

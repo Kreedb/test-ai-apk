@@ -50,10 +50,13 @@ fun LogScreen(onBack: () -> Unit) {
     val entries = AppLog.entries
     var live by rememberSaveable { mutableStateOf(true) }
     val listState = rememberLazyListState()
+    val lastEntry = entries.lastOrNull()
 
-    // Follow new lines only while live so paused users can read older entries.
-    LaunchedEffect(live, entries.size) {
-        if (live && entries.isNotEmpty()) listState.scrollToItem(entries.lastIndex)
+    // Follow new lines only while live so paused users can read older entries. Key on the last
+    // entry rather than the size: once the buffer hits its cap the size stops changing, and a
+    // size key would silently stop following the tail.
+    LaunchedEffect(live, lastEntry) {
+        if (live && lastEntry != null) listState.scrollToItem(entries.lastIndex)
     }
 
     Column(modifier = Modifier.fillMaxSize()) {

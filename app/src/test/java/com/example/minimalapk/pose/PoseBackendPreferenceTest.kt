@@ -18,10 +18,15 @@ class PoseBackendPreferenceTest {
     }
 
     @Test
-    fun everyManualPreferenceMapsToItsOwnProbeName() {
-        val names = PoseBackendPreference.entries
-            .filter { it != PoseBackendPreference.AUTO }
-            .map { checkNotNull(it.backendName) }
-        assertEquals(PoseBackendPreference.entries.size - 1, names.distinct().size)
+    fun everyManualPreferenceMatchesAProbe() {
+        val manual = PoseBackendPreference.entries.filter { it != PoseBackendPreference.AUTO }
+        assertEquals(
+            PoseAnalyzer.gpuProbeNames.toSet(),
+            manual.filter { it.gpu }.map { checkNotNull(it.backendName) }.toSet(),
+        )
+        assertEquals(
+            PoseAnalyzer.cpuProbeNames.toSet(),
+            manual.filterNot { it.gpu }.map { checkNotNull(it.backendName) }.toSet(),
+        )
     }
 }
