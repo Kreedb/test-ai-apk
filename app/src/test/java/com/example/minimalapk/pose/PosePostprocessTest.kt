@@ -6,21 +6,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PosePostprocessTest {
+    // The model output is value-major [1, 56, 8400].
+    private fun index(anchor: Int, value: Int) = value * PosePostprocess.ANCHOR_COUNT + anchor
+
     @Test
-    fun selectsHighestScoresAndRebuildsDetectionRows() {
+    fun selectsHighestScoresAndRebuildsDetectionRowsFromValueMajorOutput() {
         val raw = FloatArray(PosePostprocess.ANCHOR_COUNT * PosePostprocess.VALUES_PER_ANCHOR)
         val topAnchor = 42
         val secondAnchor = 7
-        raw[topAnchor * PosePostprocess.VALUES_PER_ANCHOR + 4] = 0.9f
-        raw[secondAnchor * PosePostprocess.VALUES_PER_ANCHOR + 4] = 0.8f
-        repeat(4) { i ->
-            raw[topAnchor * PosePostprocess.VALUES_PER_ANCHOR + i] = (i + 1).toFloat()
-            raw[secondAnchor * PosePostprocess.VALUES_PER_ANCHOR + i] = (i + 20).toFloat()
+        raw[index(topAnchor, 4)] = 0.9f
+        raw[index(secondAnchor, 4)] = 0.8f
+        repeat(4) { value ->
+            raw[index(topAnchor, value)] = (value + 1).toFloat()
+            raw[index(secondAnchor, value)] = (value + 20).toFloat()
         }
-        val keypointStart = topAnchor * PosePostprocess.VALUES_PER_ANCHOR + 5
-        raw[keypointStart] = 1.5f
-        raw[keypointStart + 1] = 2.5f
-        raw[keypointStart + 2] = 0.75f
+        raw[index(topAnchor, 5)] = 1.5f
+        raw[index(topAnchor, 6)] = 2.5f
+        raw[index(topAnchor, 7)] = 0.75f
 
         val output = PosePostprocess.topDetections(raw, count = 2)
 
@@ -39,7 +41,7 @@ class PosePostprocessTest {
     @Test
     fun fillsAllRequestedRowsWhenFewerAnchorsHaveScores() {
         val raw = FloatArray(PosePostprocess.ANCHOR_COUNT * PosePostprocess.VALUES_PER_ANCHOR)
-        raw[4] = 1f
+        raw[index(0, 4)] = 1f
 
         val output = PosePostprocess.topDetections(raw)
 

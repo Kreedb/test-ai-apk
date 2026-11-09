@@ -6,6 +6,14 @@ data class PoseKeypoint(
     val confidence: Float,
 )
 
+/** The real photo's rectangle inside the padded, letterboxed 640×640 model input. */
+data class PhotoBounds(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+)
+
 data class PoseDetection(
     val left: Float,
     val top: Float,

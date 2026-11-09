@@ -17,12 +17,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # Only main-branch pushes may sign releases; a workflow_dispatch from any other branch
-      # runs that branch's Gradle code and must not receive the signing key.
-      RELEASE_KEYSTORE_BASE64: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.RELEASE_KEYSTORE_BASE64 || '' }}
-      RELEASE_STORE_PASSWORD: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.RELEASE_STORE_PASSWORD || '' }}
-      RELEASE_KEY_ALIAS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.RELEASE_KEY_ALIAS || '' }}
-      RELEASE_KEY_PASSWORD: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.RELEASE_KEY_PASSWORD || '' }}
+      # Only main-branch pushes and manual dispatches from main may sign releases; a
+      # workflow_dispatch from any other branch runs that branch's Gradle code and must not
+      # receive the signing key.
+      RELEASE_KEYSTORE_BASE64: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && secrets.RELEASE_KEYSTORE_BASE64 || '' }}
+      RELEASE_STORE_PASSWORD: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && secrets.RELEASE_STORE_PASSWORD || '' }}
+      RELEASE_KEY_ALIAS: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && secrets.RELEASE_KEY_ALIAS || '' }}
+      RELEASE_KEY_PASSWORD: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && secrets.RELEASE_KEY_PASSWORD || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -41,6 +42,11 @@ jobs:
         run: |
           echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
           echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+
+      - name: Check model shape signatures
+        run: |
+          python3 tools/staticize_tflite_shapes.py --check
+          python3 tools/test_staticize_tflite_shapes.py
 
       - name: Build, lint, and test
         run: ./gradlew assembleDebug assembleRelease lintDebug testDebugUnitTest --build-cache --parallel --console=plain

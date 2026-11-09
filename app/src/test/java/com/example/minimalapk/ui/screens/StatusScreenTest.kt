@@ -28,7 +28,8 @@ class StatusScreenTest {
     fun parsesSelinuxEnforceNode() {
         assertEquals("Enforcing", selinuxStatus("1\n"))
         assertEquals("Permissive", selinuxStatus("0"))
-        assertEquals("Enforcing", selinuxStatus(null))
+        // An unreadable/absent node must not claim a policy state.
+        assertEquals("N/A", selinuxStatus(null))
     }
 
     @Test
@@ -36,7 +37,7 @@ class StatusScreenTest {
         assertEquals("Filter", seccompStatus("Name:\tapp\nSeccomp:\t2\n"))
         assertEquals("Strict", seccompStatus("Seccomp:\t1\n"))
         assertEquals("Disabled", seccompStatus("Seccomp:\t0\n"))
-        assertEquals("Filter", seccompStatus("Name:\tapp\n"))
-        assertEquals("Filter", seccompStatus(null))
+        assertEquals("N/A", seccompStatus("Name:\tapp\n"))
+        assertEquals("N/A", seccompStatus(null))
     }
 }

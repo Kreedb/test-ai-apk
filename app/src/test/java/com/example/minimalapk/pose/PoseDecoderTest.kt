@@ -7,6 +7,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PoseDecoderTest {
+    private val fullPhoto = PhotoBounds(left = 0f, top = 0f, right = 640f, bottom = 640f)
+
     private fun outputWithDetection(score: Float = 0.9f): FloatArray {
         val output = FloatArray(PoseNet.DETECTION_COUNT * PoseNet.VALUES_PER_DETECTION)
         output[0] = 100f
@@ -33,9 +35,10 @@ class PoseDecoderTest {
         points.forEach { (index, keypoint) -> keypoints[index] = keypoint }
         return PoseDetection(
             left = 0f,
-            top = 0f,
+            // Keep the box height at 400 while staying clear of the photo's top edge.
+            top = 20f,
             right = 200f,
-            bottom = 400f,
+            bottom = 420f,
             score = 0.9f,
             keypoints = keypoints,
         )
@@ -90,7 +93,7 @@ class PoseDecoderTest {
             PoseNet.RIGHT_HIP to keypoint(100f, 250f),
         )
 
-        val measurement = PoseMeasurement.measure(detection, heightCm = 170f)!!
+        val measurement = PoseMeasurement.measure(detection, heightCm = 170f, bounds = fullPhoto)!!
 
         assertEquals(0.425f, measurement.cmPerPixel, 0.001f)
         assertEquals(85f, measurement.armSpanCm!!, 0.01f)
@@ -109,7 +112,7 @@ class PoseDecoderTest {
             PoseNet.RIGHT_WRIST to keypoint(250f, 150f),
         )
 
-        val measurement = PoseMeasurement.measure(detection, heightCm = 170f)!!
+        val measurement = PoseMeasurement.measure(detection, heightCm = 170f, bounds = fullPhoto)!!
 
         assertNull(measurement.armSpanCm)
         assertEquals(8.5f, measurement.eyeDistanceCm!!, 0.01f)
@@ -123,7 +126,7 @@ class PoseDecoderTest {
             PoseNet.RIGHT_SHOULDER to keypoint(100f, 100f),
         )
 
-        val measurement = PoseMeasurement.measure(detection, heightCm = 170f)!!
+        val measurement = PoseMeasurement.measure(detection, heightCm = 170f, bounds = fullPhoto)!!
 
         assertEquals(5.71f, measurement.shoulderTiltDeg!!, 0.1f)
     }
@@ -131,8 +134,8 @@ class PoseDecoderTest {
     @Test
     fun measurementRejectsInvalidHeight() {
         val detection = pose(PoseNet.NOSE to keypoint(100f, 100f))
-        assertNull(PoseMeasurement.measure(detection, heightCm = 0f))
-        assertNull(PoseMeasurement.measure(detection, heightCm = 300f))
+        assertNull(PoseMeasurement.measure(detection, heightCm = 0f, bounds = fullPhoto))
+        assertNull(PoseMeasurement.measure(detection, heightCm = 300f, bounds = fullPhoto))
     }
 
     @Test
@@ -143,15 +146,45 @@ class PoseDecoderTest {
             PoseNet.RIGHT_ANKLE to keypoint(120f, 640f, confidence = 0.001f),
         )
 
-        assertFalse(PoseMeasurement.isFullBodyVisible(detection))
-        assertNull(PoseMeasurement.measure(detection, heightCm = 170f))
+        assertFalse(PoseMeasurement.isFullBodyVisible(detection, fullPhoto))
+        assertNull(PoseMeasurement.measure(detection, heightCm = 170f, bounds = fullPhoto))
     }
 
     @Test
     fun fullBodyRequiresHeadAndFeetInsideFrame() {
-        assertTrue(PoseMeasurement.isFullBodyVisible(pose()))
+        assertTrue(PoseMeasurement.isFullBodyVisible(pose(), fullPhoto))
 
         val outside = pose(PoseNet.LEFT_ANKLE to keypoint(100f, 700f))
-        assertFalse(PoseMeasurement.isFullBodyVisible(outside))
+        assertFalse(PoseMeasurement.isFullBodyVisible(outside, fullPhoto))
+    }
+
+    @Test
+    fun measurementRejectsHeadInLetterboxPadding() {
+        // A 640x480 source letterboxes 80px of padding at the top and bottom.
+        val photo = PhotoBounds(left = 0f, top = 80f, right = 640f, bottom = 560f)
+        val detection = pose(PoseNet.NOSE to keypoint(100f, 50f))
+
+        assertFalse(PoseMeasurement.isFullBodyVisible(detection, photo))
+        assertNull(PoseMeasurement.measure(detection, heightCm = 170f, bounds = photo))
+    }
+
+    @Test
+    fun measurementRejectsFeetInLetterboxPadding() {
+        val photo = PhotoBounds(left = 0f, top = 0f, right = 640f, bottom = 480f)
+        val detection = pose(
+            PoseNet.LEFT_ANKLE to keypoint(100f, 500f),
+            PoseNet.RIGHT_ANKLE to keypoint(120f, 500f),
+        )
+
+        assertFalse(PoseMeasurement.isFullBodyVisible(detection, photo))
+        assertNull(PoseMeasurement.measure(detection, heightCm = 170f, bounds = photo))
+    }
+
+    @Test
+    fun measurementRejectsBoxTouchingPhotoEdge() {
+        val detection = pose().copy(top = fullPhoto.top)
+
+        assertFalse(PoseMeasurement.isFullBodyVisible(detection, fullPhoto))
+        assertNull(PoseMeasurement.measure(detection, heightCm = 170f, bounds = fullPhoto))
     }
 }

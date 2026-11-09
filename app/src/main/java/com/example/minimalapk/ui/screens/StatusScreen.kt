@@ -17,8 +17,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LargeTopAppBar
@@ -60,14 +60,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
-
-private const val REPO_URL = "https://github.com/Kreedb/test-ai-apk"
-
-// shortcut: no public GPU utilization API, show plausible placeholders until vendor nodes are verified.
-private const val FAKE_GPU_PERCENT = 37f
-private const val FAKE_GPU_MODEL = "Adreno (TM) 740"
-private const val FAKE_SELINUX = "Enforcing"
-private const val FAKE_SECCOMP = "Filter"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -146,10 +138,12 @@ private fun StatusCard(provider: String?, usage: DeviceUsage) {
         shape = MaterialTheme.shapes.large,
     ) {
         ListItem(
-            leadingContent = { Icon(Icons.Filled.CheckCircle, contentDescription = null) },
+            leadingContent = { Icon(Icons.Filled.Info, contentDescription = null) },
             headlineContent = {
                 Text(
-                    text = if (active) "工作正常" else "待命中",
+                    // This is the last model that loaded, not proof that the camera or inference
+                    // currently works; those can fail after a successful load.
+                    text = if (active) "上次加载的后端" else "待命中",
                     fontWeight = FontWeight.SemiBold,
                 )
             },
@@ -160,7 +154,7 @@ private fun StatusCard(provider: String?, usage: DeviceUsage) {
                         append(" · 本应用 CPU ")
                         append(formatUsage(usage.cpuPercent))
                         append(" · 系统 GPU ")
-                        append(formatUsage(usage.gpuPercent ?: FAKE_GPU_PERCENT))
+                        append(formatUsage(usage.gpuPercent))
                     },
                 )
             },
@@ -337,7 +331,7 @@ private fun loadSystemInfo(): SystemInfo = SystemInfo(
     selinux = selinuxStatus(readSecureFile("/sys/fs/selinux/enforce")),
     seccomp = seccompStatus(readSecureFile("/proc/self/status")),
     cpu = cpuDescription(),
-    gpu = gpuDescription() ?: FAKE_GPU_MODEL,
+    gpu = gpuDescription() ?: "N/A",
 )
 
 private fun readSecureFile(path: String): String? =
@@ -346,7 +340,7 @@ private fun readSecureFile(path: String): String? =
 internal fun selinuxStatus(enforce: String?): String = when (enforce?.trim()) {
     "0" -> "Permissive"
     "1" -> "Enforcing"
-    else -> FAKE_SELINUX
+    else -> "N/A"
 }
 
 internal fun seccompStatus(procStatus: String?): String {
@@ -358,7 +352,7 @@ internal fun seccompStatus(procStatus: String?): String {
         "0" -> "Disabled"
         "1" -> "Strict"
         "2" -> "Filter"
-        else -> FAKE_SECCOMP
+        else -> "N/A"
     }
 }
 
