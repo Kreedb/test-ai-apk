@@ -46,13 +46,9 @@ class PoseAnalyzer internal constructor(
     private val executor: ExecutorService,
 ) : AutoCloseable {
     val executionProvider: String = backend.name
-    private val lock = Any()
     private var closed = false
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val pixels = IntArray(PoseNet.INPUT_SIZE * PoseNet.INPUT_SIZE)
-    // Two buffers because the previous frame may still be drawn while the next one is analyzed.
-    private val inputBuffers = arrayOfNulls<Bitmap>(2)
-    private var inputIndex = 0
     private var frames = 0
 
     init {
@@ -72,7 +68,7 @@ class PoseAnalyzer internal constructor(
         }
     }
 
-    private fun analyzeOnWorker(source: Bitmap, rotationDegrees: Int): PoseFrame = synchronized(lock) {
+    private fun analyzeOnWorker(source: Bitmap, rotationDegrees: Int): PoseFrame {
         check(!closed) { "PoseAnalyzer is closed" }
         val start = System.nanoTime()
         val layout = poseInputLayout(source.width, source.height, rotationDegrees)
@@ -90,8 +86,8 @@ class PoseAnalyzer internal constructor(
         val preprocessed = System.nanoTime()
         val raw = backend.analyze(pixels)
         val inferred = System.nanoTime()
-        // topDetections selects the 300 best anchors and is CPU postprocessing, not inference.
-        val detections = PoseDecoder.decode(PosePostprocess.topDetections(raw))
+        // Selecting and decoding anchors is CPU postprocessing, not inference.
+        val detections = PoseDecoder.decode(raw)
         val finished = System.nanoTime()
         val timings = PoseTimings(
             preprocessMs = (preprocessed - start).nanosToMillis(),
@@ -109,7 +105,7 @@ class PoseAnalyzer internal constructor(
                     "后处理=${timings.postprocessMs.roundToInt()} ms",
             )
         }
-        PoseFrame(
+        return PoseFrame(
             bitmap = input,
             detections = detections,
             timings = timings,
@@ -121,23 +117,19 @@ class PoseAnalyzer internal constructor(
         if (executor.isShutdown) return
         runCatching {
             executor.submit {
-                synchronized(lock) {
-                    if (!closed) {
-                        closed = true
-                        backend.close()
-                    }
+                if (!closed) {
+                    closed = true
+                    backend.close()
                 }
             }.get()
-        }
+        }.onFailure { AppLog.w(TAG, "关闭推理后端失败", it) }
         executor.shutdown()
     }
 
     private fun createInput(source: Bitmap, layout: PoseInputLayout): Bitmap {
-        inputIndex = 1 - inputIndex
-        val input = inputBuffers[inputIndex]
-            ?: createBitmap(PoseNet.INPUT_SIZE, PoseNet.INPUT_SIZE).also {
-                inputBuffers[inputIndex] = it
-            }
+        // Each published frame owns its bitmap: Compose may still draw an older frame while the
+        // next one is analyzed, and asImageBitmap() does not copy the pixels.
+        val input = createBitmap(PoseNet.INPUT_SIZE, PoseNet.INPUT_SIZE)
         val canvas = Canvas(input)
         val padding = PoseNet.LETTERBOX_COLOR
         canvas.drawColor(Color.rgb(padding, padding, padding))
@@ -158,8 +150,8 @@ class PoseAnalyzer internal constructor(
 
         private const val TAG = "PoseAnalyzer"
 
-        // A broken driver can block inside model loading forever, so cap the GPU probe.
-        private const val GPU_PROBE_BUDGET_MS = 10_000L
+        // A broken driver can block inside model loading forever, so cap every probe.
+        private const val PROBE_BUDGET_MS = 10_000L
 
         // NPU is a one-time JIT compile per model open, not a driver probe, so it gets its own
         // budget instead of eating the GPU probes' 10s.
@@ -275,8 +267,6 @@ class PoseAnalyzer internal constructor(
                 Thread(runnable, "PoseBackend").apply { isDaemon = true }
             }
             try {
-                // Started lazily so a slow NPU JIT compile cannot consume the GPU probes' budget.
-                var gpuDeadline = 0L
                 for ((name, load) in gpuCandidates) {
                     if (name == NPU_PROBE_NAME) {
                         val reason = npuUnavailableReasonForDevice()
@@ -289,42 +279,14 @@ class PoseAnalyzer internal constructor(
                         if (name == manualName) AppLog.w(TAG, "$name 本次运行已加载失败，跳过")
                         continue
                     }
-                    val remainingMs = if (name == NPU_PROBE_NAME) {
-                        NPU_PROBE_BUDGET_MS
-                    } else {
-                        if (gpuDeadline == 0L) {
-                            gpuDeadline = System.nanoTime() + GPU_PROBE_BUDGET_MS * 1_000_000L
-                        }
-                        (gpuDeadline - System.nanoTime()) / 1_000_000L
-                    }
-                    if (remainingMs <= 0L) break
-                    val probeStarted = System.nanoTime()
-                    val backend = try {
-                        loadWithTimeout(name, remainingMs, worker) { load(context) }
-                    } catch (e: TimeoutException) {
-                        // The native call keeps holding LiteRT's compile mutex; block every later
-                        // open until the process restarts instead of hanging on it.
-                        nativeCompileTimedOut = true
-                        // Surface the restart guidance instead of TimeoutException's empty message.
-                        throw IllegalStateException(MODEL_STUCK_MESSAGE, e)
-                    }
-                    if (name == NPU_PROBE_NAME && gpuDeadline != 0L) {
-                        // The NPU JIT does not touch the shared GPU driver, and in manual mode its
-                        // probe runs after gpuDeadline started; give that time back so a slow
-                        // compile cannot exhaust the budget the GPU backends are entitled to.
-                        gpuDeadline += System.nanoTime() - probeStarted
-                    }
+                    val budgetMs = if (name == NPU_PROBE_NAME) NPU_PROBE_BUDGET_MS else PROBE_BUDGET_MS
+                    val backend = loadCandidate(name, budgetMs, worker) { load(context) }
                     if (backend != null) return PoseAnalyzer(backend, worker)
                     unavailableGpuBackends += name
                 }
-                for ((name, load) in cpuBackends.sortedByDescending { it.first == manualName }) {
-                    val started = System.nanoTime()
-                    val backend = loadOnWorker(name, worker) { load(context) }
-                    if (backend != null) {
-                        val elapsedMs = (System.nanoTime() - started).nanosToMillis().roundToInt()
-                        AppLog.i(TAG, "$name 加载成功：$elapsedMs ms")
-                        return PoseAnalyzer(backend, worker)
-                    }
+                for ((name, load) in cpuBackends) {
+                    val backend = loadCandidate(name, PROBE_BUDGET_MS, worker) { load(context) }
+                    if (backend != null) return PoseAnalyzer(backend, worker)
                 }
                 error("无法加载姿态模型")
             } catch (t: Throwable) {
@@ -334,6 +296,22 @@ class PoseAnalyzer internal constructor(
                 throw t
             }
         }
+
+        /** Turns a stuck native load into the same restart guidance used by every backend. */
+        private fun loadCandidate(
+            name: String,
+            timeoutMs: Long,
+            worker: ExecutorService,
+            load: () -> PoseBackend?,
+        ): PoseBackend? =
+            try {
+                loadWithTimeout(name, timeoutMs, worker, load)
+            } catch (e: TimeoutException) {
+                // The native call keeps holding LiteRT's compile mutex; block every later open
+                // until the process restarts instead of hanging on it.
+                nativeCompileTimedOut = true
+                throw IllegalStateException(MODEL_STUCK_MESSAGE, e)
+            }
 
         /**
          * Runs a timed probe on [worker]. On timeout the native call cannot be interrupted and
@@ -399,34 +377,21 @@ class PoseAnalyzer internal constructor(
          */
         private fun closeOnWorker(worker: ExecutorService, backend: PoseBackend?) {
             if (backend == null) return
-            try {
-                worker.submit { backend.close() }.get()
-            } catch (e: InterruptedException) {
-                // The caller is already being interrupted; queue the close instead of blocking.
-                Thread.currentThread().interrupt()
-                runCatching { worker.submit { backend.close() } }
+            val task = try {
+                worker.submit { backend.close() }
             } catch (e: Exception) {
                 AppLog.w(TAG, "关闭迟到模型失败", e)
-                runCatching { backend.close() }
+                return
+            }
+            try {
+                task.get()
+            } catch (e: InterruptedException) {
+                // The task already queued will run when the worker drains; queueing another close
+                // would close the same backend twice.
+                Thread.currentThread().interrupt()
+            } catch (e: Exception) {
+                AppLog.w(TAG, "关闭迟到模型失败", e)
             }
         }
-
-        private fun loadOnWorker(
-            name: String,
-            worker: ExecutorService,
-            load: () -> PoseBackend?,
-        ): PoseBackend? =
-            try {
-                val backend = worker.submit<PoseBackend?> { load() }.get()
-                if (backend == null) AppLog.w(TAG, "$name 不可用")
-                backend
-            } catch (e: ExecutionException) {
-                AppLog.w(TAG, "$name 加载失败", e.cause ?: e)
-                null
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                AppLog.w(TAG, "$name 加载被中断")
-                null
-            }
     }
 }

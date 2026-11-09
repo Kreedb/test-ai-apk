@@ -26,15 +26,16 @@ internal class LiteRtBackend private constructor(
         argbToRgbFloat(pixels, inputValues)
         input.writeFloat(inputValues)
         model.run(listOf(input), listOf(output))
-        // Value-major [1, 56, 8400]; PosePostprocess reads it in place instead of transposing.
+        // Value-major [1, 56, 8400]; PoseDecoder reads it in place instead of transposing.
         return output.readFloat()
     }
 
     override fun close() {
-        input.close()
-        output.close()
-        model.close()
-        environment?.close()
+        // Attempt every handle: one failed native close must not leak the rest.
+        runCatching { input.close() }.onFailure { AppLog.w(TAG, "关闭输入缓冲区失败", it) }
+        runCatching { output.close() }.onFailure { AppLog.w(TAG, "关闭输出缓冲区失败", it) }
+        runCatching { model.close() }.onFailure { AppLog.w(TAG, "关闭模型失败", it) }
+        runCatching { environment?.close() }.onFailure { AppLog.w(TAG, "关闭运行环境失败", it) }
     }
 
     companion object {
@@ -192,10 +193,13 @@ internal class LiteRtBackend private constructor(
 /** Converts ARGB pixels to the interleaved NHWC RGB floats expected by the TFLite model. */
 internal fun argbToRgbFloat(pixels: IntArray, out: FloatArray) {
     require(out.size >= pixels.size * 3) { "Output buffer is too small" }
-    for (index in pixels.indices) {
-        val pixel = pixels[index]
-        out[index * 3] = ((pixel shr 16) and 0xff) / 255f
-        out[index * 3 + 1] = ((pixel shr 8) and 0xff) / 255f
-        out[index * 3 + 2] = (pixel and 0xff) / 255f
+    // Multiply instead of dividing 1.23M times per 640x640 frame.
+    var outIndex = 0
+    for (pixel in pixels) {
+        out[outIndex++] = ((pixel shr 16) and 0xff) * INV_255
+        out[outIndex++] = ((pixel shr 8) and 0xff) * INV_255
+        out[outIndex++] = (pixel and 0xff) * INV_255
     }
 }
+
+private const val INV_255 = 1f / 255f

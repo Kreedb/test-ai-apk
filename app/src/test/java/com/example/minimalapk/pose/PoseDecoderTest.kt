@@ -9,19 +9,21 @@ import org.junit.Test
 class PoseDecoderTest {
     private val fullPhoto = PhotoBounds(left = 0f, top = 0f, right = 640f, bottom = 640f)
 
+    private fun index(anchor: Int, channel: Int) = channel * PoseNet.ANCHOR_COUNT + anchor
+
     private fun outputWithDetection(score: Float = 0.9f): FloatArray {
-        val output = FloatArray(PoseNet.DETECTION_COUNT * PoseNet.VALUES_PER_DETECTION)
-        output[0] = 100f
-        output[1] = 100f
-        output[2] = 300f
-        output[3] = 500f
-        output[4] = score
-        output[5] = 0f
+        // The model output is value-major [1, 56, 8400].
+        val output = FloatArray(PoseNet.ANCHOR_COUNT * PoseNet.VALUES_PER_ANCHOR)
+        output[index(0, 0)] = 100f
+        output[index(0, 1)] = 100f
+        output[index(0, 2)] = 300f
+        output[index(0, 3)] = 500f
+        output[index(0, 4)] = score
         for (keypoint in 0 until PoseNet.KEYPOINT_COUNT) {
-            val offset = 6 + keypoint * 3
-            output[offset] = 100f + keypoint
-            output[offset + 1] = 200f + keypoint
-            output[offset + 2] = 0.9f
+            val channel = 5 + keypoint * 3
+            output[index(0, channel)] = 100f + keypoint
+            output[index(0, channel + 1)] = 200f + keypoint
+            output[index(0, channel + 2)] = 0.9f
         }
         return output
     }
@@ -48,7 +50,7 @@ class PoseDecoderTest {
         PoseKeypoint(x, y, confidence)
 
     @Test
-    fun decodesEndToEndOutputLayout() {
+    fun decodesValueMajorOutputInPlace() {
         val detections = PoseDecoder.decode(outputWithDetection())
 
         assertEquals(1, detections.size)
@@ -71,13 +73,26 @@ class PoseDecoderTest {
     @Test
     fun sortsDetectionsByScore() {
         val output = outputWithDetection(score = 0.4f)
-        output[PoseNet.VALUES_PER_DETECTION + 4] = 0.9f
+        output[index(1, 4)] = 0.9f
 
         val detections = PoseDecoder.decode(output)
 
         assertEquals(2, detections.size)
         assertEquals(0.9f, detections[0].score)
         assertEquals(0.4f, detections[1].score)
+    }
+
+    @Test
+    fun capsDetectionsAtTheModelLimit() {
+        val output = FloatArray(PoseNet.ANCHOR_COUNT * PoseNet.VALUES_PER_ANCHOR)
+        // 400 anchors pass the threshold; only the 300 highest may be decoded.
+        for (anchor in 0 until 400) output[index(anchor, 4)] = 1f - anchor * 0.001f
+
+        val detections = PoseDecoder.decode(output)
+
+        assertEquals(PoseNet.DETECTION_COUNT, detections.size)
+        assertEquals(1f, detections.first().score, 0f)
+        assertEquals(1f - 299 * 0.001f, detections.last().score, 0.0001f)
     }
 
     @Test
@@ -117,6 +132,22 @@ class PoseDecoderTest {
         assertNull(measurement.armSpanCm)
         assertEquals(8.5f, measurement.eyeDistanceCm!!, 0.01f)
         assertNull(measurement.shoulderTiltDeg)
+    }
+
+    @Test
+    fun measurementHidesValuesWhosePointsAreOutsideThePhoto() {
+        val photo = PhotoBounds(left = 80f, top = 0f, right = 560f, bottom = 640f)
+        val detection = pose(
+            PoseNet.LEFT_EYE to keypoint(140f, 50f),
+            PoseNet.RIGHT_EYE to keypoint(160f, 50f),
+            PoseNet.LEFT_WRIST to keypoint(20f, 150f),
+            PoseNet.RIGHT_WRIST to keypoint(250f, 150f),
+        )
+
+        val measurement = PoseMeasurement.measure(detection, heightCm = 170f, bounds = photo)!!
+
+        assertNull(measurement.armSpanCm)
+        assertEquals(8.5f, measurement.eyeDistanceCm!!, 0.01f)
     }
 
     @Test

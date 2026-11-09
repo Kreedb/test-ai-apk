@@ -33,7 +33,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -80,6 +79,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.max
@@ -196,11 +196,6 @@ private fun PoseCamera(
     var executionProvider by remember { mutableStateOf<String?>(null) }
     val frameTimes = remember { ArrayDeque<Long>() }
     val usageSampler = remember { DeviceUsageSampler() }
-    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
-
-    DisposableEffect(Unit) {
-        onDispose { analysisExecutor.shutdown() }
-    }
 
     LaunchedEffect(lifecycleOwner) {
         while (isActive) {
@@ -217,6 +212,8 @@ private fun PoseCamera(
     }
 
     LaunchedEffect(lifecycleOwner) {
+        // Owned by this effect so a lifecycle re-run never binds CameraX to a shut-down executor.
+        val analysisExecutor = Executors.newSingleThreadExecutor()
         var analyzer: PoseAnalyzer? = null
         var analysis: ImageAnalysis? = null
         var cameraProvider: ProcessCameraProvider? = null
@@ -269,9 +266,16 @@ private fun PoseCamera(
                     val bitmap = proxy.toBitmap()
                     val result = try {
                         opened.analyze(bitmap, rotationDegrees)
-                    } finally {
+                    } catch (e: CancellationException) {
+                        // Teardown interrupted the wait, but the backend worker may still be reading
+                        // the source. Leave it to GC and do not report a normal exit as an error.
+                        mainExecutor.execute { proxy.close() }
+                        return@setAnalyzer
+                    } catch (e: Exception) {
                         bitmap.recycle()
+                        throw e
                     }
+                    bitmap.recycle()
                     val completedNanos = System.nanoTime()
                     // Keep the frame open until the main thread consumes it so CameraX's
                     // latest-frame limit also bounds pending display work.
@@ -285,6 +289,8 @@ private fun PoseCamera(
                             proxy.close()
                         }
                     }
+                } catch (e: CancellationException) {
+                    mainExecutor.execute { proxy.close() }
                 } catch (e: Exception) {
                     mainExecutor.execute {
                         val message = e.message ?: "姿态推理失败"
@@ -312,11 +318,20 @@ private fun PoseCamera(
             errorMessage = e.message ?: "相机初始化失败"
         } finally {
             analysis?.clearAnalyzer()
-            analysisExecutor.shutdownNow()
+            // Let the running frame finish before the analyzer closes and the source is freed;
+            // shutdownNow() interrupted the wait while the backend worker kept reading the bitmap.
+            analysisExecutor.shutdown()
             // Unbind only this screen's use case; unbindAll() here would tear down a newer
             // CameraScreen that finished binding while this delayed cleanup was still pending.
             cameraProvider?.let { provider -> analysis?.let { provider.unbind(it) } }
-            analyzer?.let { withContext(NonCancellable + Dispatchers.IO) { it.close() } }
+            analyzer?.let { opened ->
+                withContext(NonCancellable + Dispatchers.IO) {
+                    // Wait for the in-flight frame callback before closing: otherwise it can submit
+                    // analyze() after the backend worker is shut down and log a false error.
+                    analysisExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS)
+                    opened.close()
+                }
+            }
         }
     }
 
@@ -533,11 +548,9 @@ private fun PoseOverlay(
 
 private fun format(value: Float): String = String.format(Locale.US, "%.1f", value)
 
-private fun formatPercent(value: Float?): String =
-    if (value != null) "${format(value)}%" else "N/A"
-
-private fun frameRate(timestamps: ArrayDeque<Long>, nowNanos: Long): Float {
-    while (timestamps.size > 1 && nowNanos - timestamps.first() > FPS_WINDOW_NANOS) {
+internal fun frameRate(timestamps: ArrayDeque<Long>, nowNanos: Long): Float {
+    // Keep two samples so a stream slower than the window still has a measurable interval.
+    while (timestamps.size > 2 && nowNanos - timestamps.first() > FPS_WINDOW_NANOS) {
         timestamps.removeFirst()
     }
     if (timestamps.size < 2) return 0f

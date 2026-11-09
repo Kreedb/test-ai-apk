@@ -28,13 +28,15 @@ fun MinimalApkTheme(
 @Composable
 fun rememberThemeColorScheme(settings: ThemeSettings, darkTheme: Boolean): ColorScheme {
     val context = LocalContext.current
-    val dynamicSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-    val dynamicSeed = if (dynamicSupported) {
+    // Read the system palette only when the user did not pick a custom color; the theme page also
+    // calls this for every swatch, and dynamic*ColorScheme builds a full scheme from the wallpaper.
+    val seed = if (settings.keyColor != 0) {
+        Color(settings.keyColor)
+    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         (if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)).primary
     } else {
         if (darkTheme) DarkPrimary else LightPrimary
     }
-    val seed = if (settings.keyColor == 0) dynamicSeed else Color(settings.keyColor)
     return rememberDynamicColorScheme(
         seedColor = seed,
         isDark = darkTheme,

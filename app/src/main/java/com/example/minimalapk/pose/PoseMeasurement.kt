@@ -18,12 +18,7 @@ object PoseMeasurement {
     // Box height only equals body height when head and both feet are inside the real photo (not
     // the gray letterbox padding), and the box does not touch the photo's top or bottom edge.
     fun isFullBodyVisible(detection: PoseDetection, bounds: PhotoBounds): Boolean {
-        fun visible(index: Int): Boolean {
-            val keypoint = detection.keypoints.getOrNull(index) ?: return false
-            return keypoint.confidence >= PoseNet.KEYPOINT_THRESHOLD &&
-                keypoint.x > bounds.left && keypoint.x < bounds.right &&
-                keypoint.y > bounds.top && keypoint.y < bounds.bottom
-        }
+        fun visible(index: Int) = detection.visiblePoint(index, bounds) != null
 
         val headSeen = visible(PoseNet.NOSE) ||
             visible(PoseNet.LEFT_EYE) ||
@@ -41,9 +36,9 @@ object PoseMeasurement {
         if (!isFullBodyVisible(detection, bounds)) return null
         val cmPerPixel = heightCm / detection.height
 
-        fun point(index: Int): PoseKeypoint? =
-            detection.keypoints.getOrNull(index)
-                ?.takeIf { it.confidence >= PoseNet.KEYPOINT_THRESHOLD }
+        // Every measured point must be a confident detection inside the real photo; a cropped
+        // wrist or a guess in the gray padding would otherwise produce a plausible distance.
+        fun point(index: Int): PoseKeypoint? = detection.visiblePoint(index, bounds)
 
         fun distance(first: Int, second: Int): Float? {
             val a = point(first) ?: return null
@@ -83,3 +78,11 @@ object PoseMeasurement {
         )
     }
 }
+
+private fun PoseDetection.visiblePoint(index: Int, bounds: PhotoBounds): PoseKeypoint? =
+    keypoints.getOrNull(index)?.takeIf {
+        it.confidence >= PoseNet.KEYPOINT_THRESHOLD && it.isInside(bounds)
+    }
+
+private fun PoseKeypoint.isInside(bounds: PhotoBounds): Boolean =
+    x > bounds.left && x < bounds.right && y > bounds.top && y < bounds.bottom
