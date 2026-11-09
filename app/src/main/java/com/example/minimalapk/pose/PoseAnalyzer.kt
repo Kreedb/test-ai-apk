@@ -4,9 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.Rect
 import android.os.Build
 import androidx.core.graphics.createBitmap
 import com.example.minimalapk.log.AppLog
@@ -15,7 +13,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.math.min
 import kotlin.math.roundToInt
 
 private fun Long.nanosToMillis(): Float = this / 1_000_000f
@@ -51,6 +48,7 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
         check(!closed) { "PoseAnalyzer is closed" }
         val start = System.nanoTime()
         val input = createInput(source, rotationDegrees)
+        val rendered = System.nanoTime()
         input.getPixels(
             pixels,
             0,
@@ -74,7 +72,10 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
         if (frames++ == 0) {
             AppLog.i(
                 TAG,
-                "首帧耗时：预处理=${timings.preprocessMs.roundToInt()} ms，" +
+                "首帧耗时（源 ${source.width}x${source.height}，旋转 $rotationDegrees°）：" +
+                    "预处理=${timings.preprocessMs.roundToInt()} ms" +
+                    "（旋转+letterbox=${(rendered - start).nanosToMillis().roundToInt()} ms，" +
+                    "取像素=${(preprocessed - rendered).nanosToMillis().roundToInt()} ms），" +
                     "推理=${timings.inferenceMs.roundToInt()} ms，" +
                     "后处理=${timings.postprocessMs.roundToInt()} ms",
             )
@@ -95,38 +96,20 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
     }
 
     private fun createInput(source: Bitmap, rotationDegrees: Int): Bitmap {
-        val upright = if (rotationDegrees % 360 == 0) {
-            source
-        } else {
-            Bitmap.createBitmap(
-                source,
-                0,
-                0,
-                source.width,
-                source.height,
-                Matrix().apply { postRotate(rotationDegrees.toFloat()) },
-                true,
-            )
-        }
-        val scale = min(
-            PoseNet.INPUT_SIZE.toFloat() / upright.width,
-            PoseNet.INPUT_SIZE.toFloat() / upright.height,
-        )
-        val targetWidth = (upright.width * scale).roundToInt()
-        val targetHeight = (upright.height * scale).roundToInt()
-        val left = (PoseNet.INPUT_SIZE - targetWidth) / 2
-        val top = (PoseNet.INPUT_SIZE - targetHeight) / 2
+        val layout = poseInputLayout(source.width, source.height, rotationDegrees)
         val input = createBitmap(PoseNet.INPUT_SIZE, PoseNet.INPUT_SIZE)
         val canvas = Canvas(input)
         val padding = PoseNet.LETTERBOX_COLOR
         canvas.drawColor(Color.rgb(padding, padding, padding))
-        canvas.drawBitmap(
-            upright,
-            null,
-            Rect(left, top, left + targetWidth, top + targetHeight),
-            paint,
-        )
-        if (upright !== source) upright.recycle()
+        // Rotate around the source center and scale straight into the letterbox rect, so 90/180/270
+        // no longer need an intermediate full-frame copy.
+        canvas.save()
+        canvas.translate(layout.centerX, layout.centerY)
+        canvas.rotate(layout.rotationDegrees.toFloat())
+        canvas.scale(layout.scale, layout.scale)
+        canvas.translate(-source.width / 2f, -source.height / 2f)
+        canvas.drawBitmap(source, 0f, 0f, paint)
+        canvas.restore()
         return input
     }
 
