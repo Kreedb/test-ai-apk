@@ -1,7 +1,7 @@
 package com.example.minimalapk.pose
 
 /**
- * The ncnn model ends at the raw pose head: 8400 anchors of 56 values
+ * The TFLite model ends at the raw pose head: 8400 anchors of 56 values
  * (box x1/y1/x2/y2, score, 17 keypoints x/y/confidence). Select the 300 best anchors and
  * insert the class index expected by [PoseDecoder].
  */
