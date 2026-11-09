@@ -272,7 +272,14 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
                     (gpuDeadline - System.nanoTime()) / 1_000_000L
                 }
                 if (remainingMs <= 0L) break
+                val probeStarted = System.nanoTime()
                 val backend = loadWithTimeout(name, remainingMs) { load(context) }
+                if (name == NPU_PROBE_NAME && gpuDeadline != 0L) {
+                    // The NPU JIT does not touch the shared GPU driver, and in manual mode its
+                    // probe runs after gpuDeadline started; give that time back so a slow
+                    // compile cannot exhaust the budget the GPU backends are entitled to.
+                    gpuDeadline += System.nanoTime() - probeStarted
+                }
                 if (backend != null) return PoseAnalyzer(backend)
                 unavailableGpuBackends += name
             }

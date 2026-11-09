@@ -90,7 +90,8 @@ android {
             // libraries must be extracted to nativeLibraryDir instead of loaded from the APK.
             useLegacyPackaging = true
             // qnn-runtime ships every HTP/DSP generation. Keep only the HTP v81 (SM8850) pair
-            // plus the JIT prepare library; see README to add SoCs.
+            // plus the JIT prepare library. Adding another SoC means keeping its HTP
+            // Skel/Stub pair here and relaxing the SM8850 gate in PoseAnalyzer.
             excludes += listOf(
                 "lib/arm64-v8a/libQnnDsp.so",
                 "lib/arm64-v8a/libQnnDspV66Skel.so",

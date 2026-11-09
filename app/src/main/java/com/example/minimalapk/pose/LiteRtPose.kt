@@ -51,9 +51,14 @@ internal class LiteRtBackend private constructor(
 
         /**
          * Requests the Qualcomm Hexagon NPU with no GPU fallback. LiteRT 2.3.2 rewrites a
-         * single-NPU request to NPU+CPU, so a failed HTP compile can still run on CPU; the QNN
-         * log at DEBUG level is the source of truth. JIT compilation happens synchronously and
-         * is cached in context.cacheDir, so only the first open pays for it.
+         * single-NPU request to NPU+CPU, so a failed HTP compile can still run on CPU. This is an
+         * accepted trade-off, not an oversight: the Kotlin API exposes only
+         * [Environment.getAvailableAccelerators] (support, not the executed subgraph), and
+         * [CompiledModel.QualcommOptions.Profiling] writes to the QNN logcat stream rather than
+         * returning a result, so the probe cannot tell a CPU fallback from real HTP execution and
+         * accepts the compiled model either way. The SM8850 gate makes a failed compile unlikely;
+         * when it happens, the QNN log at DEBUG level is the source of truth. JIT compilation
+         * happens synchronously and is cached in context.cacheDir, so only the first open pays.
          */
         fun openNpu(context: Context): LiteRtBackend {
             val started = System.nanoTime()
