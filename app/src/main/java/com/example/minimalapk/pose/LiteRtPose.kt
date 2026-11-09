@@ -16,7 +16,7 @@ internal class LiteRtBackend private constructor(
     private val input: TensorBuffer,
     private val output: TensorBuffer,
     override val name: String,
-    // Only NPU passes an Environment; CompiledModel does not own a caller-provided one.
+    // GPU and NPU pass an Environment; CompiledModel does not own a caller-provided one.
     private val environment: Environment? = null,
 ) : PoseBackend {
     // The TFLite graph takes NHWC float RGB; onnx2tf emits the pose head as [1, 56, 8400].
@@ -40,13 +40,63 @@ internal class LiteRtBackend private constructor(
         private const val TAG = "LiteRtPose"
 
         fun open(assets: AssetManager, useGpu: Boolean): LiteRtBackend {
-            val options = if (useGpu) {
-                CompiledModel.Options(Accelerator.GPU)
-            } else {
-                CompiledModel.Options(Accelerator.CPU)
+            if (!useGpu) {
+                val model = CompiledModel.create(
+                    assets,
+                    PoseAnalyzer.TFLITE_MODEL_ASSET,
+                    CompiledModel.Options(Accelerator.CPU),
+                )
+                return createBackend(model, "LiteRT (CPU)")
             }
-            val model = CompiledModel.create(assets, PoseAnalyzer.TFLITE_MODEL_ASSET, options)
-            return createBackend(model, if (useGpu) "LiteRT (GPU)" else "LiteRT (CPU)")
+            // The bundled MLDrift accelerator warns that OpenCL is not well supported on Adreno
+            // 8xx with older drivers (kernel compile errors). It ships an OpenGL backend, so retry
+            // there before giving up on the GPU.
+            return try {
+                openGpu(assets, backend = null, name = "LiteRT (GPU)")
+            } catch (e: Exception) {
+                AppLog.w(TAG, "LiteRT GPU 默认后端加载失败，改用 OpenGL 重试")
+                openGpu(assets, CompiledModel.GpuOptions.Backend.OPENGL, "LiteRT (GPU/GL)")
+            }
+        }
+
+        private fun openGpu(
+            assets: AssetManager,
+            backend: CompiledModel.GpuOptions.Backend?,
+            name: String,
+        ): LiteRtBackend {
+            val started = System.nanoTime()
+            // AUTOMATIC picks MLDrift's OpenCL backend wherever the device exposes OpenCL.
+            val requested = backend?.name ?: "AUTOMATIC"
+            // Request CPU too: a GPU-only request makes LiteRT reject the whole model when the
+            // GPU delegate leaves any op undelegated ("Some ops are not accelerated"). With CPU
+            // in the set those ops run on CPU and the rest still runs on the GPU.
+            val options = CompiledModel.Options(Accelerator.GPU, Accelerator.CPU).apply {
+                if (backend != null) gpuOptions = CompiledModel.GpuOptions(backend = backend)
+            }
+            // CompiledModel does not own a caller-provided environment, so a failed compile must
+            // release it before the OpenGL retry instead of leaking the failed GPU context.
+            val environment = Environment.create()
+            try {
+                // Diagnostic only: a failed read must not abort the load.
+                val available = runCatching {
+                    environment.getAvailableAccelerators().joinToString()
+                }.getOrElse { "读取失败（${it.message}）" }
+                AppLog.i(TAG, "$name 加载开始：请求后端=$requested，可用加速器=$available")
+                val model = CompiledModel.create(
+                    assets,
+                    PoseAnalyzer.TFLITE_MODEL_ASSET,
+                    options,
+                    environment,
+                )
+                val result = createBackend(model, name, environment)
+                AppLog.i(TAG, "$name 加载成功：${elapsedMs(started)} ms，请求后端=$requested")
+                return result
+            } catch (e: Throwable) {
+                // createBackend may have closed it already; JniHandle.close is idempotent.
+                environment.close()
+                AppLog.w(TAG, "$name 加载失败：${elapsedMs(started)} ms，请求后端=$requested", e)
+                throw e
+            }
         }
 
         /**

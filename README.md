@@ -38,14 +38,14 @@ app/src/main/java/com/example/minimalapk/
 - 应用按 `LiteRT (NPU)` → `MNN (OpenCL/Vulkan)` → `LiteRT (GPU)` → `ncnn (Vulkan)` → `LiteRT (CPU)` → `MNN (CPU)` → `ncnn (CPU)` 的顺序自动选择第一个可用的后端。ncnn 的 Vulkan 后端在 Adreno 840（SM8850）上不稳定，因此默认优先 LiteRT 与 MNN；MNN 会报告会话实际使用的主后端，GPU 不可用时继续尝试下一个后端。
 - LiteRT NPU 使用 `litert-npu-runtime-qualcomm` 与 Qualcomm `qnn-runtime` 的 Hexagon HTP 运行时，仅在 Android 12+、`arm64-v8a`、SoC 厂商为 Qualcomm（`Qualcomm`/`QTI`）且 SoC 型号为 `SM8850` 的设备上探测。模型通过 LiteRT 在设备端 JIT 编译到 NPU，首次进入相机延迟明显，编译产物缓存在 `cacheDir`（后续通常复用）；JIT 需要 `libQnnHtpPrepare.so`。当前只打包 HTP v81（SM8850）的 `Skel`/`Stub`，其他 SoC 会跳过 NPU 并回退到 GPU/CPU。LiteRT 2.3.2 会把单独的 NPU 请求扩展为 NPU+CPU，HTP 编译失败时可能静默回退 CPU：LiteRT 的 Kotlin API 只提供环境支持的加速器，不返回实际执行的子图，`QualcommOptions.Profiling` 也只写入 logcat，因此探测链无法判断 HTP 是否真正接管，会按 `LiteRT (NPU)` 接受该模型（这是一项明确的取舍，不是遗漏）。SM8850 门槛下 HTP 应能成功编译；若怀疑回退到 CPU，请查看 QNN 日志确认。QNN 库需在安装时解压到 `nativeLibraryDir`，因此启用了 `useLegacyPackaging`；`arm64-v8a` 包会额外包含约 114MB（解压后）的 QNN 运行库，其中 85MB 是 JIT 编译库，release APK 实测约增大 34MB。
 - MNN 使用官方 `3.6.2` Android 预编译库（CPU/OpenCL/Vulkan，校验 SHA-256）；该预编译包只提供 ARM 库，因此 `x86_64` 包会跳过 MNN，使用 LiteRT 或 ncnn。
-- LiteRT 使用 `com.google.ai.edge.litert:litert`、`litert-gpu` 与 `litert-npu-runtime-qualcomm` `2.3.2` 的 `CompiledModel` API，GPU 后端不可用时回退 CPU；NPU 请求不包含 GPU 兜底，但 LiteRT 会自行加入 CPU 兜底。
+- LiteRT 使用 `com.google.ai.edge.litert:litert`、`litert-gpu` 与 `litert-npu-runtime-qualcomm` `2.3.2` 的 `CompiledModel` API。GPU 请求同时包含 CPU 加速器：LiteRT 2.3.2 在只请求 GPU 时，只要有算子未被 GPU 委托就让整个模型编译失败（`Failed to compile model`）；加入 CPU 后这些算子回退 CPU，其余仍在 GPU 执行。GPU 默认使用 MLDrift 的 OpenCL 后端，委托创建失败时先用同一加速器库的 OpenGL 后端重试（该库提示 Adreno 8xx 旧驱动的 OpenCL 内核编译不稳定），仍失败才继续回退；NPU 请求不包含 GPU 兜底，但 LiteRT 会自行加入 CPU 兜底。打包的 `yolo26n_pose.tflite` 还额外做了 shape signature 修复：onnx2tf 会把 batch/height/width 标记成 `-1`，TFLite 的 SLICE 等算子据此把输出张量标为动态，GPU delegate 会以 `Attempting to use a delegate that only supports static-sized tensors...` 直接拒绝整张图；`tools/staticize_tflite_shapes.py` 把签名改写成与具体形状一致，重新导出模型后必须再跑一次。
 - 模型输入为 `1x3x640x640`（TFLite 为 NHWC `1x640x640x3`），输出为 `1x8400x56` 的原始姿态头（框、置信度与 17 个 COCO 关键点）；TFLite 导出为 `1x56x8400`，应用内转置后统一按置信度选出前 300 个候选并补上类别 0，再按 `0.35` 阈值过滤。检测结果与原有 `1x300x57` 布局一致。
-- 模型权重由 Ultralytics 的 ONNX 原始姿态头分别经 pnnx、MNNConvert 与 onnx2tf 转换，不使用外部提供的权重。
-- 性能面板中的“加速器”会显示实际选中的后端（如 `LiteRT (NPU)`、`LiteRT (GPU)`、`MNN (Vulkan)` 或 `ncnn (CPU)`）；MNN 会读取会话的主后端，在 GPU 不可用时回退 CPU。
-- 日志页会记录后端探测顺序、设备信息（SDK/ABI/SoC 厂商与型号）、NPU 门槛未通过的原因、NPU 环境与 JIT 编译耗时、各后端加载耗时/失败堆栈，以及首帧的预处理/推理/后处理耗时，便于定位启动慢或回退问题。
+- 模型权重由 Ultralytics 的 ONNX 原始姿态头分别经 pnnx、MNNConvert 与 onnx2tf 转换，不使用外部提供的权重；onnx2tf 输出的 TFLite 再经 `tools/staticize_tflite_shapes.py` 固定 shape signature（原因见上一条 GPU 说明）。
+- 性能面板中的“加速器”会显示实际选中的后端（如 `LiteRT (NPU)`、`LiteRT (GPU)`、`LiteRT (GPU/GL)`、`MNN (Vulkan)` 或 `ncnn (CPU)`）；MNN 会读取会话的主后端，在 GPU 不可用时回退 CPU。`LiteRT (GPU)`/`LiteRT (GPU/GL)` 表示 GPU 成功参与委托，未被 GPU 委托的算子仍由 CPU 执行。
+- 日志页会记录后端探测顺序、设备信息（SDK/ABI/SoC 厂商与型号）、NPU 门槛未通过的原因、NPU 环境与 JIT 编译耗时、LiteRT GPU 每次尝试的后端（`AUTOMATIC`/`OPENGL`）与环境可用加速器、各后端加载耗时/失败堆栈，以及首帧的预处理/推理/后处理耗时，便于定位启动慢或回退问题。
 - 输入身高用于把像素换算成厘米：`cm/px = 身高 / 人体检测框高度`，再据此估算臂展、双眼间距、肩线/髋线倾斜与肩髋横向偏移。
 - 使用条件会影响精度：需要全身入镜、正对镜头、双臂平举，且人物应尽量站直。单目 2D 关键点无法给出临床意义上的脊柱侧弯角度，界面结果仅供筛查参考，不能用于医学诊断。
-- 预览右上角显示性能指标：分析帧率、预处理/推理/总耗时，以及 CPU、GPU、NPU 利用率。Android 不向普通应用开放系统级占用：CPU 显示本进程占设备总 CPU 算力的比例（0–100%），GPU/NPU 会尝试读取常见厂商的 sysfs 节点，设备不暴露时显示 `N/A`。
+- 预览右上角显示性能指标：分析帧率、预处理/推理/总耗时，以及 CPU、GPU、NPU 利用率。Android 不向普通应用开放系统级占用：CPU 显示本进程占设备总 CPU 算力的比例（0–100%），GPU/NPU 会尝试读取常见厂商的 sysfs 节点，设备不暴露时显示 `N/A`。LiteRT 2.3.2 也没有读取 NPU 利用率的 API，`QualcommOptions.Profiling` 只把逐算子耗时写进 logcat，因此 NPU 无法通过 LiteRT 补上该指标。
 - 模型来自 Ultralytics，许可为 AGPL-3.0；许可全文与模型来源见 `app/src/main/assets/models/NOTICE.txt` 和 `app/src/main/assets/models/LICENSE-AGPL-3.0.txt`。
 
 ## 自动构建

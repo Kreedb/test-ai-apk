@@ -11,6 +11,32 @@ set(NCNN_ABI_DIR "${NCNN_CACHE}/${NCNN_PACKAGE}/${ANDROID_ABI}")
 set(NCNN_ARCHIVE "${NCNN_CACHE}/${NCNN_PACKAGE}.zip")
 set(NCNN_STAMP "${NCNN_CACHE}/${NCNN_PACKAGE}.ok")
 
+# GitHub's release CDN occasionally returns a transient HTTP error. Retry instead of failing the
+# whole build, and verify the hash here so a truncated payload also gets another attempt.
+function(download_archive url archive sha256)
+    foreach(attempt RANGE 1 5)
+        # A failed request can poison the edge cache for that exact URL, so a plain retry keeps
+        # getting the same 504. A unique query string gets a fresh cache entry each attempt.
+        string(RANDOM LENGTH 10 cache_bust)
+        file(DOWNLOAD "${url}?cb=${cache_bust}" "${archive}" TLS_VERIFY ON STATUS status)
+        list(GET status 0 code)
+        list(GET status 1 error)
+        if(code EQUAL 0 AND EXISTS "${archive}")
+            file(SHA256 "${archive}" actual)
+            if(actual STREQUAL sha256)
+                return()
+            endif()
+            set(error "SHA-256 mismatch: expected ${sha256}, got ${actual}")
+        endif()
+        file(REMOVE "${archive}")
+        if(attempt LESS 5)
+            message(WARNING "Download failed (attempt ${attempt}/5): ${error}; retrying")
+            execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 10)
+        endif()
+    endforeach()
+    message(FATAL_ERROR "Failed to download ${url}: ${error}")
+endfunction()
+
 if(NOT EXISTS "${NCNN_STAMP}" OR NOT EXISTS "${NCNN_ABI_DIR}/lib/libncnn.a")
     file(MAKE_DIRECTORY "${NCNN_CACHE}")
     # The two ABI CMake configures can run in parallel and share this cache.
@@ -22,20 +48,11 @@ if(NOT EXISTS "${NCNN_STAMP}" OR NOT EXISTS "${NCNN_ABI_DIR}/lib/libncnn.a")
             file(SHA256 "${NCNN_ARCHIVE}" ncnn_archive_sha256)
         endif()
         if(NOT "${ncnn_archive_sha256}" STREQUAL "${NCNN_SHA256}")
-            file(REMOVE "${NCNN_ARCHIVE}")
-            file(DOWNLOAD
+            download_archive(
                 "https://github.com/Tencent/ncnn/releases/download/${NCNN_VERSION}/${NCNN_PACKAGE}.zip"
                 "${NCNN_ARCHIVE}"
-                EXPECTED_HASH "SHA256=${NCNN_SHA256}"
-                TLS_VERIFY ON
-                STATUS ncnn_download_status
+                "${NCNN_SHA256}"
             )
-            list(GET ncnn_download_status 0 ncnn_download_code)
-            if(NOT ncnn_download_code EQUAL 0)
-                list(GET ncnn_download_status 1 ncnn_download_error)
-                file(REMOVE "${NCNN_ARCHIVE}")
-                message(FATAL_ERROR "Failed to download ncnn ${NCNN_VERSION}: ${ncnn_download_error}")
-            endif()
         endif()
         file(ARCHIVE_EXTRACT INPUT "${NCNN_ARCHIVE}" DESTINATION "${NCNN_CACHE}")
         file(WRITE "${NCNN_STAMP}" "${NCNN_SHA256}\n")
@@ -73,20 +90,11 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
                 file(SHA256 "${MNN_ARCHIVE}" mnn_archive_sha256)
             endif()
             if(NOT "${mnn_archive_sha256}" STREQUAL "${MNN_SHA256}")
-                file(REMOVE "${MNN_ARCHIVE}")
-                file(DOWNLOAD
+                download_archive(
                     "https://github.com/alibaba/MNN/releases/download/${MNN_VERSION}/${MNN_PACKAGE}.zip"
                     "${MNN_ARCHIVE}"
-                    EXPECTED_HASH "SHA256=${MNN_SHA256}"
-                    TLS_VERIFY ON
-                    STATUS mnn_download_status
+                    "${MNN_SHA256}"
                 )
-                list(GET mnn_download_status 0 mnn_download_code)
-                if(NOT mnn_download_code EQUAL 0)
-                    list(GET mnn_download_status 1 mnn_download_error)
-                    file(REMOVE "${MNN_ARCHIVE}")
-                    message(FATAL_ERROR "Failed to download MNN ${MNN_VERSION}: ${mnn_download_error}")
-                endif()
             endif()
             file(ARCHIVE_EXTRACT INPUT "${MNN_ARCHIVE}" DESTINATION "${MNN_CACHE}")
             file(WRITE "${MNN_STAMP}" "${MNN_SHA256}\n")
