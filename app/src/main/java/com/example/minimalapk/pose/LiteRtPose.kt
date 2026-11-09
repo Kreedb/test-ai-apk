@@ -67,7 +67,10 @@ internal class LiteRtBackend private constructor(
             val started = System.nanoTime()
             // AUTOMATIC picks MLDrift's OpenCL backend wherever the device exposes OpenCL.
             val requested = backend?.name ?: "AUTOMATIC"
-            val options = CompiledModel.Options(Accelerator.GPU).apply {
+            // Request CPU too: a GPU-only request makes LiteRT reject the whole model when the
+            // GPU delegate leaves any op undelegated ("Some ops are not accelerated"). With CPU
+            // in the set those ops run on CPU and the rest still runs on the GPU.
+            val options = CompiledModel.Options(Accelerator.GPU, Accelerator.CPU).apply {
                 if (backend != null) gpuOptions = CompiledModel.GpuOptions(backend = backend)
             }
             // CompiledModel does not own a caller-provided environment, so a failed compile must
