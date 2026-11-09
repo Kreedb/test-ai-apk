@@ -15,7 +15,10 @@ set(NCNN_STAMP "${NCNN_CACHE}/${NCNN_PACKAGE}.ok")
 # whole build, and verify the hash here so a truncated payload also gets another attempt.
 function(download_archive url archive sha256)
     foreach(attempt RANGE 1 5)
-        file(DOWNLOAD "${url}" "${archive}" TLS_VERIFY ON STATUS status)
+        # A failed request can poison the edge cache for that exact URL, so a plain retry keeps
+        # getting the same 504. A unique query string gets a fresh cache entry each attempt.
+        string(RANDOM LENGTH 10 cache_bust)
+        file(DOWNLOAD "${url}?cb=${cache_bust}" "${archive}" TLS_VERIFY ON STATUS status)
         list(GET status 0 code)
         list(GET status 1 error)
         if(code EQUAL 0 AND EXISTS "${archive}")
