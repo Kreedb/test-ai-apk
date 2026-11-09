@@ -8,6 +8,9 @@ import android.graphics.Paint
 import android.os.Build
 import androidx.core.graphics.createBitmap
 import com.example.minimalapk.log.AppLog
+import java.util.concurrent.CancellationException
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -29,14 +32,27 @@ data class PoseFrame(
     val bitmap: Bitmap,
     val detections: List<PoseDetection>,
     val timings: PoseTimings,
+    // The real photo's rectangle inside the padded model input; measurements need these bounds.
+    val photoBounds: PhotoBounds,
 )
 
-class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoCloseable {
+/**
+ * Owns a pose backend and runs every backend operation on [executor]. MLDrift's OpenGL path binds
+ * its graphics context to the creating thread, so create, analyze, and close must share one
+ * long-lived worker rather than the loader/camera/IO threads that happen to call them.
+ */
+class PoseAnalyzer internal constructor(
+    private val backend: PoseBackend,
+    private val executor: ExecutorService,
+) : AutoCloseable {
     val executionProvider: String = backend.name
     private val lock = Any()
     private var closed = false
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val pixels = IntArray(PoseNet.INPUT_SIZE * PoseNet.INPUT_SIZE)
+    // Two buffers because the previous frame may still be drawn while the next one is analyzed.
+    private val inputBuffers = arrayOfNulls<Bitmap>(2)
+    private var inputIndex = 0
     private var frames = 0
 
     init {
@@ -44,10 +60,23 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
         AppLog.i(TAG, "推理后端就绪：$executionProvider")
     }
 
-    fun analyze(source: Bitmap, rotationDegrees: Int): PoseFrame = synchronized(lock) {
+    fun analyze(source: Bitmap, rotationDegrees: Int): PoseFrame {
+        val future = executor.submit<PoseFrame> { analyzeOnWorker(source, rotationDegrees) }
+        return try {
+            future.get()
+        } catch (e: ExecutionException) {
+            throw e.cause ?: e
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw CancellationException("Pose analysis interrupted")
+        }
+    }
+
+    private fun analyzeOnWorker(source: Bitmap, rotationDegrees: Int): PoseFrame = synchronized(lock) {
         check(!closed) { "PoseAnalyzer is closed" }
         val start = System.nanoTime()
-        val input = createInput(source, rotationDegrees)
+        val layout = poseInputLayout(source.width, source.height, rotationDegrees)
+        val input = createInput(source, layout)
         val rendered = System.nanoTime()
         input.getPixels(
             pixels,
@@ -84,20 +113,31 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
             bitmap = input,
             detections = detections,
             timings = timings,
+            photoBounds = layout.photoBounds,
         )
     }
 
     override fun close() {
-        synchronized(lock) {
-            if (closed) return
-            closed = true
-            backend.close()
+        if (executor.isShutdown) return
+        runCatching {
+            executor.submit {
+                synchronized(lock) {
+                    if (!closed) {
+                        closed = true
+                        backend.close()
+                    }
+                }
+            }.get()
         }
+        executor.shutdown()
     }
 
-    private fun createInput(source: Bitmap, rotationDegrees: Int): Bitmap {
-        val layout = poseInputLayout(source.width, source.height, rotationDegrees)
-        val input = createBitmap(PoseNet.INPUT_SIZE, PoseNet.INPUT_SIZE)
+    private fun createInput(source: Bitmap, layout: PoseInputLayout): Bitmap {
+        inputIndex = 1 - inputIndex
+        val input = inputBuffers[inputIndex]
+            ?: createBitmap(PoseNet.INPUT_SIZE, PoseNet.INPUT_SIZE).also {
+                inputBuffers[inputIndex] = it
+            }
         val canvas = Canvas(input)
         val padding = PoseNet.LETTERBOX_COLOR
         canvas.drawColor(Color.rgb(padding, padding, padding))
@@ -126,11 +166,20 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
         private const val NPU_PROBE_NAME = "LiteRT NPU"
         private const val NPU_PROBE_BUDGET_MS = 30_000L
 
+        private const val MODEL_STUCK_MESSAGE =
+            "模型加载超时：加速器驱动可能已卡住，请重启应用，并在设置中选择 LiteRT (CPU) 后重试"
+
         // Some OpenCL/OpenGL drivers block inside model loading forever. Skipping a backend that
         // failed for the rest of the process keeps later camera visits from starting another
         // stuck load.
         private val unavailableGpuBackends = mutableSetOf<String>()
         private val openLock = Any()
+
+        // LiteRT serializes native compilation with one process-wide mutex. A timed-out compile
+        // that is still native-blocked keeps holding it, so any later open would hang too; refuse
+        // further opens until the app restarts.
+        @Volatile
+        private var nativeCompileTimedOut = false
 
         @Volatile
         var lastExecutionProvider: String? = null
@@ -194,6 +243,7 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
             context: Context,
             preference: PoseBackendPreference = PoseBackendPreference.AUTO,
         ): PoseAnalyzer = synchronized(openLock) {
+            if (nativeCompileTimedOut) error(MODEL_STUCK_MESSAGE)
             val manualName = preference.backendName
             val sdkInt = Build.VERSION.SDK_INT
             val manufacturer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -214,73 +264,91 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
                     "SoC 型号=${socModel.ifBlank { "未知" }}，" +
                     "型号=${Build.MODEL}",
             )
-            // A manual CPU choice skips the accelerator probes entirely, so it also skips
-            // their budgets.
-            val gpuCandidates = if (manualName != null && !preference.gpu) {
-                emptyList()
-            } else {
-                gpuBackends.sortedByDescending { it.first == manualName }
+            // A manual choice probes only that accelerator; a failed manual GPU choice must not
+            // silently become an NPU run. Automatic selection keeps the full preference order.
+            val gpuCandidates = when {
+                manualName != null && !preference.gpu -> emptyList()
+                manualName != null -> gpuBackends.filter { it.first == manualName }
+                else -> gpuBackends
             }
-            // Started lazily so a slow NPU JIT compile cannot consume the GPU probes' budget.
-            var gpuDeadline = 0L
-            for ((name, load) in gpuCandidates) {
-                if (name == NPU_PROBE_NAME) {
-                    val reason = npuUnavailableReasonForDevice()
-                    if (reason != null) {
-                        AppLog.i(TAG, "跳过 $NPU_PROBE_NAME：$reason")
+            val worker = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "PoseBackend").apply { isDaemon = true }
+            }
+            try {
+                // Started lazily so a slow NPU JIT compile cannot consume the GPU probes' budget.
+                var gpuDeadline = 0L
+                for ((name, load) in gpuCandidates) {
+                    if (name == NPU_PROBE_NAME) {
+                        val reason = npuUnavailableReasonForDevice()
+                        if (reason != null) {
+                            AppLog.i(TAG, "跳过 $NPU_PROBE_NAME：$reason")
+                            continue
+                        }
+                    }
+                    if (name in unavailableGpuBackends) {
+                        if (name == manualName) AppLog.w(TAG, "$name 本次运行已加载失败，跳过")
                         continue
                     }
-                }
-                if (name in unavailableGpuBackends) {
-                    if (name == manualName) AppLog.w(TAG, "$name 本次运行已加载失败，跳过")
-                    continue
-                }
-                val remainingMs = if (name == NPU_PROBE_NAME) {
-                    NPU_PROBE_BUDGET_MS
-                } else {
-                    if (gpuDeadline == 0L) {
-                        gpuDeadline = System.nanoTime() + GPU_PROBE_BUDGET_MS * 1_000_000L
+                    val remainingMs = if (name == NPU_PROBE_NAME) {
+                        NPU_PROBE_BUDGET_MS
+                    } else {
+                        if (gpuDeadline == 0L) {
+                            gpuDeadline = System.nanoTime() + GPU_PROBE_BUDGET_MS * 1_000_000L
+                        }
+                        (gpuDeadline - System.nanoTime()) / 1_000_000L
                     }
-                    (gpuDeadline - System.nanoTime()) / 1_000_000L
+                    if (remainingMs <= 0L) break
+                    val probeStarted = System.nanoTime()
+                    val backend = try {
+                        loadWithTimeout(name, remainingMs, worker) { load(context) }
+                    } catch (e: TimeoutException) {
+                        // The native call keeps holding LiteRT's compile mutex; block every later
+                        // open until the process restarts instead of hanging on it.
+                        nativeCompileTimedOut = true
+                        // Surface the restart guidance instead of TimeoutException's empty message.
+                        throw IllegalStateException(MODEL_STUCK_MESSAGE, e)
+                    }
+                    if (name == NPU_PROBE_NAME && gpuDeadline != 0L) {
+                        // The NPU JIT does not touch the shared GPU driver, and in manual mode its
+                        // probe runs after gpuDeadline started; give that time back so a slow
+                        // compile cannot exhaust the budget the GPU backends are entitled to.
+                        gpuDeadline += System.nanoTime() - probeStarted
+                    }
+                    if (backend != null) return PoseAnalyzer(backend, worker)
+                    unavailableGpuBackends += name
                 }
-                if (remainingMs <= 0L) break
-                val probeStarted = System.nanoTime()
-                val backend = loadWithTimeout(name, remainingMs) { load(context) }
-                if (name == NPU_PROBE_NAME && gpuDeadline != 0L) {
-                    // The NPU JIT does not touch the shared GPU driver, and in manual mode its
-                    // probe runs after gpuDeadline started; give that time back so a slow
-                    // compile cannot exhaust the budget the GPU backends are entitled to.
-                    gpuDeadline += System.nanoTime() - probeStarted
+                for ((name, load) in cpuBackends.sortedByDescending { it.first == manualName }) {
+                    val started = System.nanoTime()
+                    val backend = loadOnWorker(name, worker) { load(context) }
+                    if (backend != null) {
+                        val elapsedMs = (System.nanoTime() - started).nanosToMillis().roundToInt()
+                        AppLog.i(TAG, "$name 加载成功：$elapsedMs ms")
+                        return PoseAnalyzer(backend, worker)
+                    }
                 }
-                if (backend != null) return PoseAnalyzer(backend)
-                unavailableGpuBackends += name
+                error("无法加载姿态模型")
+            } catch (t: Throwable) {
+                // Graceful shutdown so a close task queued for a backend the worker is still
+                // finishing (see loadWithTimeout) can still run instead of being discarded.
+                worker.shutdown()
+                throw t
             }
-            for ((name, load) in cpuBackends.sortedByDescending { it.first == manualName }) {
-                val started = System.nanoTime()
-                val backend = runCatching { load(context) }
-                    .onFailure { AppLog.w(TAG, "$name 加载失败", it) }
-                    .getOrNull()
-                if (backend != null) {
-                    val elapsedMs = (System.nanoTime() - started).nanosToMillis().roundToInt()
-                    AppLog.i(TAG, "$name 加载成功：$elapsedMs ms")
-                    return PoseAnalyzer(backend)
-                }
-            }
-            AppLog.e(TAG, "没有可用的推理后端")
-            error("无法加载姿态模型")
         }
 
-        private fun loadWithTimeout(
+        /**
+         * Runs a timed probe on [worker]. On timeout the native call cannot be interrupted and
+         * keeps holding LiteRT's compile mutex, so the caller must stop opening models for this
+         * process run.
+         */
+        internal fun loadWithTimeout(
             name: String,
             timeoutMs: Long,
+            worker: ExecutorService,
             load: () -> PoseBackend?,
         ): PoseBackend? {
-            val executor = Executors.newSingleThreadExecutor { runnable ->
-                Thread(runnable, "$name-load").apply { isDaemon = true }
-            }
             val abandoned = AtomicBoolean(false)
             val result = AtomicReference<PoseBackend?>(null)
-            val future = executor.submit<PoseBackend?> {
+            val future = worker.submit<PoseBackend?> {
                 val backend = load()
                 result.set(backend)
                 if (abandoned.get()) {
@@ -303,16 +371,62 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
                 backend
             } catch (e: TimeoutException) {
                 // The blocked call cannot be interrupted; whoever wins the CAS closes the result.
+                // Hand a late result back to the worker so accelerator teardown stays on the
+                // thread that created the graphics context.
                 abandoned.set(true)
-                result.getAndSet(null)?.close()
+                closeOnWorker(worker, result.getAndSet(null))
                 AppLog.w(TAG, "$name 加载超时（$timeoutMs ms）")
+                throw e
+            } catch (e: InterruptedException) {
+                // Not a timeout, but the worker may still publish a backend after we stop waiting;
+                // close it on the worker and restore the caller's interrupt flag.
+                abandoned.set(true)
+                closeOnWorker(worker, result.getAndSet(null))
+                Thread.currentThread().interrupt()
+                AppLog.w(TAG, "$name 加载被中断")
                 null
             } catch (e: Exception) {
                 AppLog.w(TAG, "$name 加载失败", e)
                 null
-            } finally {
-                executor.shutdown()
             }
         }
+
+        /**
+         * Closes [backend] on [worker] so MLDrift's OpenGL teardown runs on the thread that created
+         * its context. Only called once the result reference was claimed here, which means the
+         * worker has already returned from the native load and is about to finish its task, so
+         * waiting cannot block on a stuck compile.
+         */
+        private fun closeOnWorker(worker: ExecutorService, backend: PoseBackend?) {
+            if (backend == null) return
+            try {
+                worker.submit { backend.close() }.get()
+            } catch (e: InterruptedException) {
+                // The caller is already being interrupted; queue the close instead of blocking.
+                Thread.currentThread().interrupt()
+                runCatching { worker.submit { backend.close() } }
+            } catch (e: Exception) {
+                AppLog.w(TAG, "关闭迟到模型失败", e)
+                runCatching { backend.close() }
+            }
+        }
+
+        private fun loadOnWorker(
+            name: String,
+            worker: ExecutorService,
+            load: () -> PoseBackend?,
+        ): PoseBackend? =
+            try {
+                val backend = worker.submit<PoseBackend?> { load() }.get()
+                if (backend == null) AppLog.w(TAG, "$name 不可用")
+                backend
+            } catch (e: ExecutionException) {
+                AppLog.w(TAG, "$name 加载失败", e.cause ?: e)
+                null
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                AppLog.w(TAG, "$name 加载被中断")
+                null
+            }
     }
 }

@@ -19,6 +19,13 @@ internal data class PoseInputLayout(
 ) {
     val centerX: Float get() = left + targetWidth / 2f
     val centerY: Float get() = top + targetHeight / 2f
+    val photoBounds: PhotoBounds
+        get() = PhotoBounds(
+            left = left.toFloat(),
+            top = top.toFloat(),
+            right = (left + targetWidth).toFloat(),
+            bottom = (top + targetHeight).toFloat(),
+        )
 }
 
 /**

@@ -2,41 +2,42 @@ package com.example.minimalapk.pose
 
 /**
  * The TFLite model ends at the raw pose head: 8400 anchors of 56 values
- * (box x1/y1/x2/y2, score, 17 keypoints x/y/confidence). Select the 300 best anchors and
- * insert the class index expected by [PoseDecoder].
+ * (box x1/y1/x2/y2, score, 17 keypoints x/y/confidence). The tensor is value-major
+ * `[1, 56, 8400]`, so every value channel holds all anchors back to back. Select the 300 best
+ * anchors and insert the class index expected by [PoseDecoder].
  */
 internal object PosePostprocess {
     const val ANCHOR_COUNT = 8400
     const val VALUES_PER_ANCHOR = 56
 
+    private const val SCORE_INDEX = 4
+
     fun topDetections(
         raw: FloatArray,
         count: Int = PoseNet.DETECTION_COUNT,
     ): FloatArray {
-        require(raw.size >= ANCHOR_COUNT * VALUES_PER_ANCHOR) {
-            "Expected at least ${ANCHOR_COUNT * VALUES_PER_ANCHOR} values, got ${raw.size}"
+        require(raw.size == ANCHOR_COUNT * VALUES_PER_ANCHOR) {
+            "Unexpected model output size: ${raw.size}"
         }
-        require(count <= ANCHOR_COUNT) { "Cannot select $count of $ANCHOR_COUNT anchors" }
+        require(count in 0..ANCHOR_COUNT) { "Cannot select $count of $ANCHOR_COUNT anchors" }
 
         // Drop anchors the decoder would discard anyway before paying for a full sort.
         val selected = (0 until ANCHOR_COUNT)
-            .filter { raw[it * VALUES_PER_ANCHOR + 4] >= PoseNet.SCORE_THRESHOLD }
-            .sortedByDescending { raw[it * VALUES_PER_ANCHOR + 4] }
+            .filter { raw[SCORE_INDEX * ANCHOR_COUNT + it] >= PoseNet.SCORE_THRESHOLD }
+            .sortedByDescending { raw[SCORE_INDEX * ANCHOR_COUNT + it] }
             .take(count)
 
         val output = FloatArray(count * PoseNet.VALUES_PER_DETECTION)
         for ((rank, anchor) in selected.withIndex()) {
-            val source = anchor * VALUES_PER_ANCHOR
             val target = rank * PoseNet.VALUES_PER_DETECTION
-            raw.copyInto(output, target, source, source + 5)
+            // Box values 0..4 keep their positions; value 4 is the score.
+            for (value in 0..4) output[target + value] = raw[value * ANCHOR_COUNT + anchor]
             // COCO pose is a single-class model, so the class index is always 0.
             output[target + 5] = 0f
-            raw.copyInto(
-                output,
-                target + 6,
-                source + 5,
-                source + 5 + PoseNet.KEYPOINT_COUNT * 3,
-            )
+            // Values 5..55 are the 17 keypoints x/y/confidence, shifted one slot by the class.
+            for (value in 5 until VALUES_PER_ANCHOR) {
+                output[target + 1 + value] = raw[value * ANCHOR_COUNT + anchor]
+            }
         }
         return output
     }

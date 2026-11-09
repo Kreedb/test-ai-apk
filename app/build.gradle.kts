@@ -104,6 +104,11 @@ android {
         compose = true
         buildConfig = true
     }
+
+    // AppLog calls android.util.Log, which is not mocked in JVM unit tests.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 // LiteRT's Play model-delivery module pulls in Play asset delivery, Play Services and

@@ -298,7 +298,6 @@ private fun PoseCamera(
                     }
                 }
             }
-            provider.unbindAll()
             provider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
@@ -314,15 +313,18 @@ private fun PoseCamera(
         } finally {
             analysis?.clearAnalyzer()
             analysisExecutor.shutdownNow()
-            cameraProvider?.unbindAll()
+            // Unbind only this screen's use case; unbindAll() here would tear down a newer
+            // CameraScreen that finished binding while this delayed cleanup was still pending.
+            cameraProvider?.let { provider -> analysis?.let { provider.unbind(it) } }
             analyzer?.let { withContext(NonCancellable + Dispatchers.IO) { it.close() } }
         }
     }
 
     val detection = frame?.detections?.firstOrNull()
-    val measurement = remember(detection, heightCm) {
-        if (detection != null && heightCm != null) {
-            PoseMeasurement.measure(detection, heightCm)
+    val photoBounds = frame?.photoBounds
+    val measurement = remember(detection, heightCm, photoBounds) {
+        if (detection != null && heightCm != null && photoBounds != null) {
+            PoseMeasurement.measure(detection, heightCm, photoBounds)
         } else {
             null
         }
@@ -387,7 +389,9 @@ private fun PoseCamera(
                 MeasurementLine("请输入身高以换算尺寸")
             } else if (detection == null) {
                 MeasurementLine("未检测到人体")
-            } else if (!PoseMeasurement.isFullBodyVisible(detection)) {
+            } else if (photoBounds == null ||
+                !PoseMeasurement.isFullBodyVisible(detection, photoBounds)
+            ) {
                 MeasurementLine("请后退，确保全身入镜")
             } else if (measurement != null) {
                 measurement.armSpanCm?.let { MeasurementLine("腕距约 ${format(it)} cm（双臂平举，近似臂展）") }
@@ -433,7 +437,7 @@ private fun MetricsPanel(
         MetricLine("推理", "${format(timings.inferenceMs)} ms")
         MetricLine("预处理", "${format(timings.preprocessMs)} ms")
         MetricLine("后处理", "${format(timings.postprocessMs)} ms")
-        MetricLine("总耗时", "${format(timings.totalMs)} ms")
+        MetricLine("分析耗时", "${format(timings.totalMs)} ms")
         MetricLine("加速器", executionProvider ?: "—")
         MetricLine("CPU(应用)", formatPercent(usage.cpuPercent))
         MetricLine("GPU", formatPercent(usage.gpuPercent))

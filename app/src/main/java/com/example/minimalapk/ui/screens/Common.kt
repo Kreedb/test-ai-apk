@@ -31,6 +31,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
+internal const val REPO_URL = "https://github.com/Kreedb/test-ai-apk"
+
 @Composable
 fun ScreenHeader(title: String, subtitle: String) {
     Column {

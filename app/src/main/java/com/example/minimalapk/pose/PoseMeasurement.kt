@@ -15,24 +15,30 @@ data class BodyMeasurement(
 )
 
 object PoseMeasurement {
-    // Box height only equals body height when head and both feet are inside the frame.
-    fun isFullBodyVisible(detection: PoseDetection): Boolean {
+    // Box height only equals body height when head and both feet are inside the real photo (not
+    // the gray letterbox padding), and the box does not touch the photo's top or bottom edge.
+    fun isFullBodyVisible(detection: PoseDetection, bounds: PhotoBounds): Boolean {
         fun visible(index: Int): Boolean {
             val keypoint = detection.keypoints.getOrNull(index) ?: return false
             return keypoint.confidence >= PoseNet.KEYPOINT_THRESHOLD &&
-                keypoint.x in 0f..PoseNet.INPUT_SIZE.toFloat() &&
-                keypoint.y in 0f..PoseNet.INPUT_SIZE.toFloat()
+                keypoint.x > bounds.left && keypoint.x < bounds.right &&
+                keypoint.y > bounds.top && keypoint.y < bounds.bottom
         }
 
         val headSeen = visible(PoseNet.NOSE) ||
             visible(PoseNet.LEFT_EYE) ||
             visible(PoseNet.RIGHT_EYE)
-        return headSeen && visible(PoseNet.LEFT_ANKLE) && visible(PoseNet.RIGHT_ANKLE)
+        return headSeen && visible(PoseNet.LEFT_ANKLE) && visible(PoseNet.RIGHT_ANKLE) &&
+            detection.top > bounds.top && detection.bottom < bounds.bottom
     }
 
-    fun measure(detection: PoseDetection, heightCm: Float): BodyMeasurement? {
+    fun measure(
+        detection: PoseDetection,
+        heightCm: Float,
+        bounds: PhotoBounds,
+    ): BodyMeasurement? {
         if (heightCm !in 50f..250f || detection.height <= 0f) return null
-        if (!isFullBodyVisible(detection)) return null
+        if (!isFullBodyVisible(detection, bounds)) return null
         val cmPerPixel = heightCm / detection.height
 
         fun point(index: Int): PoseKeypoint? =

@@ -26,7 +26,8 @@ internal class LiteRtBackend private constructor(
         argbToRgbFloat(pixels, inputValues)
         input.writeFloat(inputValues)
         model.run(listOf(input), listOf(output))
-        return transposeOutput(output.readFloat())
+        // Value-major [1, 56, 8400]; PosePostprocess reads it in place instead of transposing.
+        return output.readFloat()
     }
 
     override fun close() {
@@ -197,18 +198,4 @@ internal fun argbToRgbFloat(pixels: IntArray, out: FloatArray) {
         out[index * 3 + 1] = ((pixel shr 8) and 0xff) / 255f
         out[index * 3 + 2] = (pixel and 0xff) / 255f
     }
-}
-
-internal fun transposeOutput(raw: FloatArray): FloatArray {
-    require(raw.size == PosePostprocess.ANCHOR_COUNT * PosePostprocess.VALUES_PER_ANCHOR) {
-        "Unexpected LiteRT output size: ${raw.size}"
-    }
-    val output = FloatArray(raw.size)
-    for (anchor in 0 until PosePostprocess.ANCHOR_COUNT) {
-        for (value in 0 until PosePostprocess.VALUES_PER_ANCHOR) {
-            output[anchor * PosePostprocess.VALUES_PER_ANCHOR + value] =
-                raw[value * PosePostprocess.ANCHOR_COUNT + anchor]
-        }
-    }
-    return output
 }
