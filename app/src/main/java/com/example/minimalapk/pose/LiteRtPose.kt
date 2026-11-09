@@ -16,7 +16,7 @@ internal class LiteRtBackend private constructor(
     private val input: TensorBuffer,
     private val output: TensorBuffer,
     override val name: String,
-    // Only NPU passes an Environment; CompiledModel does not own a caller-provided one.
+    // GPU and NPU pass an Environment; CompiledModel does not own a caller-provided one.
     private val environment: Environment? = null,
 ) : PoseBackend {
     // The TFLite graph takes NHWC float RGB; onnx2tf emits the pose head as [1, 56, 8400].
@@ -54,7 +54,7 @@ internal class LiteRtBackend private constructor(
             return try {
                 openGpu(assets, backend = null, name = "LiteRT (GPU)")
             } catch (e: Exception) {
-                AppLog.w(TAG, "LiteRT GPU 默认后端加载失败，改用 OpenGL 重试", e)
+                AppLog.w(TAG, "LiteRT GPU 默认后端加载失败，改用 OpenGL 重试")
                 openGpu(assets, CompiledModel.GpuOptions.Backend.OPENGL, "LiteRT (GPU/GL)")
             }
         }
@@ -64,19 +64,36 @@ internal class LiteRtBackend private constructor(
             backend: CompiledModel.GpuOptions.Backend?,
             name: String,
         ): LiteRtBackend {
+            val started = System.nanoTime()
+            // AUTOMATIC picks MLDrift's OpenCL backend wherever the device exposes OpenCL.
+            val requested = backend?.name ?: "AUTOMATIC"
             val options = CompiledModel.Options(Accelerator.GPU).apply {
                 if (backend != null) gpuOptions = CompiledModel.GpuOptions(backend = backend)
             }
             // CompiledModel does not own a caller-provided environment, so a failed compile must
             // release it before the OpenGL retry instead of leaking the failed GPU context.
             val environment = Environment.create()
-            val model = try {
-                CompiledModel.create(assets, PoseAnalyzer.TFLITE_MODEL_ASSET, options, environment)
+            try {
+                // Diagnostic only: a failed read must not abort the load.
+                val available = runCatching {
+                    environment.getAvailableAccelerators().joinToString()
+                }.getOrElse { "读取失败（${it.message}）" }
+                AppLog.i(TAG, "$name 加载开始：请求后端=$requested，可用加速器=$available")
+                val model = CompiledModel.create(
+                    assets,
+                    PoseAnalyzer.TFLITE_MODEL_ASSET,
+                    options,
+                    environment,
+                )
+                val result = createBackend(model, name, environment)
+                AppLog.i(TAG, "$name 加载成功：${elapsedMs(started)} ms，请求后端=$requested")
+                return result
             } catch (e: Throwable) {
+                // createBackend may have closed it already; JniHandle.close is idempotent.
                 environment.close()
+                AppLog.w(TAG, "$name 加载失败：${elapsedMs(started)} ms，请求后端=$requested", e)
                 throw e
             }
-            return createBackend(model, name, environment)
         }
 
         /**
