@@ -33,22 +33,6 @@ android {
         targetSdk { version = release(37) }
         versionCode = 1
         versionName = "1.0"
-
-        externalNativeBuild {
-            cmake {
-                // MNN's prebuilt libraries (and LiteRT's) use the shared C++ runtime.
-                arguments.add("-DANDROID_STL=c++_shared")
-                arguments.add("-DANDROID_USE_LEGACY_TOOLCHAIN_FILE=OFF")
-            }
-        }
-    }
-
-    ndkVersion = "30.0.16248370"
-
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-        }
     }
 
     signingConfigs {

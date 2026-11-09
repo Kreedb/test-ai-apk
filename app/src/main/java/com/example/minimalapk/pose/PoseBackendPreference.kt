@@ -14,12 +14,8 @@ enum class PoseBackendPreference(
 ) {
     AUTO("自动选择", null, false),
     LITERT_NPU("LiteRT (NPU)", "LiteRT NPU", true),
-    MNN_GPU("MNN (GPU)", "MNN GPU", true),
     LITERT_GPU("LiteRT (GPU)", "LiteRT GPU", true),
-    NCNN_VULKAN("ncnn (Vulkan)", "ncnn Vulkan", true),
-    LITERT_CPU("LiteRT (CPU)", "LiteRT CPU", false),
-    MNN_CPU("MNN (CPU)", "MNN CPU", false),
-    NCNN_CPU("ncnn (CPU)", "ncnn CPU", false);
+    LITERT_CPU("LiteRT (CPU)", "LiteRT CPU", false);
 
     companion object {
         private const val PREFS_NAME = "app_settings"

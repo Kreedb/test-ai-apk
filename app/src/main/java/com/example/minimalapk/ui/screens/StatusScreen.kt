@@ -19,7 +19,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LargeTopAppBar
@@ -63,7 +62,6 @@ import java.io.File
 import java.util.Locale
 
 private const val REPO_URL = "https://github.com/Kreedb/test-ai-apk"
-private const val NCNN_URL = "https://github.com/Tencent/ncnn"
 
 // shortcut: no public GPU utilization API, show plausible placeholders until vendor nodes are verified.
 private const val FAKE_GPU_PERCENT = 37f
@@ -134,7 +132,8 @@ private fun StatusCard(provider: String?, usage: DeviceUsage) {
     val active = provider != null
     val tag = when {
         provider == null -> "READY"
-        provider.contains("Vulkan", ignoreCase = true) -> "VULKAN"
+        provider.contains("NPU", ignoreCase = true) -> "NPU"
+        provider.contains("GPU", ignoreCase = true) -> "GPU"
         else -> "CPU"
     }
     val container = MaterialTheme.colorScheme.secondaryContainer
@@ -157,7 +156,7 @@ private fun StatusCard(provider: String?, usage: DeviceUsage) {
             supportingContent = {
                 Text(
                     text = buildString {
-                        append(provider ?: "未启动 · 自动选择 LiteRT、MNN 或 ncnn")
+                        append(provider ?: "未启动 · 自动选择 LiteRT（NPU/GPU/CPU）")
                         append(" · 本应用 CPU ")
                         append(formatUsage(usage.cpuPercent))
                         append(" · 系统 GPU ")
@@ -224,10 +223,10 @@ private fun InfoCard(systemInfo: SystemInfo, provider: String?) {
         )
         InfoGroup(
             listOf(
-                InfoRow("推理后端", provider ?: "未启动 · 自动选择 LiteRT（含 NPU）、MNN 或 ncnn") {
+                InfoRow("推理后端", provider ?: "未启动 · 自动选择 LiteRT（NPU/GPU/CPU）") {
                     Icon(painterResource(R.drawable.ic_developer_board), contentDescription = null)
                 },
-                InfoRow("推理框架", "LiteRT / MNN / ncnn") {
+                InfoRow("推理框架", "LiteRT") {
                     Icon(painterResource(R.drawable.ic_label), contentDescription = null)
                 },
                 InfoRow("推理模型", "YOLO26n-pose 640×640") {
@@ -255,13 +254,6 @@ private fun SupportLinks() {
                 onClick = { runCatching { uriHandler.openUri(REPO_URL) } },
             ) {
                 Icon(Icons.Filled.Favorite, contentDescription = null)
-            },
-            InfoRow(
-                label = "了解 ncnn",
-                value = "推理与 Vulkan 加速说明",
-                onClick = { runCatching { uriHandler.openUri(NCNN_URL) } },
-            ) {
-                Icon(Icons.Filled.Info, contentDescription = null)
             },
         ),
     )

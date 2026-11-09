@@ -131,16 +131,11 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
     }
 
     companion object {
-        const val PARAM_ASSET = "models/yolo26n_pose.ncnn.param"
-        const val MODEL_ASSET = "models/yolo26n_pose.ncnn.bin"
-        const val MNN_MODEL_ASSET = "models/yolo26n_pose.mnn"
         const val TFLITE_MODEL_ASSET = "models/yolo26n_pose.tflite"
 
         private const val TAG = "PoseAnalyzer"
 
-        // The accelerator probes other than NPU share one budget: they all sit on the same
-        // OpenCL/Vulkan driver, so one blocked probe usually predicts the others. A single budget
-        // keeps a blocking driver from delaying the camera preview by one timeout per backend.
+        // A broken driver can block inside model loading forever, so cap the GPU probe.
         private const val GPU_PROBE_BUDGET_MS = 10_000L
 
         // NPU is a one-time JIT compile per model open, not a driver probe, so it gets its own
@@ -148,7 +143,7 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
         private const val NPU_PROBE_NAME = "LiteRT NPU"
         private const val NPU_PROBE_BUDGET_MS = 30_000L
 
-        // Some Vulkan/OpenCL drivers block inside model loading forever. Skipping a backend that
+        // Some OpenCL/OpenGL drivers block inside model loading forever. Skipping a backend that
         // failed for the rest of the process keeps later camera visits from starting another
         // stuck load.
         private val unavailableGpuBackends = mutableSetOf<String>()
@@ -158,19 +153,13 @@ class PoseAnalyzer private constructor(private val backend: PoseBackend) : AutoC
         var lastExecutionProvider: String? = null
             private set
 
-        // NPU is preferred over the GPU backends; ncnn's Vulkan backend is unstable on Adreno 840
-        // (SM8850), and MNN goes before LiteRT GPU because its session reports the real primary
-        // backend while LiteRT may silently fall back to CPU.
+        // NPU is preferred over GPU; LiteRT GPU may silently fall back to CPU.
         private val gpuBackends = listOf<Pair<String, (Context) -> PoseBackend?>>(
             NPU_PROBE_NAME to { context -> LiteRtBackend.openNpu(context) },
-            "MNN GPU" to { context -> MnnBackend.open(context.assets, useGpu = true) },
             "LiteRT GPU" to { context -> LiteRtBackend.open(context.assets, useGpu = true) },
-            "ncnn Vulkan" to { context -> NcnnBackend.open(context.assets, useGpu = true) },
         )
         private val cpuBackends = listOf<Pair<String, (Context) -> PoseBackend?>>(
             "LiteRT CPU" to { context -> LiteRtBackend.open(context.assets, useGpu = false) },
-            "MNN CPU" to { context -> MnnBackend.open(context.assets, useGpu = false) },
-            "ncnn CPU" to { context -> NcnnBackend.open(context.assets, useGpu = false) },
         )
 
         /** Probe names, exposed so tests can keep [PoseBackendPreference.backendName] in sync. */
