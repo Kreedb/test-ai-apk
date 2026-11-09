@@ -30,8 +30,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import java.util.Locale
 
 internal const val REPO_URL = "https://github.com/Kreedb/test-ai-apk"
+
+internal fun formatPercent(value: Float?): String =
+    value?.let { String.format(Locale.US, "%.1f%%", it) } ?: "N/A"
 
 @Composable
 fun ScreenHeader(title: String, subtitle: String) {

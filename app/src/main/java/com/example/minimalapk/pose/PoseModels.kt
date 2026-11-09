@@ -28,8 +28,9 @@ data class PoseDetection(
 
 object PoseNet {
     const val INPUT_SIZE = 640
+    const val ANCHOR_COUNT = 8400
+    const val VALUES_PER_ANCHOR = 56
     const val DETECTION_COUNT = 300
-    const val VALUES_PER_DETECTION = 57
     const val KEYPOINT_COUNT = 17
     const val SCORE_THRESHOLD = 0.35f
     const val KEYPOINT_THRESHOLD = 0.5f

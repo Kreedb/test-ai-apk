@@ -16,7 +16,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -31,9 +30,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.example.minimalapk.BuildConfig
 import com.example.minimalapk.R
-
-private const val TELEGRAM_URL = "https://t.me/KernelSU"
-private const val QQ_URL = "https://pd.qq.com/s/8lipl1brp"
 
 @Composable
 fun AboutScreen(onBack: () -> Unit) {
@@ -83,10 +79,6 @@ fun AboutScreen(onBack: () -> Unit) {
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column {
                     LinkRow(text = "在 GitHub 查看源码") { openLink(REPO_URL) }
-                    HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                    LinkRow(text = "加入我们的 Telegram 频道") { openLink(TELEGRAM_URL) }
-                    HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                    LinkRow(text = "加入我们的 QQ 频道") { openLink(QQ_URL) }
                 }
             }
         }

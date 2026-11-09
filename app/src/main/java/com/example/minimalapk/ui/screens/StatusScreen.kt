@@ -59,7 +59,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -152,9 +151,9 @@ private fun StatusCard(provider: String?, usage: DeviceUsage) {
                     text = buildString {
                         append(provider ?: "未启动 · 自动选择 LiteRT（NPU/GPU/CPU）")
                         append(" · 本应用 CPU ")
-                        append(formatUsage(usage.cpuPercent))
+                        append(formatPercent(usage.cpuPercent))
                         append(" · 系统 GPU ")
-                        append(formatUsage(usage.gpuPercent))
+                        append(formatPercent(usage.gpuPercent))
                     },
                 )
             },
@@ -386,6 +385,3 @@ private val GPU_MODEL_NODES = listOf(
     "/sys/class/misc/mali0/device/gpuinfo",
     "/sys/kernel/gpu/gpu_model",
 )
-
-private fun formatUsage(value: Float?): String =
-    value?.let { String.format(Locale.US, "%.1f%%", it) } ?: "N/A"
