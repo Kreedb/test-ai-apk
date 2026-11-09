@@ -13,6 +13,7 @@ enum class PoseBackendPreference(
     internal val gpu: Boolean,
 ) {
     AUTO("自动选择", null, false),
+    LITERT_NPU("LiteRT (NPU)", "LiteRT NPU", true),
     MNN_GPU("MNN (GPU)", "MNN GPU", true),
     LITERT_GPU("LiteRT (GPU)", "LiteRT GPU", true),
     NCNN_VULKAN("ncnn (Vulkan)", "ncnn Vulkan", true),

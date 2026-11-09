@@ -84,6 +84,33 @@ android {
         }
     }
 
+    packaging {
+        jniLibs {
+            // The Qualcomm dispatch library dlopens libQnnHtp/... by name, so the NPU runtime
+            // libraries must be extracted to nativeLibraryDir instead of loaded from the APK.
+            useLegacyPackaging = true
+            // qnn-runtime ships every HTP/DSP generation. Keep only the HTP v81 (SM8850) pair
+            // plus the JIT prepare library. Adding another SoC means keeping its HTP
+            // Skel/Stub pair here and relaxing the SM8850 gate in PoseAnalyzer.
+            excludes += listOf(
+                "lib/arm64-v8a/libQnnDsp.so",
+                "lib/arm64-v8a/libQnnDspV66Skel.so",
+                "lib/arm64-v8a/libQnnDspV66Stub.so",
+                "lib/arm64-v8a/libQnnGpu.so",
+                "lib/arm64-v8a/libQnnHtpV68Skel.so",
+                "lib/arm64-v8a/libQnnHtpV68Stub.so",
+                "lib/arm64-v8a/libQnnHtpV69Skel.so",
+                "lib/arm64-v8a/libQnnHtpV69Stub.so",
+                "lib/arm64-v8a/libQnnHtpV73Skel.so",
+                "lib/arm64-v8a/libQnnHtpV73Stub.so",
+                "lib/arm64-v8a/libQnnHtpV75Skel.so",
+                "lib/arm64-v8a/libQnnHtpV75Stub.so",
+                "lib/arm64-v8a/libQnnHtpV79Skel.so",
+                "lib/arm64-v8a/libQnnHtpV79Stub.so",
+            )
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
@@ -124,6 +151,8 @@ dependencies {
 
     implementation(libs.litert)
     implementation(libs.litert.gpu)
+    implementation(libs.litert.npu.runtime.qualcomm)
+    implementation(libs.qnn.runtime)
 
     testImplementation(libs.junit)
 }
