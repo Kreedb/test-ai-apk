@@ -328,7 +328,9 @@ class PoseAnalyzer internal constructor(
                 }
                 error("无法加载姿态模型")
             } catch (t: Throwable) {
-                worker.shutdownNow()
+                // Graceful shutdown so a close task queued for a backend the worker is still
+                // finishing (see loadWithTimeout) can still run instead of being discarded.
+                worker.shutdown()
                 throw t
             }
         }
@@ -369,13 +371,43 @@ class PoseAnalyzer internal constructor(
                 backend
             } catch (e: TimeoutException) {
                 // The blocked call cannot be interrupted; whoever wins the CAS closes the result.
+                // Hand a late result back to the worker so accelerator teardown stays on the
+                // thread that created the graphics context.
                 abandoned.set(true)
-                result.getAndSet(null)?.close()
+                closeOnWorker(worker, result.getAndSet(null))
                 AppLog.w(TAG, "$name 加载超时（$timeoutMs ms）")
                 throw e
+            } catch (e: InterruptedException) {
+                // Not a timeout, but the worker may still publish a backend after we stop waiting;
+                // close it on the worker and restore the caller's interrupt flag.
+                abandoned.set(true)
+                closeOnWorker(worker, result.getAndSet(null))
+                Thread.currentThread().interrupt()
+                AppLog.w(TAG, "$name 加载被中断")
+                null
             } catch (e: Exception) {
                 AppLog.w(TAG, "$name 加载失败", e)
                 null
+            }
+        }
+
+        /**
+         * Closes [backend] on [worker] so MLDrift's OpenGL teardown runs on the thread that created
+         * its context. Only called once the result reference was claimed here, which means the
+         * worker has already returned from the native load and is about to finish its task, so
+         * waiting cannot block on a stuck compile.
+         */
+        private fun closeOnWorker(worker: ExecutorService, backend: PoseBackend?) {
+            if (backend == null) return
+            try {
+                worker.submit { backend.close() }.get()
+            } catch (e: InterruptedException) {
+                // The caller is already being interrupted; queue the close instead of blocking.
+                Thread.currentThread().interrupt()
+                runCatching { worker.submit { backend.close() } }
+            } catch (e: Exception) {
+                AppLog.w(TAG, "关闭迟到模型失败", e)
+                runCatching { backend.close() }
             }
         }
 

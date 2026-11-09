@@ -24,12 +24,14 @@ class PoseAnalyzerTest {
         override val name: String = "fake"
         val closeThread = AtomicReference<Thread>()
         val closeCount = AtomicInteger()
+        val closed = CountDownLatch(1)
 
         override fun analyze(pixels: IntArray): FloatArray = FloatArray(0)
 
         override fun close() {
             closeThread.set(Thread.currentThread())
             closeCount.incrementAndGet()
+            closed.countDown()
         }
     }
 
@@ -53,25 +55,23 @@ class PoseAnalyzerTest {
     }
 
     @Test
-    fun slowLoadTimesOutAndClosesTheLateBackendExactlyOnce() {
+    fun slowLoadTimesOutAndClosesTheLateBackendOnWorkerExactlyOnce() {
         val executor = worker()
         try {
             val backend = FakeBackend()
-            val finished = CountDownLatch(1)
 
             assertThrows(TimeoutException::class.java) {
                 PoseAnalyzer.loadWithTimeout("fake", 50L, executor) {
-                    try {
-                        Thread.sleep(200L)
-                        backend
-                    } finally {
-                        finished.countDown()
-                    }
+                    Thread.sleep(200L)
+                    backend
                 }
             }
 
-            assertTrue(finished.await(2, TimeUnit.SECONDS))
+            // The latch is counted down inside close(), so awaiting it orders the assertions after
+            // the worker performs the cleanup.
+            assertTrue(backend.closed.await(2, TimeUnit.SECONDS))
             assertEquals(1, backend.closeCount.get())
+            assertEquals("PoseBackend-test", backend.closeThread.get().name)
         } finally {
             executor.shutdownNow()
         }
