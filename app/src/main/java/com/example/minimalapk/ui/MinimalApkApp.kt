@@ -49,7 +49,7 @@ fun MinimalApkApp(
     onThemeSettingsChange: (ThemeSettings) -> Unit,
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    var showPose by rememberSaveable { mutableStateOf(true) }
+    var heightText by rememberSaveable { mutableStateOf("170") }
     var showHeightLine by rememberSaveable { mutableStateOf(true) }
     var showArmSpan by rememberSaveable { mutableStateOf(false) }
     val stateHolder = rememberSaveableStateHolder()
@@ -77,14 +77,14 @@ fun MinimalApkApp(
                 when (selectedTab) {
                     0 -> StatusScreen()
                     1 -> CameraScreen(
-                        showPose = showPose,
+                        heightCm = heightText.toFloatOrNull(),
                         showHeightLine = showHeightLine,
                         showArmSpan = showArmSpan,
                     )
                     2 -> ExamplesScreen()
                     3 -> PluginsScreen(
-                        showPose = showPose,
-                        onShowPoseChange = { showPose = it },
+                        heightText = heightText,
+                        onHeightTextChange = { heightText = it },
                         showHeightLine = showHeightLine,
                         onShowHeightLineChange = { showHeightLine = it },
                         showArmSpan = showArmSpan,

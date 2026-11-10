@@ -8,6 +8,7 @@ import android.graphics.RectF
 import android.net.Uri
 import androidx.core.graphics.scale
 import com.example.minimalapk.examples.decodeImage
+import com.example.minimalapk.pose.GraphSignature
 import com.example.minimalapk.pose.GraphTensor
 import com.example.minimalapk.pose.ModelDownload
 import com.example.minimalapk.pose.PoseNet
@@ -58,55 +59,90 @@ internal object ConfiguredModelRunner {
             }
         }
         Interpreter(model.file, Interpreter.Options().setNumThreads(2)).use { interpreter ->
-            if (config.signature.isEmpty()) {
-                config.inputs.forEachIndexed { index, input -> interpreter.resizeInput(index, input.shape.toIntArray(), true) }
-                interpreter.runForMultipleInputsOutputs(inputBuffers.toTypedArray(), emptyMap())
-            } else {
-                val named = graph.inputs.mapIndexed { index, tensor ->
-                    val input = config.inputs[index]
-                    val data = inputBuffers[index]
-                    // Signature inputs resize from Java arrays; buffers alone retain the old shape.
-                    val value = if (data is ByteBuffer && input.shape != tensor.shape) {
-                        shapedArray(data, tensor.type, input.shape)
-                    } else data
-                    tensor.name to value
-                }.toMap()
-                interpreter.runSignature(named, emptyMap(), config.signature)
-            }
-            val outputs = graph.outputs.mapIndexed { index, tensor ->
-                val actual = if (config.signature.isEmpty()) interpreter.getOutputTensor(index)
-                    else interpreter.getOutputTensorFromSignature(tensor.name, config.signature)
-                tensorOutput(actual, tensor)
-            }
-            val rendered = mutableListOf<Pair<String, Bitmap>>()
-            val report = outputs.mapIndexed { index, output ->
-                val options = config.outputs[index]
-                val header = "输出 $index · ${graph.outputs[index].name} ${output.shape}"
-                val values = output.values
-                when (options.render) {
-                    OutputRender.IMAGE, OutputRender.SEGMENTATION -> {
-                        rendered += header to outputBitmap(output.shape, values, options)
-                        header
-                    }
-                    OutputRender.MOVENET -> {
-                        require(output.shape == listOf(1, 1, 17, 3)) { "MoveNet 输出需要 [1,1,17,3]" }
-                        rendered += header to drawMoveNet(images.values.firstOrNull() ?: error("MoveNet 需要图片输入"), values, options.threshold)
-                        "$header\n平均关键点置信度：${(0 until 17).sumOf { values[it * 3 + 2] } / 17}"
-                    }
-                    OutputRender.BOXES -> {
-                        val source = images.values.firstOrNull() ?: error("检测框需要图片输入")
-                        rendered += header to drawBoxes(source, values, outputs, options)
-                        header
-                    }
-                    OutputRender.CLASSIFICATION -> "$header\n" + values.indices.sortedByDescending { values[it] }.take(5).joinToString("\n") {
-                        "${options.labels.getOrNull(it) ?: "#$it"}：${values[it]}"
-                    }
-                    else -> "$header\n${output.text ?: values.take(64).joinToString()}${if (values.size > 64) " …（共 ${values.size} 个）" else ""}"
-                }
-            }.joinToString("\n\n")
-            return ModelRunResult(report, rendered)
+            configureInputs(interpreter, config)
+            return execute(interpreter, config, graph, inputBuffers.toTypedArray(), images)
         }
     }
+}
+
+/** Resizes dynamic inputs once; signature calls resize from typed arrays in [execute]. */
+internal fun configureInputs(interpreter: Interpreter, config: ModelConfig) {
+    if (config.signature.isEmpty()) {
+        config.inputs.forEachIndexed { index, input ->
+            interpreter.resizeInput(index, input.shape.toIntArray(), true)
+        }
+    }
+}
+
+internal fun execute(
+    interpreter: Interpreter,
+    config: ModelConfig,
+    graph: GraphSignature,
+    inputBuffers: Array<Any>,
+    images: Map<Int, Bitmap>,
+    transparent: Boolean = false,
+): ModelRunResult {
+    if (config.signature.isEmpty()) {
+        interpreter.runForMultipleInputsOutputs(inputBuffers, emptyMap())
+    } else {
+        val named = graph.inputs.mapIndexed { index, tensor ->
+            val input = config.inputs[index]
+            val data = inputBuffers[index]
+            // Signature inputs resize from Java arrays; buffers alone retain the old shape.
+            val value = if (data is ByteBuffer && input.shape != tensor.shape) {
+                shapedArray(data, tensor.type, input.shape)
+            } else data
+            tensor.name to value
+        }.toMap()
+        interpreter.runSignature(named, emptyMap(), config.signature)
+    }
+    val outputs = graph.outputs.mapIndexed { index, tensor ->
+        val actual = if (config.signature.isEmpty()) interpreter.getOutputTensor(index)
+            else interpreter.getOutputTensorFromSignature(tensor.name, config.signature)
+        tensorOutput(actual, tensor)
+    }
+    val rendered = mutableListOf<Pair<String, Bitmap>>()
+    val report = outputs.mapIndexed { index, output ->
+        val options = config.outputs[index]
+        val header = "输出 $index · ${graph.outputs[index].name} ${output.shape}"
+        val values = output.values
+        when (options.render) {
+            OutputRender.IMAGE, OutputRender.SEGMENTATION -> {
+                rendered += header to outputBitmap(output.shape, values, options, transparent)
+                header
+            }
+            OutputRender.MOVENET -> {
+                require(output.shape == listOf(1, 1, 17, 3)) { "MoveNet 输出需要 [1,1,17,3]" }
+                rendered += header to drawMoveNet(
+                    images.values.firstOrNull() ?: error("MoveNet 需要图片输入"), values, options.threshold, transparent,
+                )
+                "$header\n平均关键点置信度：${(0 until 17).sumOf { values[it * 3 + 2] } / 17}"
+            }
+            OutputRender.BOXES -> {
+                val source = images.values.firstOrNull() ?: error("检测框需要图片输入")
+                rendered += header to drawBoxes(source, values, outputs, options, transparent)
+                header
+            }
+            OutputRender.CLASSIFICATION -> "$header\n" + values.indices.sortedByDescending { values[it] }.take(5).joinToString("\n") {
+                "${options.labels.getOrNull(it) ?: "#$it"}：${values[it]}"
+            }
+            else -> "$header\n${output.text ?: values.take(64).joinToString()}${if (values.size > 64) " …（共 ${values.size} 个）" else ""}"
+        }
+    }.joinToString("\n\n")
+    return ModelRunResult(report, rendered)
+}
+
+/**
+ * The camera draws the first output image over the square preview. Square renders already crop
+ * identically; other aspect ratios are stretched into a square so both layers still align.
+ * Text-only results have no overlay.
+ */
+internal fun ModelRunResult.overlay(size: Int): Bitmap? {
+    val rendered = images.firstOrNull()?.second ?: return null
+    if (rendered.width == rendered.height) return rendered
+    val overlay = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    Canvas(overlay).drawBitmap(rendered, null, RectF(0f, 0f, size.toFloat(), size.toFloat()), Paint(Paint.FILTER_BITMAP_FLAG))
+    return overlay
 }
 
 private data class TensorOutput(val shape: List<Int>, val values: DoubleArray, val text: String? = null)
@@ -180,16 +216,26 @@ private fun stringArray(text: String, shape: List<Int>): Any {
     return array
 }
 
-private fun outputBitmap(shape: List<Int>, values: DoubleArray, options: TensorOutputConfig): Bitmap {
+private fun outputBitmap(
+    shape: List<Int>,
+    values: DoubleArray,
+    options: TensorOutputConfig,
+    transparent: Boolean,
+): Bitmap {
     require(shape.size == 4 && shape[0] == 1 && shape.all { it > 0 }) { "图片/分割输出需要 [1,H,W,C]" }
     val height = shape[1]
     val width = shape[2]
     val channels = shape[3]
     require(tensorElements(shape) == values.size) { "输出尺寸不匹配" }
+    val alpha = if (transparent) 0x80 else 0xff
     val pixels = IntArray(width * height) { index ->
         if (options.render == OutputRender.SEGMENTATION) {
             val label = (0 until channels).maxBy { values[index * channels + it] }
-            if (label == 0) 0xff000000.toInt() else 0xff000000.toInt() or ((label * 0x3779b9) and 0xffffff)
+            if (label == 0) {
+                if (transparent) 0 else 0xff000000.toInt()
+            } else {
+                (alpha shl 24) or ((label * 0x3779b9) and 0xffffff)
+            }
         } else {
             require(channels == 1 || channels == 3) { "图片输出需要 1 或 3 个通道" }
             fun channel(c: Int): Int {
@@ -197,15 +243,19 @@ private fun outputBitmap(shape: List<Int>, values: DoubleArray, options: TensorO
                 require(value.isFinite()) { "图片输出包含 NaN/Infinity" }
                 return value.coerceIn(0.0, 255.0).roundToInt()
             }
-            0xff000000.toInt() or (channel(0) shl 16) or (channel(1) shl 8) or channel(2)
+            (alpha shl 24) or (channel(0) shl 16) or (channel(1) shl 8) or channel(2)
         }
     }
     return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
 }
 
-private fun drawMoveNet(source: Bitmap, values: DoubleArray, threshold: Float): Bitmap {
+private fun drawMoveNet(source: Bitmap, values: DoubleArray, threshold: Float, transparent: Boolean): Bitmap {
     require(values.size == 51 && values.all { it.isFinite() }) { "MoveNet 关键点无效" }
-    val bitmap = source.copy(Bitmap.Config.ARGB_8888, true)
+    val bitmap = if (transparent) {
+        Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+    } else {
+        source.copy(Bitmap.Config.ARGB_8888, true)
+    }
     val canvas = Canvas(bitmap)
     val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xff00ff00.toInt(); strokeWidth = maxOf(1f, bitmap.width / 100f) }
     fun x(index: Int) = (values[index * 3 + 1] * bitmap.width).toFloat()
@@ -219,12 +269,22 @@ private fun drawMoveNet(source: Bitmap, values: DoubleArray, threshold: Float): 
     return bitmap
 }
 
-private fun drawBoxes(source: Bitmap, boxes: DoubleArray, outputs: List<TensorOutput>, options: TensorOutputConfig): Bitmap {
+private fun drawBoxes(
+    source: Bitmap,
+    boxes: DoubleArray,
+    outputs: List<TensorOutput>,
+    options: TensorOutputConfig,
+    transparent: Boolean,
+): Bitmap {
     val classes = outputs[options.classesOutput].values
     val scores = outputs[options.scoresOutput].values
     val count = outputs[options.countOutput].values.firstOrNull()?.toInt() ?: 0
     require(count >= 0 && count <= boxes.size / 4 && count <= classes.size && count <= scores.size) { "检测框输出数量不匹配" }
-    val bitmap = source.copy(Bitmap.Config.ARGB_8888, true)
+    val bitmap = if (transparent) {
+        Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+    } else {
+        source.copy(Bitmap.Config.ARGB_8888, true)
+    }
     val canvas = Canvas(bitmap)
     val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xff00ff00.toInt(); strokeWidth = maxOf(1f, bitmap.width / 100f); textSize = bitmap.width / 20f }
     repeat(count) { index ->
