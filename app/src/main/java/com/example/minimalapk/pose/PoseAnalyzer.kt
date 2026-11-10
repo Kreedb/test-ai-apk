@@ -394,30 +394,61 @@ class PoseAnalyzer internal constructor(
             specs: List<ModelSpec>,
             primary: PoseBackend,
         ): List<Runner> {
-            val runners = mutableListOf(Runner(specs.first(), primary))
-            for (spec in specs.drop(1)) {
-                val budgetMs = if (backendName == NPU_PROBE_NAME) {
-                    NPU_PROBE_BUDGET_MS
-                } else {
-                    PROBE_BUDGET_MS
+            // Every backend opened here, including the primary handed in by open(), is closed if
+            // a later step throws.
+            val opened = mutableListOf(primary)
+            try {
+                val runners = mutableListOf(Runner(specs.first(), primary))
+                for (spec in specs.drop(1)) {
+                    val budgetMs = if (backendName == NPU_PROBE_NAME) {
+                        NPU_PROBE_BUDGET_MS
+                    } else {
+                        PROBE_BUDGET_MS
+                    }
+                    val backend = try {
+                        loadWithTimeout(backendName, budgetMs, worker) { load(context, spec) }
+                    } catch (e: TimeoutException) {
+                        // The worker is blocked inside native compilation, so it can neither serve
+                        // frames nor run a queued close. Returning an analyzer now would freeze the
+                        // camera on its first analyze(); fail the open like the primary probe does.
+                        nativeCompileTimedOut = true
+                        throw IllegalStateException(MODEL_STUCK_MESSAGE, e)
+                    } catch (e: Exception) {
+                        AppLog.w(TAG, "${spec.name} 加载失败，本次跳过该模型", e)
+                        null
+                    }
+                    if (backend != null) {
+                        opened += backend
+                        // The scratch bitmap is allocated on the worker on the first frame and
+                        // reused, so the open path does not reserve one more input-sized bitmap.
+                        runners += Runner(spec, backend)
+                    }
                 }
-                val backend = try {
-                    loadWithTimeout(backendName, budgetMs, worker) { load(context, spec) }
-                } catch (e: TimeoutException) {
-                    // The worker is blocked inside native compilation, so it can neither serve
-                    // frames nor run a queued close. Returning an analyzer now would freeze the
-                    // camera on its first analyze(); fail the open like the primary probe does.
-                    nativeCompileTimedOut = true
-                    throw IllegalStateException(MODEL_STUCK_MESSAGE, e)
-                } catch (e: Exception) {
-                    AppLog.w(TAG, "${spec.name} 加载失败，本次跳过该模型", e)
-                    null
-                }
-                // The scratch bitmap is allocated on the worker on the first frame and reused;
-                // allocating it here would leak a backend if the allocation throws.
-                if (backend != null) runners += Runner(spec, backend)
+                return runners
+            } catch (t: Throwable) {
+                // Only queue the closes: a timed-out native compile still blocks the worker, so
+                // the queued task drains after open() shuts the executor down.
+                queueCloses(worker, opened)
+                throw t
             }
-            return runners
+        }
+
+        /**
+         * Queues a close for every backend opened during a failed open. Unlike [closeOnWorker]
+         * this does not wait, because a timed-out native compile still blocks the worker; the
+         * caller shuts the executor down afterwards so the queued task still runs.
+         */
+        private fun queueCloses(worker: ExecutorService, backends: List<PoseBackend>) {
+            try {
+                worker.submit {
+                    for (backend in backends) {
+                        runCatching { backend.close() }
+                            .onFailure { AppLog.w(TAG, "关闭模型失败", it) }
+                    }
+                }
+            } catch (e: Exception) {
+                AppLog.w(TAG, "关闭模型失败", e)
+            }
         }
 
         /** Turns a stuck native load into the same restart guidance used by every backend. */
