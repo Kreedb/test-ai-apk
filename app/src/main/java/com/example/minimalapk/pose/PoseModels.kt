@@ -6,7 +6,7 @@ data class PoseKeypoint(
     val confidence: Float,
 )
 
-/** The real photo's rectangle inside the padded, letterboxed 640×640 model input. */
+/** The real photo's rectangle inside the padded, letterboxed model input. */
 data class PhotoBounds(
     val left: Float,
     val top: Float,
@@ -26,14 +26,9 @@ data class PoseDetection(
     val height: Float get() = bottom - top
 }
 
+/** COCO keypoint order and drawing edges shared by every supported pose model. */
 object PoseNet {
-    const val INPUT_SIZE = 640
-    const val ANCHOR_COUNT = 8400
-    const val VALUES_PER_ANCHOR = 56
-    const val DETECTION_COUNT = 300
     const val KEYPOINT_COUNT = 17
-    const val SCORE_THRESHOLD = 0.35f
-    const val KEYPOINT_THRESHOLD = 0.5f
     const val LETTERBOX_COLOR = 114
 
     const val NOSE = 0

@@ -62,6 +62,8 @@ import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.pose.BodyMeasurement
 import com.example.minimalapk.pose.DeviceUsage
 import com.example.minimalapk.pose.DeviceUsageSampler
+import com.example.minimalapk.pose.ModelSpec
+import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.PoseAnalyzer
 import com.example.minimalapk.pose.PoseBackendPreference
 import com.example.minimalapk.pose.PoseDetection
@@ -124,7 +126,7 @@ fun CameraScreen(
     ) {
         ScreenHeader(
             title = "相机",
-            subtitle = "YOLO26-pose 离线姿态测量",
+            subtitle = "YOLO-pose 离线姿态测量",
         )
 
         if (granted) {
@@ -232,7 +234,11 @@ private fun PoseCamera(
             // cannot leak the opened analyzer; the finally below still closes it.
             val opened = try {
                 withContext(Dispatchers.IO) {
-                    PoseAnalyzer.open(context, PoseBackendPreference.load(context))
+                    PoseAnalyzer.open(
+                        context,
+                        PoseBackendPreference.load(context),
+                        ModelStore.load(context),
+                    )
                         .also { analyzer = it }
                 }
             } catch (e: CancellationException) {
@@ -335,11 +341,14 @@ private fun PoseCamera(
         }
     }
 
-    val detection = frame?.detections?.firstOrNull()
+    val primary = frame?.primary
+    val detection = primary?.detection
     val photoBounds = frame?.photoBounds
-    val measurement = remember(detection, heightCm, photoBounds) {
+    val keypointThreshold = primary?.spec?.keypointThreshold
+        ?: ModelSpec.DEFAULT_KEYPOINT_THRESHOLD
+    val measurement = remember(detection, heightCm, photoBounds, keypointThreshold) {
         if (detection != null && heightCm != null && photoBounds != null) {
-            PoseMeasurement.measure(detection, heightCm, photoBounds)
+            PoseMeasurement.measure(detection, heightCm, photoBounds, keypointThreshold)
         } else {
             null
         }
@@ -359,6 +368,7 @@ private fun PoseCamera(
                 detection = detection,
                 measurement = measurement,
                 heightCm = heightCm,
+                spec = primary?.spec,
                 showPose = showPose,
                 showHeightLine = showHeightLine,
                 showArmSpan = showArmSpan,
@@ -366,7 +376,7 @@ private fun PoseCamera(
             )
             MetricsPanel(
                 fps = fps,
-                timings = current.timings,
+                timings = primary?.timings,
                 usage = usage,
                 executionProvider = executionProvider,
                 modifier = Modifier
@@ -400,22 +410,37 @@ private fun PoseCamera(
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            if (heightCm == null || heightCm <= 0f) {
-                MeasurementLine("请输入身高以换算尺寸")
-            } else if (detection == null) {
-                MeasurementLine("未检测到人体")
-            } else if (photoBounds == null ||
-                !PoseMeasurement.isFullBodyVisible(detection, photoBounds)
-            ) {
-                MeasurementLine("请后退，确保全身入镜")
-            } else if (measurement != null) {
-                measurement.armSpanCm?.let { MeasurementLine("腕距约 ${format(it)} cm（双臂平举，近似臂展）") }
-                measurement.eyeDistanceCm?.let { MeasurementLine("双眼间距约 ${format(it)} cm") }
-                measurement.shoulderTiltDeg?.let { MeasurementLine("肩线倾斜 ${format(it)}°") }
-                measurement.hipTiltDeg?.let { MeasurementLine("髋线倾斜 ${format(it)}°") }
-                measurement.torsoOffsetCm?.let { MeasurementLine("肩髋横向偏移约 ${format(it)} cm") }
-            } else {
-                MeasurementLine("请输入有效身高（50–250 cm）")
+            frame?.let { current ->
+                if (current.results.isEmpty()) {
+                    MeasurementLine("未启用推理模型，请在 设置 → 模型 中开启")
+                } else if (heightCm == null || heightCm <= 0f) {
+                    MeasurementLine("请输入身高以换算尺寸")
+                } else if (detection == null) {
+                    MeasurementLine("未检测到人体")
+                } else if (!PoseMeasurement.isFullBodyVisible(
+                        detection,
+                        current.photoBounds,
+                        keypointThreshold,
+                    )
+                ) {
+                    MeasurementLine("请后退，确保全身入镜")
+                } else if (measurement != null) {
+                    measurement.armSpanCm?.let { MeasurementLine("腕距约 ${format(it)} cm（双臂平举，近似臂展）") }
+                    measurement.eyeDistanceCm?.let { MeasurementLine("双眼间距约 ${format(it)} cm") }
+                    measurement.shoulderTiltDeg?.let { MeasurementLine("肩线倾斜 ${format(it)}°") }
+                    measurement.hipTiltDeg?.let { MeasurementLine("髋线倾斜 ${format(it)}°") }
+                    measurement.torsoOffsetCm?.let { MeasurementLine("肩髋横向偏移约 ${format(it)} cm") }
+                } else {
+                    MeasurementLine("请输入有效身高（50–250 cm）")
+                }
+                // Models beyond the first only report their top detection; drawing stays single-layer.
+                current.results.drop(1).forEach { result ->
+                    MeasurementLine(
+                        text = "${result.spec.name}：" +
+                            (result.detection?.let { "置信度 ${format(it.score)}" } ?: "未检测到"),
+                        color = Color(0xFFBDBDBD),
+                    )
+                }
             }
             MeasurementLine(
                 text = "结果仅供筛查参考，不能用于医学诊断",
@@ -437,7 +462,7 @@ private fun MeasurementLine(text: String, color: Color = Color.White) {
 @Composable
 private fun MetricsPanel(
     fps: Float,
-    timings: PoseTimings,
+    timings: PoseTimings?,
     usage: DeviceUsage,
     executionProvider: String?,
     modifier: Modifier = Modifier,
@@ -449,10 +474,10 @@ private fun MetricsPanel(
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         MetricLine("帧率", if (fps > 0f) "${format(fps)} FPS" else "—")
-        MetricLine("推理", "${format(timings.inferenceMs)} ms")
-        MetricLine("预处理", "${format(timings.preprocessMs)} ms")
-        MetricLine("后处理", "${format(timings.postprocessMs)} ms")
-        MetricLine("分析耗时", "${format(timings.totalMs)} ms")
+        MetricLine("推理", timings?.let { "${format(it.inferenceMs)} ms" } ?: "—")
+        MetricLine("预处理", timings?.let { "${format(it.preprocessMs)} ms" } ?: "—")
+        MetricLine("后处理", timings?.let { "${format(it.postprocessMs)} ms" } ?: "—")
+        MetricLine("分析耗时", timings?.let { "${format(it.totalMs)} ms" } ?: "—")
         MetricLine("加速器", executionProvider ?: "—")
         MetricLine("CPU(应用)", formatPercent(usage.cpuPercent))
         MetricLine("GPU", formatPercent(usage.gpuPercent))
@@ -474,6 +499,7 @@ private fun PoseOverlay(
     detection: PoseDetection?,
     measurement: BodyMeasurement?,
     heightCm: Float?,
+    spec: ModelSpec?,
     showPose: Boolean,
     showHeightLine: Boolean,
     showArmSpan: Boolean,
@@ -483,14 +509,14 @@ private fun PoseOverlay(
         Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD }
     }
     Canvas(modifier) {
-        if (detection == null) return@Canvas
+        if (detection == null || spec == null) return@Canvas
         // ContentScale.Crop uses the larger axis to scale the square model input.
-        val scale = max(size.width, size.height) / PoseNet.INPUT_SIZE
-        val left = (size.width - PoseNet.INPUT_SIZE * scale) / 2f
-        val top = (size.height - PoseNet.INPUT_SIZE * scale) / 2f
+        val scale = max(size.width, size.height) / spec.inputSize
+        val left = (size.width - spec.inputSize * scale) / 2f
+        val top = (size.height - spec.inputSize * scale) / 2f
         fun point(index: Int): Offset? {
             val keypoint = detection.keypoints.getOrNull(index) ?: return null
-            if (keypoint.confidence < PoseNet.KEYPOINT_THRESHOLD) return null
+            if (keypoint.confidence < spec.keypointThreshold) return null
             return Offset(left + keypoint.x * scale, top + keypoint.y * scale)
         }
 

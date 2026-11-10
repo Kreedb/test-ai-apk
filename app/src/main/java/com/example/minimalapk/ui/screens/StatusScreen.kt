@@ -41,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -53,6 +54,7 @@ import com.example.minimalapk.BuildConfig
 import com.example.minimalapk.R
 import com.example.minimalapk.pose.DeviceUsage
 import com.example.minimalapk.pose.DeviceUsageSampler
+import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.PoseAnalyzer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -64,10 +66,15 @@ import java.io.File
 @Composable
 fun StatusScreen() {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val context = LocalContext.current
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
     var usage by remember { mutableStateOf(DeviceUsage()) }
     var systemInfo by remember { mutableStateOf<SystemInfo?>(null) }
     var provider by remember { mutableStateOf(PoseAnalyzer.lastExecutionProvider) }
+    val enabledModels = remember {
+        ModelStore.load(context).filter { it.enabled }.joinToString("、") { it.name }
+            .ifEmpty { "未启用（仅预览）" }
+    }
 
     LaunchedEffect(Unit) {
         systemInfo = withContext(Dispatchers.IO) { loadSystemInfo() }
@@ -111,7 +118,7 @@ fun StatusScreen() {
             verticalArrangement = Arrangement.spacedBy(13.dp),
         ) {
             StatusCard(provider = provider, usage = usage)
-            systemInfo?.let { InfoCard(systemInfo = it, provider = provider) }
+            systemInfo?.let { InfoCard(systemInfo = it, provider = provider, models = enabledModels) }
             SupportLinks()
             Spacer(Modifier.height(4.dp))
         }
@@ -186,7 +193,7 @@ private fun StatusTag(label: String) {
 }
 
 @Composable
-private fun InfoCard(systemInfo: SystemInfo, provider: String?) {
+private fun InfoCard(systemInfo: SystemInfo, provider: String?, models: String) {
     Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
         InfoGroup(
             listOf(
@@ -222,7 +229,7 @@ private fun InfoCard(systemInfo: SystemInfo, provider: String?) {
                 InfoRow("推理框架", "LiteRT") {
                     Icon(painterResource(R.drawable.ic_label), contentDescription = null)
                 },
-                InfoRow("推理模型", "YOLO26n-pose 640×640") {
+                InfoRow("推理模型", models) {
                     Icon(painterResource(R.drawable.ic_label), contentDescription = null)
                 },
                 InfoRow("CPU", systemInfo.cpu) {

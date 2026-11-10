@@ -17,8 +17,12 @@ data class BodyMeasurement(
 object PoseMeasurement {
     // Box height only equals body height when head and both feet are inside the real photo (not
     // the gray letterbox padding), and the box does not touch the photo's top or bottom edge.
-    fun isFullBodyVisible(detection: PoseDetection, bounds: PhotoBounds): Boolean {
-        fun visible(index: Int) = detection.visiblePoint(index, bounds) != null
+    fun isFullBodyVisible(
+        detection: PoseDetection,
+        bounds: PhotoBounds,
+        keypointThreshold: Float = ModelSpec.DEFAULT_KEYPOINT_THRESHOLD,
+    ): Boolean {
+        fun visible(index: Int) = detection.visiblePoint(index, bounds, keypointThreshold) != null
 
         val headSeen = visible(PoseNet.NOSE) ||
             visible(PoseNet.LEFT_EYE) ||
@@ -31,14 +35,15 @@ object PoseMeasurement {
         detection: PoseDetection,
         heightCm: Float,
         bounds: PhotoBounds,
+        keypointThreshold: Float = ModelSpec.DEFAULT_KEYPOINT_THRESHOLD,
     ): BodyMeasurement? {
         if (heightCm !in 50f..250f || detection.height <= 0f) return null
-        if (!isFullBodyVisible(detection, bounds)) return null
+        if (!isFullBodyVisible(detection, bounds, keypointThreshold)) return null
         val cmPerPixel = heightCm / detection.height
 
         // Every measured point must be a confident detection inside the real photo; a cropped
         // wrist or a guess in the gray padding would otherwise produce a plausible distance.
-        fun point(index: Int): PoseKeypoint? = detection.visiblePoint(index, bounds)
+        fun point(index: Int): PoseKeypoint? = detection.visiblePoint(index, bounds, keypointThreshold)
 
         fun distance(first: Int, second: Int): Float? {
             val a = point(first) ?: return null
@@ -79,9 +84,13 @@ object PoseMeasurement {
     }
 }
 
-private fun PoseDetection.visiblePoint(index: Int, bounds: PhotoBounds): PoseKeypoint? =
+private fun PoseDetection.visiblePoint(
+    index: Int,
+    bounds: PhotoBounds,
+    keypointThreshold: Float,
+): PoseKeypoint? =
     keypoints.getOrNull(index)?.takeIf {
-        it.confidence >= PoseNet.KEYPOINT_THRESHOLD && it.isInside(bounds)
+        it.confidence >= keypointThreshold && it.isInside(bounds)
     }
 
 private fun PoseKeypoint.isInside(bounds: PhotoBounds): Boolean =

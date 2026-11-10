@@ -1,7 +1,6 @@
 package com.example.minimalapk.pose
 
 import android.content.Context
-import android.content.res.AssetManager
 import android.os.Build
 import com.example.minimalapk.BuildConfig
 import com.example.minimalapk.log.AppLog
@@ -16,17 +15,18 @@ internal class LiteRtBackend private constructor(
     private val input: TensorBuffer,
     private val output: TensorBuffer,
     override val name: String,
+    inputSize: Int,
     // GPU and NPU pass an Environment; CompiledModel does not own a caller-provided one.
     private val environment: Environment? = null,
 ) : PoseBackend {
-    // The TFLite graph takes NHWC float RGB; onnx2tf emits the pose head as [1, 56, 8400].
-    private val inputValues = FloatArray(PoseNet.INPUT_SIZE * PoseNet.INPUT_SIZE * 3)
+    // The TFLite graph takes NHWC float RGB; onnx2tf emits the pose head as [1, 5+3K, anchors].
+    private val inputValues = FloatArray(inputSize * inputSize * 3)
 
     override fun analyze(pixels: IntArray): FloatArray {
         argbToRgbFloat(pixels, inputValues)
         input.writeFloat(inputValues)
         model.run(listOf(input), listOf(output))
-        // Value-major [1, 56, 8400]; PoseDecoder reads it in place instead of transposing.
+        // Value-major [1, 5+3K, anchors]; PoseDecoder reads it in place instead of transposing.
         return output.readFloat()
     }
 
@@ -41,28 +41,28 @@ internal class LiteRtBackend private constructor(
     companion object {
         private const val TAG = "LiteRtPose"
 
-        fun open(assets: AssetManager, useGpu: Boolean): LiteRtBackend {
+        fun open(context: Context, spec: ModelSpec, useGpu: Boolean): LiteRtBackend {
             if (!useGpu) {
-                val model = CompiledModel.create(
-                    assets,
-                    PoseAnalyzer.TFLITE_MODEL_ASSET,
-                    CompiledModel.Options(Accelerator.CPU),
+                return createBackend(
+                    createModel(context, spec, CompiledModel.Options(Accelerator.CPU)),
+                    spec,
+                    "LiteRT (CPU)",
                 )
-                return createBackend(model, "LiteRT (CPU)")
             }
             // The bundled MLDrift accelerator warns that OpenCL is not well supported on Adreno
             // 8xx with older drivers (kernel compile errors). It ships an OpenGL backend, so retry
             // there before giving up on the GPU.
             return try {
-                openGpu(assets, backend = null, name = "LiteRT (GPU)")
+                openGpu(context, spec, backend = null, name = "LiteRT (GPU)")
             } catch (e: Exception) {
                 AppLog.w(TAG, "LiteRT GPU 默认后端加载失败，改用 OpenGL 重试")
-                openGpu(assets, CompiledModel.GpuOptions.Backend.OPENGL, "LiteRT (GPU/GL)")
+                openGpu(context, spec, CompiledModel.GpuOptions.Backend.OPENGL, "LiteRT (GPU/GL)")
             }
         }
 
         private fun openGpu(
-            assets: AssetManager,
+            context: Context,
+            spec: ModelSpec,
             backend: CompiledModel.GpuOptions.Backend?,
             name: String,
         ): LiteRtBackend {
@@ -83,14 +83,9 @@ internal class LiteRtBackend private constructor(
                 val available = runCatching {
                     environment.getAvailableAccelerators().joinToString()
                 }.getOrElse { "读取失败（${it.message}）" }
-                AppLog.i(TAG, "$name 加载开始：请求后端=$requested，可用加速器=$available")
-                val model = CompiledModel.create(
-                    assets,
-                    PoseAnalyzer.TFLITE_MODEL_ASSET,
-                    options,
-                    environment,
-                )
-                val result = createBackend(model, name, environment)
+                AppLog.i(TAG, "$name 加载开始：${spec.source}，请求后端=$requested，可用加速器=$available")
+                val model = createModel(context, spec, options, environment)
+                val result = createBackend(model, spec, name, environment)
                 AppLog.i(TAG, "$name 加载成功：${elapsedMs(started)} ms，请求后端=$requested")
                 return result
             } catch (e: Throwable) {
@@ -112,11 +107,11 @@ internal class LiteRtBackend private constructor(
          * when it happens, the QNN log at DEBUG level is the source of truth. JIT compilation
          * happens synchronously and is cached in context.cacheDir, so only the first open pays.
          */
-        fun openNpu(context: Context): LiteRtBackend {
+        fun openNpu(context: Context, spec: ModelSpec): LiteRtBackend {
             val started = System.nanoTime()
             AppLog.i(
                 TAG,
-                "NPU 初始化开始：model=${PoseAnalyzer.TFLITE_MODEL_ASSET}，" +
+                "NPU 初始化开始：model=${spec.source}，" +
                     "SDK=${Build.VERSION.SDK_INT}，ABI=${Build.SUPPORTED_ABIS.joinToString()}，" +
                     "型号=${Build.MODEL}，JIT 编译可能较慢",
             )
@@ -142,18 +137,13 @@ internal class LiteRtBackend private constructor(
                     )
                 }
                 val compileStarted = System.nanoTime()
-                val model = CompiledModel.create(
-                    context.assets,
-                    PoseAnalyzer.TFLITE_MODEL_ASSET,
-                    options,
-                    environment,
-                )
+                val model = createModel(context, spec, options, environment)
                 AppLog.i(
                     TAG,
                     "NPU JIT 编译完成：${elapsedMs(compileStarted)} ms" +
                         "（LiteRT 可能在 HTP 编译失败时回退 CPU，详见 QNN 日志）",
                 )
-                return createBackend(model, "LiteRT (NPU)", environment)
+                return createBackend(model, spec, "LiteRT (NPU)", environment)
             } catch (e: Throwable) {
                 // CompiledModel.create did not take ownership of the environment on failure.
                 environment.close()
@@ -162,8 +152,32 @@ internal class LiteRtBackend private constructor(
             }
         }
 
+        private fun createModel(
+            context: Context,
+            spec: ModelSpec,
+            options: CompiledModel.Options,
+            environment: Environment? = null,
+        ): CompiledModel {
+            val assetPath = spec.assetPath
+            if (assetPath != null) {
+                return if (environment != null) {
+                    CompiledModel.create(context.assets, assetPath, options, environment)
+                } else {
+                    CompiledModel.create(context.assets, assetPath, options)
+                }
+            }
+            // Imported models live in filesDir; CompiledModel.create(String) needs an absolute path.
+            val path = modelFile(context, spec).absolutePath
+            return if (environment != null) {
+                CompiledModel.create(path, options, environment)
+            } else {
+                CompiledModel.create(path, options)
+            }
+        }
+
         private fun createBackend(
             model: CompiledModel,
+            spec: ModelSpec,
             name: String,
             environment: Environment? = null,
         ): LiteRtBackend {
@@ -182,7 +196,7 @@ internal class LiteRtBackend private constructor(
                 environment?.close()
                 throw e
             }
-            return LiteRtBackend(model, input, output, name, environment)
+            return LiteRtBackend(model, input, output, name, spec.inputSize, environment)
         }
 
         private fun elapsedMs(started: Long): Int =
