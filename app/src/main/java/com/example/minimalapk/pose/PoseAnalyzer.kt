@@ -28,32 +28,67 @@ data class PoseTimings(
     val totalMs: Float get() = preprocessMs + inferenceMs + postprocessMs
 }
 
-data class PoseFrame(
-    val bitmap: Bitmap,
-    val detections: List<PoseDetection>,
+data class ModelResult(
+    val spec: ModelSpec,
+    /** Top detection after debounce; null when the model found nobody or the debounce holds it off. */
+    val detection: PoseDetection?,
     val timings: PoseTimings,
-    // The real photo's rectangle inside the padded model input; measurements need these bounds.
-    val photoBounds: PhotoBounds,
 )
 
+data class PoseFrame(
+    val bitmap: Bitmap,
+    /** Enabled models in display order; empty when every model is disabled. */
+    val results: List<ModelResult>,
+    // The real photo's rectangle inside the padded model input; measurements need these bounds.
+    val photoBounds: PhotoBounds,
+) {
+    val primary: ModelResult? get() = results.firstOrNull()
+}
+
 /**
- * Owns a pose backend and runs every backend operation on [executor]. MLDrift's OpenGL path binds
- * its graphics context to the creating thread, so create, analyze, and close must share one
- * long-lived worker rather than the loader/camera/IO threads that happen to call them.
+ * Owns one backend per enabled model and runs every backend operation on [executor]. MLDrift's
+ * OpenGL path binds its graphics context to the creating thread, so create, analyze, and close must
+ * share one long-lived worker rather than the loader/camera/IO threads that happen to call them.
+ *
+ * Enabled models run serially on the same frame: one preview bitmap is built per model size, each
+ * model runs in turn, and only the first model's input is kept for display.
  */
 class PoseAnalyzer internal constructor(
-    private val backend: PoseBackend,
+    private val runners: List<Runner>,
+    private val previewSpec: ModelSpec,
     private val executor: ExecutorService,
 ) : AutoCloseable {
-    val executionProvider: String = backend.name
+    val executionProvider: String = runners.firstOrNull()?.backend?.name ?: NO_MODEL_PROVIDER
     private var closed = false
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-    private val pixels = IntArray(PoseNet.INPUT_SIZE * PoseNet.INPUT_SIZE)
     private var frames = 0
 
+    internal class Runner(val spec: ModelSpec, val backend: PoseBackend) {
+        val pixels = IntArray(spec.inputSize * spec.inputSize)
+        private val debounce = PoseDebounce(spec.debounceFrames)
+        private var held: PoseDetection? = null
+
+        // The non-primary model's input is never displayed, so one bitmap can be redrawn per frame.
+        var scratch: Bitmap? = null
+
+        fun publish(detection: PoseDetection?): PoseDetection? {
+            val visible = debounce.accept(detection != null)
+            if (!visible) {
+                held = null
+                return null
+            }
+            // Hold the last real detection through a brief dropout so the overlay does not flicker.
+            if (detection != null) held = detection
+            return held
+        }
+    }
+
     init {
-        lastExecutionProvider = executionProvider
-        AppLog.i(TAG, "推理后端就绪：$executionProvider")
+        lastExecutionProvider = runners.firstOrNull()?.backend?.name
+        AppLog.i(
+            TAG,
+            "推理后端就绪：$executionProvider，启用模型=${runners.joinToString { it.spec.name }}",
+        )
     }
 
     fun analyze(source: Bitmap, rotationDegrees: Int): PoseFrame {
@@ -70,47 +105,69 @@ class PoseAnalyzer internal constructor(
 
     private fun analyzeOnWorker(source: Bitmap, rotationDegrees: Int): PoseFrame {
         check(!closed) { "PoseAnalyzer is closed" }
-        val start = System.nanoTime()
-        val layout = poseInputLayout(source.width, source.height, rotationDegrees)
-        val input = createInput(source, layout)
-        val rendered = System.nanoTime()
-        input.getPixels(
-            pixels,
-            0,
-            PoseNet.INPUT_SIZE,
-            0,
-            0,
-            PoseNet.INPUT_SIZE,
-            PoseNet.INPUT_SIZE,
-        )
-        val preprocessed = System.nanoTime()
-        val raw = backend.analyze(pixels)
-        val inferred = System.nanoTime()
-        // Selecting and decoding anchors is CPU postprocessing, not inference.
-        val detections = PoseDecoder.decode(raw)
-        val finished = System.nanoTime()
-        val timings = PoseTimings(
-            preprocessMs = (preprocessed - start).nanosToMillis(),
-            inferenceMs = (inferred - preprocessed).nanosToMillis(),
-            postprocessMs = (finished - inferred).nanosToMillis(),
-        )
+        var preview: Bitmap? = null
+        var photoBounds: PhotoBounds? = null
+        val results = ArrayList<ModelResult>(runners.size)
+        for ((index, runner) in runners.withIndex()) {
+            val spec = runner.spec
+            val start = System.nanoTime()
+            val layout = poseInputLayout(source.width, source.height, rotationDegrees, spec.inputSize)
+            val input = renderInput(
+                source = source,
+                layout = layout,
+                size = spec.inputSize,
+                // The primary bitmap is published to the display, so Compose may still draw an
+                // older frame; it must never be reused. Others are consumed within this loop.
+                reuse = if (index == 0) null else runner.scratch,
+            )
+            val rendered = System.nanoTime()
+            input.getPixels(runner.pixels, 0, spec.inputSize, 0, 0, spec.inputSize, spec.inputSize)
+            val preprocessed = System.nanoTime()
+            val raw = runner.backend.analyze(runner.pixels)
+            val inferred = System.nanoTime()
+            // Selecting and decoding anchors is CPU postprocessing, not inference. Only the top
+            // detection is kept: this build does single-person measurement, not multi-person tracking.
+            val published = runner.publish(PoseDecoder.decode(raw, spec).firstOrNull())
+            val finished = System.nanoTime()
+            if (index == 0) preview = input else runner.scratch = input
+            if (photoBounds == null) photoBounds = layout.photoBounds
+            results += ModelResult(
+                spec = spec,
+                detection = published,
+                timings = PoseTimings(
+                    preprocessMs = (preprocessed - start).nanosToMillis(),
+                    inferenceMs = (inferred - preprocessed).nanosToMillis(),
+                    postprocessMs = (finished - inferred).nanosToMillis(),
+                ),
+            )
+        }
+        if (preview == null) {
+            // No model is enabled, but the preview still needs a bitmap: the camera page has no
+            // CameraX Preview use case, so a frame without an input bitmap would go blank.
+            val layout = poseInputLayout(
+                source.width,
+                source.height,
+                rotationDegrees,
+                previewSpec.inputSize,
+            )
+            preview = renderInput(source, layout, previewSpec.inputSize, reuse = null)
+            photoBounds = layout.photoBounds
+        }
+        val frameBitmap = checkNotNull(preview)
+        val frameBounds = checkNotNull(photoBounds)
         if (frames++ == 0) {
             AppLog.i(
                 TAG,
                 "首帧耗时（源 ${source.width}x${source.height}，旋转 $rotationDegrees°）：" +
-                    "预处理=${timings.preprocessMs.roundToInt()} ms" +
-                    "（旋转+letterbox=${(rendered - start).nanosToMillis().roundToInt()} ms，" +
-                    "取像素=${(preprocessed - rendered).nanosToMillis().roundToInt()} ms），" +
-                    "推理=${timings.inferenceMs.roundToInt()} ms，" +
-                    "后处理=${timings.postprocessMs.roundToInt()} ms",
+                    results.joinToString("；") { result ->
+                        "${result.spec.name} " +
+                            "预处理=${result.timings.preprocessMs.roundToInt()} ms，" +
+                            "推理=${result.timings.inferenceMs.roundToInt()} ms，" +
+                            "后处理=${result.timings.postprocessMs.roundToInt()} ms"
+                    },
             )
         }
-        return PoseFrame(
-            bitmap = input,
-            detections = detections,
-            timings = timings,
-            photoBounds = layout.photoBounds,
-        )
+        return PoseFrame(bitmap = frameBitmap, results = results, photoBounds = frameBounds)
     }
 
     override fun close() {
@@ -119,17 +176,24 @@ class PoseAnalyzer internal constructor(
             executor.submit {
                 if (!closed) {
                     closed = true
-                    backend.close()
+                    runners.forEach { runner ->
+                        runCatching { runner.backend.close() }.onFailure {
+                            AppLog.w(TAG, "关闭 ${runner.spec.name} 失败", it)
+                        }
+                    }
                 }
             }.get()
         }.onFailure { AppLog.w(TAG, "关闭推理后端失败", it) }
         executor.shutdown()
     }
 
-    private fun createInput(source: Bitmap, layout: PoseInputLayout): Bitmap {
-        // Each published frame owns its bitmap: Compose may still draw an older frame while the
-        // next one is analyzed, and asImageBitmap() does not copy the pixels.
-        val input = createBitmap(PoseNet.INPUT_SIZE, PoseNet.INPUT_SIZE)
+    private fun renderInput(
+        source: Bitmap,
+        layout: PoseInputLayout,
+        size: Int,
+        reuse: Bitmap?,
+    ): Bitmap {
+        val input = reuse ?: createBitmap(size, size)
         val canvas = Canvas(input)
         val padding = PoseNet.LETTERBOX_COLOR
         canvas.drawColor(Color.rgb(padding, padding, padding))
@@ -146,9 +210,8 @@ class PoseAnalyzer internal constructor(
     }
 
     companion object {
-        const val TFLITE_MODEL_ASSET = "models/yolo26n_pose.tflite"
-
         private const val TAG = "PoseAnalyzer"
+        internal const val NO_MODEL_PROVIDER = "未启用推理"
 
         // A broken driver can block inside model loading forever, so cap every probe.
         private const val PROBE_BUDGET_MS = 10_000L
@@ -178,12 +241,12 @@ class PoseAnalyzer internal constructor(
             private set
 
         // NPU is preferred over GPU; LiteRT GPU may silently fall back to CPU.
-        private val gpuBackends = listOf<Pair<String, (Context) -> PoseBackend?>>(
-            NPU_PROBE_NAME to { context -> LiteRtBackend.openNpu(context) },
-            "LiteRT GPU" to { context -> LiteRtBackend.open(context.assets, useGpu = true) },
+        private val gpuBackends = listOf<Pair<String, (Context, ModelSpec) -> PoseBackend?>>(
+            NPU_PROBE_NAME to { context, spec -> LiteRtBackend.openNpu(context, spec) },
+            "LiteRT GPU" to { context, spec -> LiteRtBackend.open(context, spec, useGpu = true) },
         )
-        private val cpuBackends = listOf<Pair<String, (Context) -> PoseBackend?>>(
-            "LiteRT CPU" to { context -> LiteRtBackend.open(context.assets, useGpu = false) },
+        private val cpuBackends = listOf<Pair<String, (Context, ModelSpec) -> PoseBackend?>>(
+            "LiteRT CPU" to { context, spec -> LiteRtBackend.open(context, spec, useGpu = false) },
         )
 
         /** Probe names, exposed so tests can keep [PoseBackendPreference.backendName] in sync. */
@@ -234,7 +297,19 @@ class PoseAnalyzer internal constructor(
         fun open(
             context: Context,
             preference: PoseBackendPreference = PoseBackendPreference.AUTO,
+            specs: List<ModelSpec> = ModelStore.load(context),
         ): PoseAnalyzer = synchronized(openLock) {
+            val previewSpec = specs.firstOrNull() ?: ModelStore.builtIn.first()
+            val enabled = specs.filter { it.enabled }.take(ModelStore.MAX_ENABLED)
+            val worker = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "PoseBackend").apply { isDaemon = true }
+            }
+            if (enabled.isEmpty()) {
+                // No backend is opened, so a stuck-compilation latch from an earlier visit does
+                // not matter: the preview-only path must keep working.
+                AppLog.i(TAG, "没有启用的模型，仅显示预览画面")
+                return PoseAnalyzer(emptyList(), previewSpec, worker)
+            }
             if (nativeCompileTimedOut) error(MODEL_STUCK_MESSAGE)
             val manualName = preference.backendName
             val sdkInt = Build.VERSION.SDK_INT
@@ -250,8 +325,8 @@ class PoseAnalyzer internal constructor(
             }
             AppLog.i(
                 TAG,
-                "推理后端偏好：${preference.label}；设备 SDK=$sdkInt，" +
-                    "ABI=${Build.SUPPORTED_ABIS.joinToString()}，" +
+                "推理后端偏好：${preference.label}；启用模型=${enabled.joinToString { it.name }}；" +
+                    "设备 SDK=$sdkInt，ABI=${Build.SUPPORTED_ABIS.joinToString()}，" +
                     "SoC 厂商=${manufacturer.ifBlank { "未知" }}，" +
                     "SoC 型号=${socModel.ifBlank { "未知" }}，" +
                     "型号=${Build.MODEL}",
@@ -262,9 +337,6 @@ class PoseAnalyzer internal constructor(
                 manualName != null && !preference.gpu -> emptyList()
                 manualName != null -> gpuBackends.filter { it.first == manualName }
                 else -> gpuBackends
-            }
-            val worker = Executors.newSingleThreadExecutor { runnable ->
-                Thread(runnable, "PoseBackend").apply { isDaemon = true }
             }
             try {
                 for ((name, load) in gpuCandidates) {
@@ -280,13 +352,25 @@ class PoseAnalyzer internal constructor(
                         continue
                     }
                     val budgetMs = if (name == NPU_PROBE_NAME) NPU_PROBE_BUDGET_MS else PROBE_BUDGET_MS
-                    val backend = loadCandidate(name, budgetMs, worker) { load(context) }
-                    if (backend != null) return PoseAnalyzer(backend, worker)
+                    val backend = loadCandidate(name, budgetMs, worker) { load(context, enabled.first()) }
+                    if (backend != null) {
+                        return PoseAnalyzer(
+                            buildRunners(context, worker, name, load, enabled, backend),
+                            previewSpec,
+                            worker,
+                        )
+                    }
                     unavailableGpuBackends += name
                 }
                 for ((name, load) in cpuBackends) {
-                    val backend = loadCandidate(name, PROBE_BUDGET_MS, worker) { load(context) }
-                    if (backend != null) return PoseAnalyzer(backend, worker)
+                    val backend = loadCandidate(name, PROBE_BUDGET_MS, worker) { load(context, enabled.first()) }
+                    if (backend != null) {
+                        return PoseAnalyzer(
+                            buildRunners(context, worker, name, load, enabled, backend),
+                            previewSpec,
+                            worker,
+                        )
+                    }
                 }
                 error("无法加载姿态模型")
             } catch (t: Throwable) {
@@ -294,6 +378,76 @@ class PoseAnalyzer internal constructor(
                 // finishing (see loadWithTimeout) can still run instead of being discarded.
                 worker.shutdown()
                 throw t
+            }
+        }
+
+        /**
+         * Adds the remaining enabled models on the accelerator that already compiled the first
+         * model. A model that fails to load is dropped instead of failing the whole camera; a
+         * timeout fails the open, because the shared worker would never serve another frame.
+         */
+        private fun buildRunners(
+            context: Context,
+            worker: ExecutorService,
+            backendName: String,
+            load: (Context, ModelSpec) -> PoseBackend?,
+            specs: List<ModelSpec>,
+            primary: PoseBackend,
+        ): List<Runner> {
+            // Every backend opened here, including the primary handed in by open(), is closed if
+            // a later step throws.
+            val opened = mutableListOf(primary)
+            try {
+                val runners = mutableListOf(Runner(specs.first(), primary))
+                for (spec in specs.drop(1)) {
+                    val budgetMs = if (backendName == NPU_PROBE_NAME) {
+                        NPU_PROBE_BUDGET_MS
+                    } else {
+                        PROBE_BUDGET_MS
+                    }
+                    val backend = try {
+                        loadWithTimeout(backendName, budgetMs, worker) { load(context, spec) }
+                    } catch (e: TimeoutException) {
+                        // The worker is blocked inside native compilation, so it can neither serve
+                        // frames nor run a queued close. Returning an analyzer now would freeze the
+                        // camera on its first analyze(); fail the open like the primary probe does.
+                        nativeCompileTimedOut = true
+                        throw IllegalStateException(MODEL_STUCK_MESSAGE, e)
+                    } catch (e: Exception) {
+                        AppLog.w(TAG, "${spec.name} 加载失败，本次跳过该模型", e)
+                        null
+                    }
+                    if (backend != null) {
+                        opened += backend
+                        // The scratch bitmap is allocated on the worker on the first frame and
+                        // reused, so the open path does not reserve one more input-sized bitmap.
+                        runners += Runner(spec, backend)
+                    }
+                }
+                return runners
+            } catch (t: Throwable) {
+                // Only queue the closes: a timed-out native compile still blocks the worker, so
+                // the queued task drains after open() shuts the executor down.
+                queueCloses(worker, opened)
+                throw t
+            }
+        }
+
+        /**
+         * Queues a close for every backend opened during a failed open. Unlike [closeOnWorker]
+         * this does not wait, because a timed-out native compile still blocks the worker; the
+         * caller shuts the executor down afterwards so the queued task still runs.
+         */
+        private fun queueCloses(worker: ExecutorService, backends: List<PoseBackend>) {
+            try {
+                worker.submit {
+                    for (backend in backends) {
+                        runCatching { backend.close() }
+                            .onFailure { AppLog.w(TAG, "关闭模型失败", it) }
+                    }
+                }
+            } catch (e: Exception) {
+                AppLog.w(TAG, "关闭模型失败", e)
             }
         }
 

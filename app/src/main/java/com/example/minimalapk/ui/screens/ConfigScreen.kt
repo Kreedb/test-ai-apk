@@ -27,11 +27,13 @@ import androidx.compose.ui.unit.dp
 import com.example.minimalapk.BuildConfig
 import com.example.minimalapk.R
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.PoseBackendPreference
 import com.example.minimalapk.ui.theme.ThemeSettings
 
 private enum class SettingsPage {
     ROOT,
+    MODELS,
     THEME,
     ABOUT,
     LOG,
@@ -45,16 +47,29 @@ fun ConfigScreen(
     val context = LocalContext.current
     var page by rememberSaveable { mutableStateOf(SettingsPage.ROOT) }
     var backendPreference by remember { mutableStateOf(PoseBackendPreference.load(context)) }
+    var specs by remember { mutableStateOf(ModelStore.load(context)) }
     var showBackendDialog by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = page != SettingsPage.ROOT) { page = SettingsPage.ROOT }
 
     when (page) {
         SettingsPage.ROOT -> SettingsList(
             backendPreference = backendPreference,
+            enabledModels = specs.count { it.enabled },
+            modelCount = specs.size,
             onOpenBackend = { showBackendDialog = true },
+            onOpenModels = { page = SettingsPage.MODELS },
             onOpenTheme = { page = SettingsPage.THEME },
             onOpenLogs = { page = SettingsPage.LOG },
             onOpenAbout = { page = SettingsPage.ABOUT },
+        )
+
+        SettingsPage.MODELS -> ModelsScreen(
+            specs = specs,
+            onSpecsChange = { updated ->
+                specs = updated
+                ModelStore.save(context, updated)
+            },
+            onBack = { page = SettingsPage.ROOT },
         )
 
         SettingsPage.THEME -> ThemeSettingsScreen(
@@ -88,7 +103,10 @@ fun ConfigScreen(
 @Composable
 private fun SettingsList(
     backendPreference: PoseBackendPreference,
+    enabledModels: Int,
+    modelCount: Int,
     onOpenBackend: () -> Unit,
+    onOpenModels: () -> Unit,
     onOpenTheme: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenAbout: () -> Unit,
@@ -117,6 +135,18 @@ private fun SettingsList(
                     title = "推理后端",
                     subtitle = "${backendPreference.label} · 重新进入相机生效",
                     onClick = onOpenBackend,
+                )
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                SettingRow(
+                    icon = {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_memory),
+                            contentDescription = null,
+                        )
+                    },
+                    title = "模型",
+                    subtitle = "$modelCount 个模型 · $enabledModels 个启用 · 重新进入相机生效",
+                    onClick = onOpenModels,
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                 SettingRow(

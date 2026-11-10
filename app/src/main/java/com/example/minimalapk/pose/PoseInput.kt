@@ -32,14 +32,19 @@ internal data class PoseInputLayout(
  * Computes the rotated, aspect-preserving letterbox placement without touching a
  * [android.graphics.Bitmap], so the 0/90/180/270 dimension swap stays unit-testable.
  */
-internal fun poseInputLayout(width: Int, height: Int, rotationDegrees: Int): PoseInputLayout {
+internal fun poseInputLayout(
+    width: Int,
+    height: Int,
+    rotationDegrees: Int,
+    inputSize: Int,
+): PoseInputLayout {
     val rotation = ((rotationDegrees % 360) + 360) % 360
     val swapDimensions = rotation == 90 || rotation == 270
     val rotatedWidth = if (swapDimensions) height else width
     val rotatedHeight = if (swapDimensions) width else height
     val scale = min(
-        PoseNet.INPUT_SIZE.toFloat() / rotatedWidth,
-        PoseNet.INPUT_SIZE.toFloat() / rotatedHeight,
+        inputSize.toFloat() / rotatedWidth,
+        inputSize.toFloat() / rotatedHeight,
     )
     val targetWidth = (rotatedWidth * scale).roundToInt()
     val targetHeight = (rotatedHeight * scale).roundToInt()
@@ -48,7 +53,7 @@ internal fun poseInputLayout(width: Int, height: Int, rotationDegrees: Int): Pos
         scale = scale,
         targetWidth = targetWidth,
         targetHeight = targetHeight,
-        left = (PoseNet.INPUT_SIZE - targetWidth) / 2,
-        top = (PoseNet.INPUT_SIZE - targetHeight) / 2,
+        left = (inputSize - targetWidth) / 2,
+        top = (inputSize - targetHeight) / 2,
     )
 }

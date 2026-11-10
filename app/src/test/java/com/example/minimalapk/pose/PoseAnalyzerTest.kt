@@ -15,6 +15,14 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class PoseAnalyzerTest {
+    private val spec = ModelSpec(
+        id = "test",
+        name = "test",
+        source = "asset:test.tflite",
+        inputSize = 640,
+        anchors = 8400,
+    )
+
     private fun worker(): ExecutorService =
         Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "PoseBackend-test")
@@ -82,7 +90,7 @@ class PoseAnalyzerTest {
         val executor = worker()
         val backend = FakeBackend()
 
-        PoseAnalyzer(backend, executor).close()
+        PoseAnalyzer(listOf(PoseAnalyzer.Runner(spec, backend)), spec, executor).close()
 
         assertEquals("PoseBackend-test", backend.closeThread.get().name)
         assertNotSame(Thread.currentThread(), backend.closeThread.get())

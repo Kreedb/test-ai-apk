@@ -7,19 +7,27 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PoseDecoderTest {
+    private val spec = ModelSpec(
+        id = "test",
+        name = "test",
+        source = "asset:test.tflite",
+        inputSize = 640,
+        anchors = 8400,
+    )
+
     private val fullPhoto = PhotoBounds(left = 0f, top = 0f, right = 640f, bottom = 640f)
 
-    private fun index(anchor: Int, channel: Int) = channel * PoseNet.ANCHOR_COUNT + anchor
+    private fun index(anchor: Int, channel: Int) = channel * spec.anchors + anchor
 
     private fun outputWithDetection(score: Float = 0.9f): FloatArray {
         // The model output is value-major [1, 56, 8400].
-        val output = FloatArray(PoseNet.ANCHOR_COUNT * PoseNet.VALUES_PER_ANCHOR)
+        val output = FloatArray(spec.anchors * spec.valuesPerAnchor)
         output[index(0, 0)] = 100f
         output[index(0, 1)] = 100f
         output[index(0, 2)] = 300f
         output[index(0, 3)] = 500f
         output[index(0, 4)] = score
-        for (keypoint in 0 until PoseNet.KEYPOINT_COUNT) {
+        for (keypoint in 0 until spec.keypoints) {
             val channel = 5 + keypoint * 3
             output[index(0, channel)] = 100f + keypoint
             output[index(0, channel + 1)] = 200f + keypoint
@@ -29,7 +37,7 @@ class PoseDecoderTest {
     }
 
     private fun pose(vararg points: Pair<Int, PoseKeypoint>): PoseDetection {
-        val keypoints = MutableList(PoseNet.KEYPOINT_COUNT) { PoseKeypoint(0f, 0f, 0f) }
+        val keypoints = MutableList(spec.keypoints) { PoseKeypoint(0f, 0f, 0f) }
         // Head and feet visible by default so measurement tests exercise the scale path.
         listOf(PoseNet.NOSE, PoseNet.LEFT_ANKLE, PoseNet.RIGHT_ANKLE).forEach {
             keypoints[it] = keypoint(100f, 500f)
@@ -51,7 +59,7 @@ class PoseDecoderTest {
 
     @Test
     fun decodesValueMajorOutputInPlace() {
-        val detections = PoseDecoder.decode(outputWithDetection())
+        val detections = PoseDecoder.decode(outputWithDetection(), spec)
 
         assertEquals(1, detections.size)
         val detection = detections.first()
@@ -67,7 +75,7 @@ class PoseDecoderTest {
 
     @Test
     fun filtersLowConfidenceDetections() {
-        assertTrue(PoseDecoder.decode(outputWithDetection(score = 0.1f)).isEmpty())
+        assertTrue(PoseDecoder.decode(outputWithDetection(score = 0.1f), spec).isEmpty())
     }
 
     @Test
@@ -75,7 +83,7 @@ class PoseDecoderTest {
         val output = outputWithDetection(score = 0.4f)
         output[index(1, 4)] = 0.9f
 
-        val detections = PoseDecoder.decode(output)
+        val detections = PoseDecoder.decode(output, spec)
 
         assertEquals(2, detections.size)
         assertEquals(0.9f, detections[0].score)
@@ -84,15 +92,53 @@ class PoseDecoderTest {
 
     @Test
     fun capsDetectionsAtTheModelLimit() {
-        val output = FloatArray(PoseNet.ANCHOR_COUNT * PoseNet.VALUES_PER_ANCHOR)
+        val output = FloatArray(spec.anchors * spec.valuesPerAnchor)
         // 400 anchors pass the threshold; only the 300 highest may be decoded.
         for (anchor in 0 until 400) output[index(anchor, 4)] = 1f - anchor * 0.001f
 
-        val detections = PoseDecoder.decode(output)
+        val detections = PoseDecoder.decode(output, spec)
 
-        assertEquals(PoseNet.DETECTION_COUNT, detections.size)
+        assertEquals(300, detections.size)
         assertEquals(1f, detections.first().score, 0f)
         assertEquals(1f - 299 * 0.001f, detections.last().score, 0.0001f)
+    }
+
+    @Test
+    fun convertsCenterWidthHeightBoxesToCorners() {
+        val centered = spec.copy(boxFormat = BoxFormat.CENTER)
+        val output = FloatArray(centered.anchors * centered.valuesPerAnchor)
+        output[index(0, 0)] = 300f
+        output[index(0, 1)] = 200f
+        output[index(0, 2)] = 100f
+        output[index(0, 3)] = 400f
+        output[index(0, 4)] = 0.9f
+
+        val detection = PoseDecoder.decode(output, centered).single()
+
+        assertEquals(250f, detection.left)
+        assertEquals(0f, detection.top)
+        assertEquals(350f, detection.right)
+        assertEquals(400f, detection.bottom)
+    }
+
+    @Test
+    fun decodesModelsWithAnotherInputSizeAndAnchorCount() {
+        val small = spec.copy(inputSize = 320, anchors = 2100)
+        fun at(anchor: Int, channel: Int) = channel * small.anchors + anchor
+        val output = FloatArray(small.anchors * small.valuesPerAnchor)
+        output[at(5, 0)] = 10f
+        output[at(5, 1)] = 20f
+        output[at(5, 2)] = 110f
+        output[at(5, 3)] = 220f
+        output[at(5, 4)] = 0.8f
+        output[at(5, 5 + 16 * 3)] = 60f
+
+        val detection = PoseDecoder.decode(output, small).single()
+
+        assertEquals(10f, detection.left)
+        assertEquals(220f, detection.bottom)
+        assertEquals(small.keypoints, detection.keypoints.size)
+        assertEquals(60f, detection.keypoints[16].x)
     }
 
     @Test
