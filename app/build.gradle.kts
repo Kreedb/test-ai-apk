@@ -72,7 +72,7 @@ android {
         jniLibs {
             // The Qualcomm dispatch library dlopens libQnnHtp/... by name, so the NPU runtime
             // libraries must be extracted to nativeLibraryDir instead of loaded from the APK.
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
     }
 
