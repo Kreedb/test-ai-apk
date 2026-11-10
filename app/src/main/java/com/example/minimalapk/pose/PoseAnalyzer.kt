@@ -254,15 +254,15 @@ class PoseAnalyzer internal constructor(
         internal val cpuProbeNames: List<String> = cpuBackends.map { it.first }
 
         /**
-         * LiteRT NPU requires Android 12+, arm64-v8a, and a Qualcomm SoC. The app bundles only the
-         * HTP v81 (SM8850) Skel/Stub, so other SoCs would spend the JIT budget on a compile that
-         * cannot succeed. Returns null when supported, otherwise the reason shown in the log.
+         * LiteRT NPU requires Android 12+, arm64-v8a, and a Qualcomm SoC. The APK bundles every
+         * HTP/DSP generation the Qualcomm runtime ships, so any Qualcomm SoC may probe; a failed
+         * JIT compile falls back to GPU/CPU. Returns null when supported, otherwise the reason
+         * shown in the log.
          */
         internal fun npuUnavailableReason(
             sdkInt: Int,
             abis: Array<String>,
             socManufacturer: String,
-            socModel: String,
         ): String? {
             if (sdkInt < Build.VERSION_CODES.S) {
                 return "需要 Android 12（API 31）及以上，当前 API $sdkInt"
@@ -274,9 +274,6 @@ class PoseAnalyzer internal constructor(
             if (!manufacturer.equals("Qualcomm", true) && !manufacturer.equals("QTI", true)) {
                 return "需要 Qualcomm SoC，当前 ${manufacturer.ifEmpty { "未知" }}"
             }
-            if (!socModel.trim().startsWith("SM8850")) {
-                return "当前只打包 HTP v81（SM8850）运行库，SoC 型号为 ${socModel.ifEmpty { "未知" }}"
-            }
             return null
         }
 
@@ -286,12 +283,7 @@ class PoseAnalyzer internal constructor(
             } else {
                 ""
             }
-            val model = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                Build.SOC_MODEL
-            } else {
-                ""
-            }
-            return npuUnavailableReason(Build.VERSION.SDK_INT, Build.SUPPORTED_ABIS, manufacturer, model)
+            return npuUnavailableReason(Build.VERSION.SDK_INT, Build.SUPPORTED_ABIS, manufacturer)
         }
 
         fun open(
