@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -24,6 +25,7 @@ import androidx.compose.ui.res.painterResource
 import com.example.minimalapk.R
 import com.example.minimalapk.ui.screens.CameraScreen
 import com.example.minimalapk.ui.screens.ConfigScreen
+import com.example.minimalapk.ui.screens.ExamplesScreen
 import com.example.minimalapk.ui.screens.PluginsScreen
 import com.example.minimalapk.ui.screens.StatusScreen
 import com.example.minimalapk.ui.theme.ThemeSettings
@@ -36,6 +38,7 @@ private class Tab(
 private val tabs = listOf(
     Tab("主页") { Icon(Icons.Filled.Home, contentDescription = "主页") },
     Tab("相机") { Icon(painterResource(R.drawable.ic_camera), contentDescription = "相机") },
+    Tab("示例") { Icon(Icons.Filled.PlayArrow, contentDescription = "示例") },
     Tab("插件") { Icon(Icons.Filled.Build, contentDescription = "插件") },
     Tab("设置") { Icon(Icons.Filled.Settings, contentDescription = "设置") },
 )
@@ -78,7 +81,8 @@ fun MinimalApkApp(
                         showHeightLine = showHeightLine,
                         showArmSpan = showArmSpan,
                     )
-                    2 -> PluginsScreen(
+                    2 -> ExamplesScreen()
+                    3 -> PluginsScreen(
                         showPose = showPose,
                         onShowPoseChange = { showPose = it },
                         showHeightLine = showHeightLine,
@@ -86,7 +90,7 @@ fun MinimalApkApp(
                         showArmSpan = showArmSpan,
                         onShowArmSpanChange = { showArmSpan = it },
                     )
-                    3 -> ConfigScreen(
+                    4 -> ConfigScreen(
                         themeSettings = themeSettings,
                         onThemeSettingsChange = onThemeSettingsChange,
                     )

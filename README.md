@@ -4,12 +4,13 @@
 
 ## 功能
 
-底栏包含 4 个选项卡：
+底栏包含 5 个选项卡：
 
 | 选项卡 | 内容 |
 | --- | --- |
 | 主页 | 推理后端状态、CPU/GPU 占用与应用版本、CPU/GPU 型号、设备型号、系统版本与 ABI |
-| 相机 | 基于 CameraX 的后置摄像头实时预览，内置两个 YOLO-pose 模型做离线姿态测量与性能指标，可在设置中启用、导入与调参 |
+| 相机 | 基于 CameraX 的后置摄像头实时预览，内置 YOLO-pose 模型做离线姿态测量与性能指标，可在设置中启用、导入与调参 |
+| 示例 | 超分辨率、设备端训练两个 TFLite 例程，以及系统语音合成 |
 | 插件 | 姿态识别、身高线、臂长线叠加开关 |
 | 设置 | 推理后端、模型（启用/导入/阈值/防抖）、主题设置与关于 |
 
@@ -18,6 +19,7 @@
 ```
 app/src/main/java/com/example/minimalapk/
 ├── MainActivity.kt
+├── examples/                     # 超分辨率、设备端训练等示例模型
 ├── log/
 │   └── AppLog.kt                 # 应用内日志缓冲
 ├── pose/                         # 姿态模型、后端选择与测量
@@ -30,6 +32,7 @@ app/src/main/java/com/example/minimalapk/
         ├── Common.kt             # 共用组件
         ├── StatusScreen.kt
         ├── CameraScreen.kt
+        ├── ExamplesScreen.kt
         ├── PluginsScreen.kt
         ├── ConfigScreen.kt
         ├── ModelsScreen.kt
@@ -70,7 +73,22 @@ app/src/main/java/com/example/minimalapk/
 - 使用条件会影响精度：需要全身入镜、正对镜头、双臂平举，且人物应尽量站直。单目 2D 关键点无法给出临床意义上的脊柱侧弯角度，界面结果仅供筛查参考，不能用于医学诊断。
 - 预览右上角显示性能指标：分析帧率、预处理/推理/分析耗时（取第一个启用模型），以及 CPU、GPU、NPU 利用率。Android 不向普通应用开放系统级占用：CPU 显示本进程占设备总 CPU 算力的比例（0–100%），GPU/NPU 会尝试读取常见厂商的 sysfs 节点，设备不暴露时显示 `N/A`。LiteRT 2.3.2 也没有读取 NPU 利用率的 API，`QualcommOptions.Profiling` 只把逐算子耗时写进 logcat，因此 NPU 无法通过 LiteRT 补上该指标。
 - 模型来自 Ultralytics，许可为 AGPL-3.0；许可全文与模型来源见 `app/src/main/assets/models/NOTICE.txt`、`models/NOTICE.txt` 与 `app/src/main/assets/models/LICENSE-AGPL-3.0.txt`。
-- 本版本只实现姿态任务。[tensorflow/examples](https://github.com/tensorflow/examples/tree/master/lite/examples) 中的语音合成、超分辨率、设备端训练等例程是不同的输入/输出管线，尚未移植；模型获取已经改为可远程下载，后续可以按任务类型扩展目录与推理管线。
+
+## 示例（TensorFlow Lite 例程）
+
+“示例”选项卡移植了 [tensorflow/examples](https://github.com/tensorflow/examples/tree/master/lite/examples) 中的两条独立 TFLite 推理管线（超分辨率、设备端训练），并提供一个系统语音合成入口。示例模型都在首次使用时从远程下载到 `filesDir/examples/`，不参与 APK 打包，下载后离线推理；文件大小会校验，大小不符时拒绝加载。
+
+| 示例 | 来源 | 输入 → 输出 | 说明 |
+| --- | --- | --- | --- |
+| 超分辨率 | `lite/examples/super_resolution` 的 `ESRGAN.tflite`（约 5 MB） | `[1,50,50,3]` float32 → `[1,200,200,3]` float32 | 先中心裁切并缩到 50×50，再 4× 放大到 200×200；不是通用无损放大，细节取决于原图 |
+| 设备端训练 | `lite/examples/model_personalization` 的 `model.tflite`（约 18 MB） | 224×224 图片 → MobileNetV2 特征 → 4 类 | 冻结主干，只在本机训练最后的分类头；图片不会上传 |
+| 语音合成 | 设备自带 TTS 引擎 | 文本 → 语音 | 见下方边界说明 |
+
+- 超分辨率使用 `org.tensorflow.lite.Interpreter`（随 LiteRT AAR 提供，JNI 由 `libLiteRt.so` 实现），固定形状，CPU 执行；没有接入 GPU/NPU 委托。
+- 设备端训练只用模型的 `load` 签名提取 62720 维瓶颈特征，分类头由纯 Kotlin 的 `SoftmaxHead`（Adam，学习率 0.001）在本机训练；官方模型自带的 `train`（以及 `save`/`restore`）签名含 `FlexBroadcastGradientArgs` 等 Flex 算子，LiteRT 不带 Flex，因此不使用它们。训练结果只保存在内存里，重置或退出页面即恢复初始权重。
+- 语音合成没有使用 TFLite：官方示例仓库当前没有 TTS 例程；社区 FastSpeech2 的 TFLite 导出依赖 `FlexRandomUniform` 等 Flex 自定义算子（部分模型还需要音素前端），LiteRT 无法直接加载。这里调用系统 `TextToSpeech`，是否需要下载语音包取决于系统实现。
+- 示例模型来自 TensorFlow 官方示例（Apache-2.0），下载地址是 `storage.googleapis.com/download.tensorflow.org`；首次使用需要 `INTERNET` 权限，之后推理离线。
+- 新增非姿态任务的模型仍不能导入“设置 → 模型”：那里的导入校验只接受单输入单输出的 `5+3K` 姿态头，分类/检测/超分模型会在导入时被明确拒绝并提示原因。
 
 ## 自动构建
 

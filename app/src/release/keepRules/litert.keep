@@ -1,4 +1,7 @@
 -keep class com.google.ai.edge.litert.** { *; }
+# org.tensorflow.lite.Interpreter (shipped in litert-api/litert) is called through JNI by
+# libLiteRt.so; its class and native method names must survive R8.
+-keep class org.tensorflow.lite.** { *; }
 # LiteRT's Play model-delivery classes are kept above but their Play dependencies are excluded.
 -dontwarn com.google.android.gms.**
 -dontwarn com.google.android.play.**
