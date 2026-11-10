@@ -13,6 +13,15 @@ enum class BoxFormat(val label: String) {
     CENTER("中心宽高 cxcywh"),
 }
 
+/** How the pose head orders channels and anchors; both have the same element count. */
+enum class OutputLayout(val label: String) {
+    /** `[1, 5+3K, N]`: onnx2tf's layout and the decoder's in-place fast path. */
+    VALUE_MAJOR("通道优先 [1,C,N]"),
+
+    /** `[1, N, 5+3K]`: the untransposed pose head some exports keep. */
+    ANCHOR_MAJOR("锚点优先 [1,N,C]"),
+}
+
 /**
  * Everything the pose pipeline needs from one model's tensor contract plus its runtime options.
  * Input geometry, decoder layout and letterboxing all read this descriptor, so a new model never
@@ -32,6 +41,7 @@ data class ModelSpec(
     /** Consecutive agreeing frames before the published presence flips; 1 disables debounce. */
     val debounceFrames: Int = 1,
     val boxFormat: BoxFormat = BoxFormat.XYXY,
+    val outputLayout: OutputLayout = OutputLayout.VALUE_MAJOR,
 ) {
     val valuesPerAnchor: Int get() = 5 + keypoints * 3
     val imported: Boolean get() = source.startsWith(FILE_PREFIX)
@@ -59,6 +69,7 @@ object ModelStore {
     private const val SEPARATOR = '\t'
     private const val LINE = '\n'
 
+    // Only the primary model ships in the APK; others are downloaded from ModelCatalog on demand.
     val builtIn = listOf(
         ModelSpec(
             id = "yolo26n_pose",
@@ -67,14 +78,6 @@ object ModelStore {
             inputSize = 640,
             anchors = 8400,
             enabled = true,
-        ),
-        ModelSpec(
-            id = "yolo11n_pose",
-            name = "YOLO11n-pose 640",
-            source = ModelSpec.ASSET_PREFIX + "models/yolo11n_pose.tflite",
-            inputSize = 640,
-            anchors = 8400,
-            boxFormat = BoxFormat.CENTER,
         ),
     )
 
@@ -93,6 +96,7 @@ object ModelStore {
                     inputSize = bundled.inputSize,
                     anchors = bundled.anchors,
                     keypoints = bundled.keypoints,
+                    outputLayout = bundled.outputLayout,
                 )
                 modelFile(context, entry).isFile -> entry
                 // An import whose file is gone (cleared data, manual cleanup) would fail at open.
@@ -126,12 +130,14 @@ object ModelStore {
             spec.keypointThreshold.toString(),
             spec.debounceFrames.toString(),
             spec.boxFormat.name,
+            spec.outputLayout.name,
         ).joinToString(SEPARATOR.toString())
     }
 
     internal fun decode(value: String): List<ModelSpec> = value.lineSequence().mapNotNull { line ->
         val fields = line.split(SEPARATOR)
-        if (fields.size != 11) return@mapNotNull null
+        // Older builds stored 11 fields; keep their entries and default the missing layout.
+        if (fields.size !in 11..12) return@mapNotNull null
         runCatching {
             ModelSpec(
                 id = fields[0],
@@ -145,6 +151,11 @@ object ModelStore {
                 keypointThreshold = fields[8].toFloat(),
                 debounceFrames = fields[9].toInt(),
                 boxFormat = BoxFormat.valueOf(fields[10]),
+                outputLayout = if (fields.size > 11) {
+                    OutputLayout.valueOf(fields[11])
+                } else {
+                    OutputLayout.VALUE_MAJOR
+                },
             )
         }.getOrNull()
     }.toList()

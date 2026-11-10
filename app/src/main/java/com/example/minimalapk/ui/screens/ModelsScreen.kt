@@ -30,6 +30,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,12 +38,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.pose.BoxFormat
+import com.example.minimalapk.pose.ModelCatalog
+import com.example.minimalapk.pose.ModelDownload
 import com.example.minimalapk.pose.ModelSpec
 import com.example.minimalapk.pose.ModelStore
+import com.example.minimalapk.pose.OutputLayout
 import com.example.minimalapk.pose.PoseModelImport
+import com.example.minimalapk.pose.RemoteModel
+import com.example.minimalapk.pose.readCapped
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -59,21 +66,58 @@ internal fun ModelsScreen(
     var status by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<ModelSpec?>(null) }
     var importing by remember { mutableStateOf(false) }
+    var showDownload by remember { mutableStateOf(false) }
+    var downloadError by remember { mutableStateOf<String?>(null) }
+    // Imports run for seconds; use the latest list so a toggle made meanwhile is not discarded.
+    val currentSpecs by rememberUpdatedState(specs)
+
+    fun applyImport(spec: ModelSpec, message: String) {
+        // Re-importing the same bytes yields the same id, which must replace, not duplicate.
+        onSpecsChange(currentSpecs.filterNot { it.id == spec.id } + spec)
+        status = message
+    }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         importing = true
         status = null
         scope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { importModel(context, uri) } }
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bytes = context.contentResolver.openInputStream(uri)
+                        ?.use { it.readCapped(ModelDownload.MAX_BYTES) }
+                        ?: error("无法读取所选文件")
+                    installModel(context, context.displayName(uri), bytes)
+                }
+            }
+            importing = false
+            result.onSuccess { (spec, message) -> applyImport(spec, message) }
+                .onFailure { error ->
+                    AppLog.w(TAG, "模型导入失败", error)
+                    status = "导入失败：${error.message ?: "未知错误"}"
+                }
+        }
+    }
+
+    fun download(model: RemoteModel) {
+        importing = true
+        downloadError = null
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bytes = ModelDownload.fetch(model.url)
+                    val (spec, message) = installModel(context, model.name, bytes)
+                    // The catalog knows the box channel order, which the tensor shape cannot reveal.
+                    spec.copy(boxFormat = model.boxFormat ?: spec.boxFormat) to message
+                }
+            }
             importing = false
             result.onSuccess { (spec, message) ->
-                // Re-importing the same bytes yields the same id, which must replace, not duplicate.
-                onSpecsChange(specs.filterNot { it.id == spec.id } + spec)
-                status = message
+                applyImport(spec, message)
+                showDownload = false
             }.onFailure { error ->
-                AppLog.w(TAG, "模型导入失败", error)
-                status = "导入失败：${error.message ?: "未知错误"}"
+                AppLog.w(TAG, "模型下载失败", error)
+                downloadError = error.message ?: "未知错误"
             }
         }
     }
@@ -97,8 +141,22 @@ internal fun ModelsScreen(
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     SettingRow(
                         title = "导入 tflite 模型",
-                        subtitle = "支持同族 YOLO-pose 值优先输出，自动识别输入尺寸、anchor 与关键点数",
+                        subtitle = "自动识别输入尺寸、anchor 与关键点数；无法识别的项可在编辑页修正",
                         onClick = { if (!importing) launcher.launch(arrayOf("*/*")) },
+                    )
+                }
+            }
+            item {
+                ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                    SettingRow(
+                        title = "从远程下载模型",
+                        subtitle = "官方模型目录，或粘贴任意 TFLite 的 https 地址（仅 YOLO26n 内置）",
+                        onClick = {
+                            if (!importing) {
+                                downloadError = null
+                                showDownload = true
+                            }
+                        },
                     )
                 }
             }
@@ -133,6 +191,15 @@ internal fun ModelsScreen(
                 )
             }
         }
+    }
+
+    if (showDownload) {
+        ModelDownloadDialog(
+            downloading = importing,
+            error = downloadError,
+            onDownload = { model -> download(model) },
+            onDismiss = { if (!importing) showDownload = false },
+        )
     }
 
     editing?.let { spec ->
@@ -175,6 +242,7 @@ private fun ModelCard(spec: ModelSpec, onToggle: (Boolean) -> Unit, onClick: () 
                         "关键点 ${formatThreshold(spec.keypointThreshold)} · " +
                         "防抖 ${spec.debounceFrames} 帧 · " +
                         spec.boxFormat.label + " · " +
+                        spec.outputLayout.label + " · " +
                         if (spec.imported) "导入" else "内置",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -190,6 +258,93 @@ private fun ModelCard(spec: ModelSpec, onToggle: (Boolean) -> Unit, onClick: () 
 }
 
 @Composable
+private fun ModelDownloadDialog(
+    downloading: Boolean,
+    error: String?,
+    onDownload: (RemoteModel) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var url by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = { if (!downloading) onDismiss() },
+        title = { Text("下载模型") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ModelCatalog.models.forEach { model ->
+                    ElevatedCard(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !downloading) { onDownload(model) },
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(model.name, style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                text = model.url,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (model.note.isNotEmpty()) {
+                                Text(
+                                    text = model.note,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it.trim() },
+                    label = { Text("自定义 https 地址") },
+                    singleLine = true,
+                    enabled = !downloading,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                error?.let {
+                    Text(
+                        text = "下载失败：$it",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (downloading) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                Text(
+                    text = "下载后与本地导入使用同一套校验；anchor、关键点、布局与框格式可在编辑页修正。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !downloading && url.startsWith("https://"),
+                onClick = {
+                    onDownload(
+                        RemoteModel(
+                            name = url.substringAfterLast('/').substringBefore('?'),
+                            url = url,
+                        ),
+                    )
+                },
+            ) { Text("下载") }
+        },
+        dismissButton = {
+            TextButton(enabled = !downloading, onClick = onDismiss) { Text("关闭") }
+        },
+    )
+}
+
+@Composable
 private fun ModelEditDialog(
     spec: ModelSpec,
     onSave: (ModelSpec) -> Unit,
@@ -200,15 +355,58 @@ private fun ModelEditDialog(
     var keypoint by remember(spec) { mutableStateOf(formatThreshold(spec.keypointThreshold)) }
     var debounce by remember(spec) { mutableStateOf(spec.debounceFrames.toString()) }
     var boxFormat by remember(spec) { mutableStateOf(spec.boxFormat) }
+    var outputLayout by remember(spec) { mutableStateOf(spec.outputLayout) }
+    var anchors by remember(spec) { mutableStateOf(spec.anchors.toString()) }
+    var keypoints by remember(spec) { mutableStateOf(spec.keypoints.toString()) }
     val scoreValue = score.toFloatOrNull()?.takeIf { it in 0f..1f }
     val keypointValue = keypoint.toFloatOrNull()?.takeIf { it in 0f..1f }
     val debounceValue = debounce.toIntOrNull()?.takeIf { it in 1..30 }
+    val anchorsValue = anchors.toIntOrNull()?.takeIf { it in 1..1_000_000 }
+    val keypointsValue = keypoints.toIntOrNull()?.takeIf { it in 1..100 }
+    // Bundled models rebuild these from the asset, so only imports can be corrected here.
+    val contractValid = !spec.imported || (anchorsValue != null && keypointsValue != null)
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(spec.name) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (spec.imported) {
+                    Text(
+                        text = "模型配置：自动识别有误或框/点错位时，按模型的实际张量形状修改；" +
+                            "输入尺寸由静态输入形状决定，不在此处修改",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = anchors,
+                        onValueChange = { anchors = it.filter(Char::isDigit).take(7) },
+                        label = { Text("输出 anchor 数") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    )
+                    OutlinedTextField(
+                        value = keypoints,
+                        onValueChange = { keypoints = it.filter(Char::isDigit).take(3) },
+                        label = { Text("关键点数（输出通道 = 5 + 3K）") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    )
+                    Text(
+                        text = "输出布局",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutputLayout.entries.forEach { layout ->
+                            FilterChip(
+                                selected = outputLayout == layout,
+                                onClick = { outputLayout = layout },
+                                label = { Text(layout.label) },
+                            )
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = score,
                     onValueChange = { score = it.filterDecimal() },
@@ -253,7 +451,8 @@ private fun ModelEditDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = scoreValue != null && keypointValue != null && debounceValue != null,
+                enabled = scoreValue != null && keypointValue != null &&
+                    debounceValue != null && contractValid,
                 onClick = {
                     onSave(
                         spec.copy(
@@ -261,6 +460,9 @@ private fun ModelEditDialog(
                             keypointThreshold = keypointValue ?: spec.keypointThreshold,
                             debounceFrames = debounceValue ?: spec.debounceFrames,
                             boxFormat = boxFormat,
+                            outputLayout = outputLayout,
+                            anchors = anchorsValue ?: spec.anchors,
+                            keypoints = keypointsValue ?: spec.keypoints,
                         ),
                     )
                 },
@@ -277,34 +479,29 @@ private fun ModelEditDialog(
     )
 }
 
-/** Copies the picked model into `filesDir/models` after validating and staticizing its signatures. */
-private fun importModel(context: Context, uri: Uri): Pair<ModelSpec, String> {
-    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readCapped(MAX_MODEL_BYTES) }
-        ?: error("无法读取所选文件")
+/**
+ * Validates and staticizes [bytes], copies them into `filesDir/models`, and returns the installed
+ * spec plus a status line that lists whatever the user should still confirm in the editor.
+ */
+private fun installModel(
+    context: Context,
+    displayName: String?,
+    bytes: ByteArray,
+): Pair<ModelSpec, String> {
     val prepared = PoseModelImport.prepare(bytes)
-    val spec = PoseModelImport.install(context, context.displayName(uri), prepared)
+    val spec = PoseModelImport.install(context, displayName, prepared)
     val patched = if (prepared.staticizedSignatures > 0) {
         "，已自动把 ${prepared.staticizedSignatures} 个张量的动态 shape signature 改为静态"
     } else {
         "，shape signature 已全部为静态（GPU delegate 可用）"
     }
-    return spec to "已导入 ${spec.name}：输入 ${spec.inputSize}，" +
+    val base = "已导入 ${spec.name}：输入 ${spec.inputSize}，" +
         "${spec.anchors} anchors，${spec.keypoints} 关键点$patched"
-}
-
-/** The picker accepts any file, so bound the read before it becomes a whole-file allocation. */
-private fun java.io.InputStream.readCapped(limit: Int): ByteArray {
-    val output = java.io.ByteArrayOutputStream()
-    val buffer = ByteArray(64 * 1024)
-    while (true) {
-        val read = read(buffer)
-        if (read < 0) break
-        output.write(buffer, 0, read)
-        if (output.size() > limit) {
-            error("模型文件超过 ${limit / 1024 / 1024} MB 上限")
-        }
+    return if (prepared.warnings.isEmpty()) {
+        spec to base
+    } else {
+        spec to base + "。注意：" + prepared.warnings.joinToString("；")
     }
-    return output.toByteArray()
 }
 
 private fun Context.displayName(uri: Uri): String? =
@@ -316,4 +513,3 @@ private fun String.filterDecimal(): String = filter { it.isDigit() || it == '.' 
 private fun formatThreshold(value: Float): String = String.format(Locale.US, "%.2f", value)
 
 private const val TAG = "Models"
-private const val MAX_MODEL_BYTES = 64 * 1024 * 1024

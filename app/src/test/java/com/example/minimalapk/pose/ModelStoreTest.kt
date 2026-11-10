@@ -13,6 +13,7 @@ class ModelStoreTest {
                 keypointThreshold = 0.6f,
                 debounceFrames = 3,
                 boxFormat = BoxFormat.CENTER,
+                outputLayout = OutputLayout.ANCHOR_MAJOR,
             )
         }
 
@@ -24,5 +25,15 @@ class ModelStoreTest {
         val valid = ModelStore.encode(listOf(ModelStore.builtIn.first()))
 
         assertEquals(1, ModelStore.decode("$valid\nnot-a-spec").size)
+    }
+
+    @Test
+    fun readsEntriesSavedBeforeTheOutputLayoutField() {
+        val legacy = ModelStore.encode(listOf(ModelStore.builtIn.first()))
+            .substringBeforeLast('\t')
+
+        val spec = ModelStore.decode(legacy).single()
+
+        assertEquals(OutputLayout.VALUE_MAJOR, spec.outputLayout)
     }
 }

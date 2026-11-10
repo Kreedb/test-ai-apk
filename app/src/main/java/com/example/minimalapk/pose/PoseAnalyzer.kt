@@ -372,7 +372,10 @@ class PoseAnalyzer internal constructor(
                         )
                     }
                 }
-                error("无法加载姿态模型")
+                error(
+                    "无法加载姿态模型 ${enabled.first().name}：请在 设置 → 模型 中检查 anchor、" +
+                        "关键点与输出布局，或切换推理后端后重试",
+                )
             } catch (t: Throwable) {
                 // Graceful shutdown so a close task queued for a backend the worker is still
                 // finishing (see loadWithTimeout) can still run instead of being discarded.
