@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedCard
@@ -41,6 +44,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.models.ConfiguredModelStore
 import com.example.minimalapk.pose.BoxFormat
 import com.example.minimalapk.pose.ModelCatalog
 import com.example.minimalapk.pose.ModelDownload
@@ -68,8 +72,15 @@ internal fun ModelsScreen(
     var importing by remember { mutableStateOf(false) }
     var showDownload by remember { mutableStateOf(false) }
     var downloadError by remember { mutableStateOf<String?>(null) }
+    var showWorkbench by remember { mutableStateOf(false) }
     // Imports run for seconds; use the latest list so a toggle made meanwhile is not discarded.
     val currentSpecs by rememberUpdatedState(specs)
+
+    BackHandler(enabled = showWorkbench) { showWorkbench = false }
+    if (showWorkbench) {
+        ModelWorkbenchScreen(onBack = { showWorkbench = false })
+        return
+    }
 
     fun applyImport(spec: ModelSpec, message: String) {
         // Re-importing the same bytes yields the same id, which must replace, not duplicate.
@@ -87,11 +98,11 @@ internal fun ModelsScreen(
                     val bytes = context.contentResolver.openInputStream(uri)
                         ?.use { it.readCapped(ModelDownload.MAX_BYTES) }
                         ?: error("无法读取所选文件")
-                    installModel(context, context.displayName(uri), bytes)
+                    installOrKeepModel(context, context.displayName(uri), bytes)
                 }
             }
             importing = false
-            result.onSuccess { (spec, message) -> applyImport(spec, message) }
+            result.onSuccess { (spec, message) -> if (spec != null) applyImport(spec, message) else status = message }
                 .onFailure { error ->
                     AppLog.w(TAG, "模型导入失败", error)
                     status = "导入失败：${error.message ?: "未知错误"}"
@@ -106,14 +117,14 @@ internal fun ModelsScreen(
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val bytes = ModelDownload.fetch(model.url)
-                    val (spec, message) = installModel(context, model.name, bytes)
+                    val (spec, message) = installOrKeepModel(context, model.name, bytes)
                     // The catalog knows the box channel order, which the tensor shape cannot reveal.
-                    spec.copy(boxFormat = model.boxFormat ?: spec.boxFormat) to message
+                    spec?.copy(boxFormat = model.boxFormat ?: spec.boxFormat) to message
                 }
             }
             importing = false
             result.onSuccess { (spec, message) ->
-                applyImport(spec, message)
+                if (spec != null) applyImport(spec, message) else status = message
                 showDownload = false
             }.onFailure { error ->
                 AppLog.w(TAG, "模型下载失败", error)
@@ -140,8 +151,17 @@ internal fun ModelsScreen(
             item {
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     SettingRow(
+                        title = "模型工作台与配置文件",
+                        subtitle = "非 YOLO 模型、多输入/输出、量化与动态形状；编辑配置后运行",
+                        onClick = { if (!importing) showWorkbench = true },
+                    )
+                }
+            }
+            item {
+                ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                    SettingRow(
                         title = "导入 tflite 模型",
-                        subtitle = "自动识别输入尺寸、anchor 与关键点数；无法识别的项可在编辑页修正",
+                        subtitle = "YOLO 姿态自动配置；其它模型保存到工作台，通过配置文件修正",
                         onClick = { if (!importing) launcher.launch(arrayOf("*/*")) },
                     )
                 }
@@ -269,7 +289,7 @@ private fun ModelDownloadDialog(
         onDismissRequest = { if (!downloading) onDismiss() },
         title = { Text("下载模型") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ModelCatalog.models.forEach { model ->
                     ElevatedCard(
                         modifier = Modifier
@@ -370,7 +390,7 @@ private fun ModelEditDialog(
         onDismissRequest = onDismiss,
         title = { Text(spec.name) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (spec.imported) {
                     Text(
                         text = "模型配置：自动识别有误或框/点错位时，按模型的实际张量形状修改；" +
@@ -501,6 +521,16 @@ private fun installModel(
         spec to base
     } else {
         spec to base + "。注意：" + prepared.warnings.joinToString("；")
+    }
+}
+
+private fun installOrKeepModel(context: Context, name: String?, bytes: ByteArray): Pair<ModelSpec?, String> {
+    return try {
+        installModel(context, name, bytes)
+    } catch (error: IllegalArgumentException) {
+        val model = ConfiguredModelStore.install(ConfiguredModelStore.directory(context), name, bytes)
+        null to "已保存 ${model.name} 到模型工作台。姿态管线不适配：${error.message}。" +
+            "打开“模型工作台与配置文件”查看实际张量、修改输入/输出配置并运行，无需丢弃模型。"
     }
 }
 

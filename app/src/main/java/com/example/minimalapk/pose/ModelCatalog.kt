@@ -68,10 +68,10 @@ internal fun InputStream.readCapped(limit: Int): ByteArray {
     while (true) {
         val read = read(buffer)
         if (read < 0) break
-        output.write(buffer, 0, read)
-        if (output.size() > limit) {
+        if (read > limit - output.size()) {
             error("模型文件超过 ${limit / 1024 / 1024} MB 上限")
         }
+        output.write(buffer, 0, read)
     }
     return output.toByteArray()
 }

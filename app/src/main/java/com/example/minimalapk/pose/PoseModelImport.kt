@@ -2,6 +2,7 @@ package com.example.minimalapk.pose
 
 import android.content.Context
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.models.writeAtomically
 import java.io.File
 import java.security.MessageDigest
 
@@ -157,7 +158,7 @@ internal object PoseModelImport {
         val id = sha256(prepared.bytes).take(16)
         val fileName = "$id.tflite"
         val directory = File(context.filesDir, MODELS_DIR).apply { mkdirs() }
-        File(directory, fileName).writeBytes(prepared.bytes)
+        File(directory, fileName).writeAtomically(prepared.bytes)
         val contract = prepared.contract
         return ModelSpec(
             id = id,
