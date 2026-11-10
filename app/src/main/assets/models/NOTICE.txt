@@ -3,17 +3,15 @@ Models:
   Source: https://github.com/ultralytics/assets/releases/tag/v8.4.0 (YOLO26n-pose)
   Metadata author: Ultralytics
   Metadata license: AGPL-3.0 License (https://ultralytics.com/license)
-- yolo11n_pose.tflite
-  Source: https://github.com/ultralytics/assets/releases/tag/v8.4.0 (YOLO11n-pose)
-  Metadata author: Ultralytics
-  Metadata license: AGPL-3.0 License (https://ultralytics.com/license)
 License text: LICENSE-AGPL-3.0.txt (in this directory)
 Runtime LiteRT 2.3.2, Apache-2.0 License (LICENSE-LiteRT.txt in this directory)
 Runtime Qualcomm QNN 2.50.0, Qualcomm AI Hub Model License (LICENSE-QNN.pdf and NOTICE-QNN.txt in this directory)
 Conversion: onnx2tf 2.6.9 (TFLite)
   yolo26n_pose: from the ONNX raw pose head /model.23/Transpose_output_0
-  yolo11n_pose: from the ONNX pose head output0
 Input: 1x3x640x640 float32 RGB, letterboxed with 114 padding
 Raw output TFLite: 1x56x8400 float32 (the transposed layout emitted by onnx2tf)
-Box format: yolo26n_pose is xyxy; yolo11n_pose is cxcywh (the app converts it in the decoder)
+Box format: yolo26n_pose is xyxy
 Detection: anchors at or above the score threshold are sorted by score and capped at 300, decoded in place from the value-major head (no intermediate 300x57 table)
+
+Only the primary model ships in the APK. YOLO11n-pose is downloaded on demand from the
+repository's models/ directory; its notice is at models/NOTICE.txt.

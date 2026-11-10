@@ -142,6 +142,25 @@ class PoseDecoderTest {
     }
 
     @Test
+    fun decodesAnchorMajorOutput() {
+        val anchorMajor = spec.copy(outputLayout = OutputLayout.ANCHOR_MAJOR)
+        fun at(anchor: Int, channel: Int) = anchor * anchorMajor.valuesPerAnchor + channel
+        val output = FloatArray(anchorMajor.anchors * anchorMajor.valuesPerAnchor)
+        output[at(3, 0)] = 10f
+        output[at(3, 1)] = 20f
+        output[at(3, 2)] = 110f
+        output[at(3, 3)] = 220f
+        output[at(3, 4)] = 0.8f
+        output[at(3, 5 + 16 * 3)] = 60f
+
+        val detection = PoseDecoder.decode(output, anchorMajor).single()
+
+        assertEquals(10f, detection.left)
+        assertEquals(220f, detection.bottom)
+        assertEquals(60f, detection.keypoints[16].x)
+    }
+
+    @Test
     fun measurementUsesUserHeightForScale() {
         val detection = pose(
             PoseNet.LEFT_EYE to keypoint(160f, 50f),

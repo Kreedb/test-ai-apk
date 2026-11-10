@@ -1,0 +1,14 @@
+Downloadable models (hosted here so the APK keeps only the primary model):
+
+- yolo11n_pose.tflite
+  Source: https://github.com/ultralytics/assets/releases/tag/v8.4.0 (YOLO11n-pose)
+  Metadata author: Ultralytics
+  Metadata license: AGPL-3.0 License (https://ultralytics.com/license)
+  License text: ../app/src/main/assets/models/LICENSE-AGPL-3.0.txt
+  Conversion: onnx2tf 2.6.9 (TFLite) from the ONNX pose head output0
+  Input: 1x640x640x3 float32 RGB, letterboxed with 114 padding
+  Raw output TFLite: 1x56x8400 float32, value-major
+  Box format: cxcywh (the app converts it in the decoder)
+
+The app downloads these files only when the user adds the model, validates them with the same
+import path as local files, and never bundles them into an APK.

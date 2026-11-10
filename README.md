@@ -40,34 +40,37 @@ app/src/main/java/com/example/minimalapk/
 
 ## 姿态测量（YOLO-pose）
 
-相机页集成了 [Ultralytics](https://docs.ultralytics.com) 的两个 pose 模型，模型以 `app/src/main/assets/models/*.tflite`（LiteRT）格式提供，在设备端完成推理，运行过程不需要网络：
+相机页集成了 [Ultralytics](https://docs.ultralytics.com) 的 pose 模型，在设备端完成推理，推理过程不需要网络。APK 只内置主模型，其余模型在“添加”时从远程下载：
 
-| 模型 | 文件 | 输出框格式 |
+| 模型 | 获取方式 | 输出框格式 |
 | --- | --- | --- |
-| YOLO26n-pose 640 | `yolo26n_pose.tflite` | `xyxy` |
-| YOLO11n-pose 640 | `yolo11n_pose.tflite` | `cxcywh` |
+| YOLO26n-pose 640 | 内置 `app/src/main/assets/models/yolo26n_pose.tflite` | `xyxy` |
+| YOLO11n-pose 640 | 下载 `models/yolo11n_pose.tflite` | `cxcywh` |
 
-两个内置模型共用同一份 `ModelSpec` 描述（输入尺寸、anchor 数、关键点数、框格式、阈值、防抖），第二个模型用于验证这条参数化链路：它由 `yolo11n-pose.onnx` 经 onnx2tf 转换而来，输出的框通道是中心点+宽高，解码时统一换算成左上/右下。两个模型都会打包进每个 ABI 包，APK 因此比单模型版本大约多 12MB。
+模型共用同一份 `ModelSpec` 描述（输入尺寸、anchor 数、关键点数、框格式、输出布局、阈值、防抖）。YOLO11n-pose 由 `yolo11n-pose.onnx` 经 onnx2tf 转换而来，框通道是中心点+宽高，解码时换算成左上/右下；它放在仓库根目录的 `models/`，不参与 APK 打包，因此 APK 只包含主模型。
 
-- 设置 → 模型 里可以启用/停用模型、导入 tflite、修改检测置信度阈值、关键点阈值、防抖帧数与框格式。同一时间最多启用 2 个模型，修改在重新进入相机后生效。
+- 设置 → 模型 里可以启用/停用模型、从本地导入或远程下载 tflite、修改检测置信度阈值、关键点阈值、防抖帧数、框格式与输出布局。同一时间最多启用 2 个模型，修改在重新进入相机后生效。
 - 多个启用模型按“同帧串行”运行：一次预处理后按顺序跑每个模型，帧率约等于各模型推理耗时之和；只有第一个模型驱动叠加层，其余模型在底部只显示置信度。所有模型都关闭时仍显示相机画面（只做旋转与 letterbox，不做推理）。
 - 本版本只做单人：每个模型只取置信度最高的一个检测。
-- 导入模型走系统文件选择器（SAF，不需要存储权限）。导入时会读取 TFLite 的输入/输出张量形状：
-  - 只接受单输入单输出、float32、NHWC 正方形输入与值优先 `[1, 5+3K, N]` 输出，且 K 必须是 17（骨架边与测量按 COCO 关键点索引）。int8/float16 量化模型与非 17 点模型会被拒绝并说明原因。
+- 导入模型可以走系统文件选择器（SAF，不需要存储权限），也可以走“从远程下载模型”：内置目录（`ModelCatalog`）或自定义 `https` 地址，下载上限 64MB，下载后与本地导入使用同一套校验。远程下载需要 `INTERNET` 权限，日常推理仍然离线。
+- 导入时会读取 TFLite 的输入/输出张量形状并自动填写模型配置：
+  - 接受单输入单输出、float32、NHWC 正方形输入，以及 `5+3K` 姿态头；值优先 `[1, 5+3K, N]` 与锚点优先 `[1, N, 5+3K]` 都会自动识别。非 17 个关键点的模型也会导入，但骨骼与身体测量只按 COCO 17 点索引，缺失的点不标注、不参与测量。
+  - 只有“配置文件也改不了”的情况才会拒绝导入并给出原因：不是 TFLite 文件、int8/float16 量化、NCHW 输入、非正方形输入、输出不是三维 `5+3K` 姿态头、张量含无法静态化的动态维度。这些都需要重新导出模型。
+  - 自动识别的输入尺寸、anchor 数、关键点数和输出布局都会写进模型配置；输入尺寸由静态输入形状决定，anchor、关键点数、输出布局和框格式可以在模型的编辑弹窗里修正。改错导致加载失败时，相机页会提示检查这些字段或切换推理后端。框格式无法从张量形状推断，导入默认按 `xyxy` 解码，远程目录里的模型则带上已知的框格式。
   - onnx2tf 导出模型常把 `shape_signature` 里的维度写成 `-1`，TFLite 的 SLICE 等算子据此把张量标为动态，GPU delegate 会以 `Attempting to use a delegate that only supports static-sized tensors...` 直接拒绝整张图。导入时会把签名自动改写成具体形状，并在结果里报告改写了多少个张量；如果具体形状本身也是动态的，则拒绝导入并要求用固定输入尺寸重新导出。
   - 导入的模型复制到 `filesDir/models/<sha256>.tflite`，加载时用 `CompiledModel.create(路径, ...)`，不需要新依赖。导入只做形状校验，不做试跑：能通过校验的模型仍可能在该设备上编译失败，错误会显示在相机页。
-  - 框格式无法从张量形状推断，导入后默认按 `xyxy` 解码；如果框位置/大小明显不对，在模型的编辑弹窗里切换为 `cxcywh`。
 - 应用按 `LiteRT (NPU)` → `LiteRT (GPU)` → `LiteRT (CPU)` 的顺序自动选择第一个可用的后端。LiteRT GPU 请求同时包含 CPU 加速器，未被 GPU 委托的算子回退到 CPU 执行。第二个模型复用第一个模型已探测成功的加速器，加载失败时只跳过该模型。
 - LiteRT NPU 使用 `litert-npu-runtime-qualcomm` 与 Qualcomm `qnn-runtime` 的 Hexagon HTP 运行时，仅在 Android 12+、`arm64-v8a`、SoC 厂商为 Qualcomm（`Qualcomm`/`QTI`）且 SoC 型号为 `SM8850` 的设备上探测。模型通过 LiteRT 在设备端 JIT 编译到 NPU，首次进入相机延迟明显，编译产物缓存在 `cacheDir`（后续通常复用）；JIT 需要 `libQnnHtpPrepare.so`。当前只打包 HTP v81（SM8850）的 `Skel`/`Stub`，其他 SoC 会跳过 NPU 并回退到 GPU/CPU。LiteRT 2.3.2 会把单独的 NPU 请求扩展为 NPU+CPU，HTP 编译失败时可能静默回退 CPU：LiteRT 的 Kotlin API 只提供环境支持的加速器，不返回实际执行的子图，`QualcommOptions.Profiling` 也只写入 logcat，因此探测链无法判断 HTP 是否真正接管，会按 `LiteRT (NPU)` 接受该模型（这是一项明确的取舍，不是遗漏）。SM8850 门槛下 HTP 应能成功编译；若怀疑回退到 CPU，请查看 QNN 日志确认。QNN 库需在安装时解压到 `nativeLibraryDir`，因此启用了 `useLegacyPackaging`；`arm64-v8a` 包会额外包含约 114MB（解压后）的 QNN 运行库，其中 85MB 是 JIT 编译库，release APK 实测约增大 34MB。
-- LiteRT 使用 `com.google.ai.edge.litert:litert`、`litert-gpu` 与 `litert-npu-runtime-qualcomm` `2.3.2` 的 `CompiledModel` API。GPU 请求同时包含 CPU 加速器：LiteRT 2.3.2 在只请求 GPU 时，只要有算子未被 GPU 委托就让整个模型编译失败（`Failed to compile model`）；加入 CPU 后这些算子回退 CPU，其余仍在 GPU 执行。GPU 默认使用 MLDrift 的 OpenCL 后端，委托创建失败时先用同一加速器库的 OpenGL 后端重试（该库提示 Adreno 8xx 旧驱动的 OpenCL 内核编译不稳定），仍失败才继续回退；NPU 请求不包含 GPU 兜底，但 LiteRT 会自行加入 CPU 兜底。打包的两个模型都做过 shape signature 修复：onnx2tf 会把 batch/height/width 标记成 `-1`，`tools/staticize_tflite_shapes.py` 把签名改写成与具体形状一致（导入模型由 App 在设备端做同样的改写），重新导出模型后必须再跑一次。
-- 模型输入为 `1x3x640x640`（TFLite 为 NHWC `1x640x640x3`），输出为值优先的 `1x56x8400` 原始姿态头：通道 4 是置信度，通道 5..55 是 17 个 COCO 关键点的 x/y/confidence。应用直接按值优先布局原位读取，不做转置，也不构造中间 `300x57` 表；按模型配置的置信度阈值过滤后按置信度排序，取前 300 个候选。
+- LiteRT 使用 `com.google.ai.edge.litert:litert`、`litert-gpu` 与 `litert-npu-runtime-qualcomm` `2.3.2` 的 `CompiledModel` API。GPU 请求同时包含 CPU 加速器：LiteRT 2.3.2 在只请求 GPU 时，只要有算子未被 GPU 委托就让整个模型编译失败（`Failed to compile model`）；加入 CPU 后这些算子回退 CPU，其余仍在 GPU 执行。GPU 默认使用 MLDrift 的 OpenCL 后端，委托创建失败时先用同一加速器库的 OpenGL 后端重试（该库提示 Adreno 8xx 旧驱动的 OpenCL 内核编译不稳定），仍失败才继续回退；NPU 请求不包含 GPU 兜底，但 LiteRT 会自行加入 CPU 兜底。打包与下载的模型都做过 shape signature 修复：onnx2tf 会把 batch/height/width 标记成 `-1`，`tools/staticize_tflite_shapes.py` 把签名改写成与具体形状一致（导入模型由 App 在设备端做同样的改写），重新导出模型后必须再跑一次。
+- 模型输入为 `1x3x640x640`（TFLite 为 NHWC `1x640x640x3`），输出为 `1x56x8400` 原始姿态头：通道 4 是置信度，通道 5..55 是 17 个 COCO 关键点的 x/y/confidence。解码器按配置的 `OutputLayout` 原位读取值优先或锚点优先布局，不构造中间 `300x57` 表；按模型配置的置信度阈值过滤后按置信度排序，取前 300 个候选。
 - 模型权重由 Ultralytics 的 ONNX 姿态头经 onnx2tf 转换为 TFLite，不使用外部提供的权重；YOLO26n 使用 ONNX 原始姿态头 `/model.23/Transpose_output_0`，YOLO11n 使用 ONNX 的 `output0`。
 - 性能面板中的“加速器”会显示实际选中的后端（如 `LiteRT (NPU)`、`LiteRT (GPU)`、`LiteRT (GPU/GL)` 或 `LiteRT (CPU)`）。`LiteRT (GPU)`/`LiteRT (GPU/GL)` 表示 GPU 成功参与委托，未被 GPU 委托的算子仍由 CPU 执行。
 - 日志页会记录后端探测顺序、设备信息（SDK/ABI/SoC 厂商与型号）、启用的模型、NPU 门槛未通过的原因、NPU 环境与 JIT 编译耗时、LiteRT GPU 每次尝试的后端（`AUTOMATIC`/`OPENGL`）与环境可用加速器、各后端加载耗时/失败堆栈、导入时的签名改写数量，以及首帧每个模型的预处理/推理/后处理耗时，便于定位启动慢或回退问题。
 - 输入身高用于把像素换算成厘米：`cm/px = 身高 / 人体检测框高度`，再据此估算臂展、双眼间距、肩线/髋线倾斜与肩髋横向偏移。
 - 使用条件会影响精度：需要全身入镜、正对镜头、双臂平举，且人物应尽量站直。单目 2D 关键点无法给出临床意义上的脊柱侧弯角度，界面结果仅供筛查参考，不能用于医学诊断。
 - 预览右上角显示性能指标：分析帧率、预处理/推理/分析耗时（取第一个启用模型），以及 CPU、GPU、NPU 利用率。Android 不向普通应用开放系统级占用：CPU 显示本进程占设备总 CPU 算力的比例（0–100%），GPU/NPU 会尝试读取常见厂商的 sysfs 节点，设备不暴露时显示 `N/A`。LiteRT 2.3.2 也没有读取 NPU 利用率的 API，`QualcommOptions.Profiling` 只把逐算子耗时写进 logcat，因此 NPU 无法通过 LiteRT 补上该指标。
-- 模型来自 Ultralytics，许可为 AGPL-3.0；许可全文与模型来源见 `app/src/main/assets/models/NOTICE.txt` 和 `app/src/main/assets/models/LICENSE-AGPL-3.0.txt`。
+- 模型来自 Ultralytics，许可为 AGPL-3.0；许可全文与模型来源见 `app/src/main/assets/models/NOTICE.txt`、`models/NOTICE.txt` 与 `app/src/main/assets/models/LICENSE-AGPL-3.0.txt`。
+- 本版本只实现姿态任务。[tensorflow/examples](https://github.com/tensorflow/examples/tree/master/lite/examples) 中的语音合成、超分辨率、设备端训练等例程是不同的输入/输出管线，尚未移植；模型获取已经改为可远程下载，后续可以按任务类型扩展目录与推理管线。
 
 ## 自动构建
 
