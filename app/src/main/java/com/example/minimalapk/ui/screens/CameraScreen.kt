@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.net.Uri
@@ -23,15 +24,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -51,7 +52,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -59,6 +59,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.models.ConfiguredModel
+import com.example.minimalapk.models.ConfiguredModelStore
+import com.example.minimalapk.models.LiveConfiguredModel
+import com.example.minimalapk.models.ModelConfig
+import com.example.minimalapk.models.overlay
 import com.example.minimalapk.pose.BodyMeasurement
 import com.example.minimalapk.pose.DeviceUsage
 import com.example.minimalapk.pose.DeviceUsageSampler
@@ -88,7 +93,7 @@ import kotlin.math.max
 
 @Composable
 fun CameraScreen(
-    showPose: Boolean,
+    heightCm: Float?,
     showHeightLine: Boolean,
     showArmSpan: Boolean,
 ) {
@@ -96,7 +101,10 @@ fun CameraScreen(
     var granted by remember { mutableStateOf(context.hasCameraPermission()) }
     var permanentlyDenied by remember { mutableStateOf(false) }
     var requested by remember { mutableStateOf(false) }
-    var heightText by rememberSaveable { mutableStateOf("170") }
+    var exampleModels by remember { mutableStateOf(emptyList<ConfiguredModel>()) }
+    var exampleModelsLoaded by remember { mutableStateOf(false) }
+    var selectedExampleId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showExamplePicker by rememberSaveable { mutableStateOf(false) }
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { result ->
@@ -118,6 +126,23 @@ fun CameraScreen(
         }
     }
 
+    LaunchedEffect(Unit) {
+        // Re-read on every tab entry so models added in 示例 → 模型工作台 show up here.
+        exampleModels = try {
+            withContext(Dispatchers.IO) {
+                ConfiguredModelStore.list(ConfiguredModelStore.directory(context))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLog.w(TAG, "示例模型列表读取失败", e)
+            emptyList()
+        }
+        exampleModelsLoaded = true
+    }
+
+    val selectedExample = exampleModels.firstOrNull { it.id == selectedExampleId }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -130,24 +155,40 @@ fun CameraScreen(
         )
 
         if (granted) {
-            OutlinedTextField(
-                value = heightText,
-                onValueChange = { input -> heightText = input.filter(Char::isDigit).take(3) },
-                label = { Text("身高 (cm)") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            PoseCamera(
-                heightCm = heightText.toFloatOrNull(),
-                showPose = showPose,
-                showHeightLine = showHeightLine,
-                showArmSpan = showArmSpan,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .clip(RoundedCornerShape(16.dp)),
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = if (exampleModels.isEmpty()) {
+                        "示例模型叠加：关闭 · 可在 示例 → 模型工作台 添加"
+                    } else {
+                        "示例模型叠加：${selectedExample?.name ?: "关闭"}"
+                    },
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = { showExamplePicker = true }) { Text("选择") }
+            }
+            if (exampleModelsLoaded) {
+                PoseCamera(
+                    heightCm = heightCm,
+                    showHeightLine = showHeightLine,
+                    showArmSpan = showArmSpan,
+                    exampleModel = selectedExample,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .clip(RoundedCornerShape(16.dp)),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("正在读取示例模型…", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
         } else {
             Column(
                 modifier = Modifier
@@ -179,20 +220,37 @@ fun CameraScreen(
             }
         }
     }
+
+    if (showExamplePicker) {
+        OptionDialog(
+            title = "示例模型叠加",
+            options = listOf<ConfiguredModel?>(null) + exampleModels,
+            selected = selectedExample,
+            label = { it?.name ?: "关闭（只显示姿态）" },
+            onSelect = {
+                selectedExampleId = it?.id
+                showExamplePicker = false
+            },
+            onDismiss = { showExamplePicker = false },
+        )
+    }
 }
 
 @Composable
 private fun PoseCamera(
     heightCm: Float?,
-    showPose: Boolean,
     showHeightLine: Boolean,
     showArmSpan: Boolean,
+    exampleModel: ConfiguredModel?,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var frame by remember { mutableStateOf<PoseFrame?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var exampleOverlay by remember { mutableStateOf<Bitmap?>(null) }
+    var exampleText by remember { mutableStateOf<String?>(null) }
+    var exampleError by remember { mutableStateOf<String?>(null) }
     var fps by remember { mutableFloatStateOf(0f) }
     var usage by remember { mutableStateOf(DeviceUsage()) }
     var executionProvider by remember { mutableStateOf<String?>(null) }
@@ -213,12 +271,16 @@ private fun PoseCamera(
         }
     }
 
-    LaunchedEffect(lifecycleOwner) {
+    LaunchedEffect(lifecycleOwner, exampleModel?.id) {
         // Owned by this effect so a lifecycle re-run never binds CameraX to a shut-down executor.
         val analysisExecutor = Executors.newSingleThreadExecutor()
         var analyzer: PoseAnalyzer? = null
+        var liveModel: LiveConfiguredModel? = null
         var analysis: ImageAnalysis? = null
         var cameraProvider: ProcessCameraProvider? = null
+        exampleOverlay = null
+        exampleText = null
+        exampleError = null
         try {
             val provider = try {
                 context.awaitCameraProvider()
@@ -250,6 +312,22 @@ private fun PoseCamera(
             }
             analyzer = opened
             executionProvider = opened.executionProvider
+            if (exampleModel != null) {
+                liveModel = try {
+                    withContext(Dispatchers.IO) {
+                        val description = ConfiguredModelStore.describe(exampleModel)
+                        val config = ModelConfig.decode(exampleModel.configFile.readText(), description)
+                        val graph = description.signatures.single { it.key == config.signature }
+                        LiveConfiguredModel(exampleModel, config, graph).also { liveModel = it }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    AppLog.w(TAG, "示例模型加载失败", e)
+                    exampleError = e.message ?: "示例模型加载失败"
+                    null
+                }
+            }
             val mainExecutor = ContextCompat.getMainExecutor(context)
             val imageAnalysis = ImageAnalysis.Builder()
                 .setResolutionSelector(
@@ -282,6 +360,19 @@ private fun PoseCamera(
                         throw e
                     }
                     bitmap.recycle()
+                    var overlay: Bitmap? = null
+                    var text: String? = null
+                    var liveError: String? = null
+                    val live = liveModel
+                    if (live != null) {
+                        try {
+                            val output = live.run(result.bitmap)
+                            overlay = output.overlay(result.bitmap.width)
+                            text = output.text
+                        } catch (e: Exception) {
+                            liveError = e.message ?: "示例模型推理失败"
+                        }
+                    }
                     val completedNanos = System.nanoTime()
                     // Keep the frame open until the main thread consumes it so CameraX's
                     // latest-frame limit also bounds pending display work.
@@ -289,6 +380,10 @@ private fun PoseCamera(
                         try {
                             errorMessage = null
                             frame = result
+                            exampleOverlay = overlay
+                            exampleText = text
+                            // Keep a load failure visible: a null runner publishes frames but no error.
+                            if (live != null) exampleError = liveError
                             frameTimes.addLast(completedNanos)
                             fps = frameRate(frameTimes, completedNanos)
                         } finally {
@@ -330,12 +425,13 @@ private fun PoseCamera(
             // Unbind only this screen's use case; unbindAll() here would tear down a newer
             // CameraScreen that finished binding while this delayed cleanup was still pending.
             cameraProvider?.let { provider -> analysis?.let { provider.unbind(it) } }
-            analyzer?.let { opened ->
+            if (analyzer != null || liveModel != null) {
                 withContext(NonCancellable + Dispatchers.IO) {
                     // Wait for the in-flight frame callback before closing: otherwise it can submit
                     // analyze() after the backend worker is shut down and log a false error.
                     analysisExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS)
-                    opened.close()
+                    analyzer?.close()
+                    liveModel?.close()
                 }
             }
         }
@@ -364,12 +460,20 @@ private fun PoseCamera(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
+            exampleOverlay?.let { overlay ->
+                // Both images are square or squared, so Crop maps them into the same rect.
+                Image(
+                    bitmap = overlay.asImageBitmap(),
+                    contentDescription = "示例模型输出",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             PoseOverlay(
                 detection = detection,
                 measurement = measurement,
                 heightCm = heightCm,
                 spec = primary?.spec,
-                showPose = showPose,
                 showHeightLine = showHeightLine,
                 showArmSpan = showArmSpan,
                 modifier = Modifier.fillMaxSize(),
@@ -412,9 +516,15 @@ private fun PoseCamera(
         ) {
             frame?.let { current ->
                 if (current.results.isEmpty()) {
-                    MeasurementLine("未启用推理模型，请在 设置 → 模型 中开启")
+                    MeasurementLine(
+                        if (exampleOverlay != null || exampleText != null) {
+                            "姿态模型未启用，正在运行示例模型叠加"
+                        } else {
+                            "未启用推理模型，请在 设置 → 模型 中开启"
+                        },
+                    )
                 } else if (heightCm == null || heightCm <= 0f) {
-                    MeasurementLine("请输入身高以换算尺寸")
+                    MeasurementLine("请在 插件 → 姿态增强 填写身高后换算尺寸")
                 } else if (detection == null) {
                     MeasurementLine("未检测到人体")
                 } else if (!PoseMeasurement.isFullBodyVisible(
@@ -431,7 +541,7 @@ private fun PoseCamera(
                     measurement.hipTiltDeg?.let { MeasurementLine("髋线倾斜 ${format(it)}°") }
                     measurement.torsoOffsetCm?.let { MeasurementLine("肩髋横向偏移约 ${format(it)} cm") }
                 } else {
-                    MeasurementLine("请输入有效身高（50–250 cm）")
+                    MeasurementLine("请在 插件 → 姿态增强 填写有效身高（50–250 cm）")
                 }
                 // Models beyond the first only report their top detection; drawing stays single-layer.
                 current.results.drop(1).forEach { result ->
@@ -442,6 +552,8 @@ private fun PoseCamera(
                     )
                 }
             }
+            exampleError?.let { MeasurementLine("示例模型：$it", color = Color(0xFFFF8A80)) }
+            exampleText?.let { MeasurementLine(it.take(200), color = Color(0xFFBDBDBD)) }
             MeasurementLine(
                 text = "结果仅供筛查参考，不能用于医学诊断",
                 color = Color(0xFFBDBDBD),
@@ -500,7 +612,6 @@ private fun PoseOverlay(
     measurement: BodyMeasurement?,
     heightCm: Float?,
     spec: ModelSpec?,
-    showPose: Boolean,
     showHeightLine: Boolean,
     showArmSpan: Boolean,
     modifier: Modifier = Modifier,
@@ -527,24 +638,23 @@ private fun PoseOverlay(
             drawContext.canvas.nativeCanvas.drawText(text, x, y, labelPaint)
         }
 
-        if (showPose) {
-            val skeletonColor = Color(0xFF00E5FF)
-            PoseNet.skeletonEdges.forEach { (first, second) ->
-                val start = point(first) ?: return@forEach
-                val end = point(second) ?: return@forEach
-                drawLine(skeletonColor, start, end, strokeWidth = 3f)
-            }
-            detection.keypoints.indices.forEach { index ->
-                val keypoint = point(index) ?: return@forEach
-                drawCircle(Color(0xFFFFC107), radius = 5f, center = keypoint)
-            }
-            drawRect(
-                color = Color(0x9900E5FF),
-                topLeft = Offset(left + detection.left * scale, top + detection.top * scale),
-                size = Size(detection.width * scale, detection.height * scale),
-                style = Stroke(width = 3f),
-            )
+        // Pose recognition is the camera's base layer; the 姿态增强 plugin only adds measurements.
+        val skeletonColor = Color(0xFF00E5FF)
+        PoseNet.skeletonEdges.forEach { (first, second) ->
+            val start = point(first) ?: return@forEach
+            val end = point(second) ?: return@forEach
+            drawLine(skeletonColor, start, end, strokeWidth = 3f)
         }
+        detection.keypoints.indices.forEach { index ->
+            val keypoint = point(index) ?: return@forEach
+            drawCircle(Color(0xFFFFC107), radius = 5f, center = keypoint)
+        }
+        drawRect(
+            color = Color(0x9900E5FF),
+            topLeft = Offset(left + detection.left * scale, top + detection.top * scale),
+            size = Size(detection.width * scale, detection.height * scale),
+            style = Stroke(width = 3f),
+        )
 
         if (showHeightLine && measurement != null && heightCm != null) {
             val centerX = left + (detection.left + detection.right) / 2f * scale

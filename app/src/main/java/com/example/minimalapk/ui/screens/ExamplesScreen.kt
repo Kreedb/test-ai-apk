@@ -108,7 +108,7 @@ private fun ExampleList(
         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             SettingRow(
                 title = "模型工作台",
-                subtitle = "MoveNet 姿态、图片分类、检测、音频分类；任意 TFLite 导入与配置",
+                subtitle = "MoveNet 姿态、图片分类、检测、音频分类；任意 TFLite 导入与配置，图片模型可在相机页叠加",
                 onClick = onOpenWorkbench,
             )
         }

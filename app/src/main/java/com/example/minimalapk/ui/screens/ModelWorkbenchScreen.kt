@@ -129,7 +129,7 @@ internal fun ModelWorkbenchScreen(onBack: () -> Unit) {
             Text("示例模型 · 点击下载并配置", style = MaterialTheme.typography.titleMedium)
             ExampleCatalog.configurable.forEach { example ->
                 ElevatedCard(Modifier.fillMaxWidth()) {
-                    SettingRow(example.name, "${example.sizeBytes / 1024 / 1024} MB · 下载后离线 CPU 推理", {
+                    SettingRow(example.name, "${example.sizeBytes / 1024 / 1024} MB · 下载后离线 CPU 推理，图片模型可在相机页叠加", {
                         if (!busy) install { ExampleDownload.install(context, example) }
                     })
                 }
