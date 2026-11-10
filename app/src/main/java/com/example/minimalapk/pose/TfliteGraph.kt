@@ -5,7 +5,7 @@ package com.example.minimalapk.pose
  * its shape signatures static. TFLite operators treat a `-1` in `shape_signature` as "unspecified"
  * even when the concrete `shape` is resolved, which makes the graph dynamic and the GPU delegate
  * reject it; rewriting the signature in place (same rank, so no offsets move) fixes that.
- * Mirrors `tools/staticize_tflite_shapes.py`, which does the same for bundled assets at build time.
+ * Imported models are fixed here; the bundled asset is committed already static.
  *
  * Every tensor/table handle below is an absolute byte offset into [bytes].
  */

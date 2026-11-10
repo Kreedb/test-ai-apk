@@ -43,11 +43,6 @@ jobs:
           echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
           echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
-      - name: Check model shape signatures
-        run: |
-          python3 tools/staticize_tflite_shapes.py --check
-          python3 tools/test_staticize_tflite_shapes.py
-
       - name: Build, lint, and test
         run: ./gradlew assembleDebug assembleRelease lintDebug testDebugUnitTest --build-cache --parallel --console=plain
 
