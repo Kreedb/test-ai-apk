@@ -15,3 +15,16 @@ Detection: anchors at or above the score threshold are sorted by score and cappe
 
 Only the primary model ships in the APK. YOLO11n-pose is downloaded on demand from the
 repository's models/ directory; its notice is at models/NOTICE.txt.
+
+On-demand examples (not bundled):
+- TensorFlow Lite examples: ESRGAN, MobileNet V1 classification, SSD MobileNet V1,
+  DeepLab V3 segmentation, YAMNet audio classification, and model personalization.
+  Source: https://github.com/tensorflow/examples/tree/master/lite/examples
+  Copyright The TensorFlow Authors. Apache License 2.0.
+- MoveNet SinglePose Lightning PTQ, distributed by Google Coral test_data.
+  Source: https://github.com/google-coral/test_data/blob/104342d2d3480b3e66203073dac24f4e2dbb4c41/movenet_single_pose_lightning_ptq.tflite
+  Copyright Google LLC. Apache License 2.0.
+Apache-2.0 license text: LICENSE-LiteRT.txt (in this directory).
+Downloads and SHA-256 checksums: examples/ExampleModels.kt.
+The personalization demo uses the original feature extractor and a local Kotlin
+Adam classification head. Text-to-speech uses the installed Android TTS service.

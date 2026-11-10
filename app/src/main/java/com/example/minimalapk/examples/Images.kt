@@ -17,7 +17,7 @@ internal fun decodeImage(context: Context, uri: Uri, maxSize: Int = 2048): Bitma
             decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             val longest = max(info.size.width, info.size.height)
             if (longest > maxSize) {
-                decoder.setTargetSampleSize(max(1, longest / maxSize))
+                decoder.setTargetSampleSize(sampleSizeFor(longest, maxSize))
             }
         }
     } else {

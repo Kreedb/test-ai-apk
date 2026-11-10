@@ -1,9 +1,14 @@
 package com.example.minimalapk.examples
 
 import android.graphics.Bitmap
+import com.example.minimalapk.models.writeAtomically
 import org.tensorflow.lite.Interpreter
 import java.io.Closeable
 import java.io.File
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Arrays
@@ -98,13 +103,16 @@ internal class SoftmaxHead(
     @Synchronized
     fun train(samples: List<TrainingSample>): Float {
         require(samples.isNotEmpty()) { "训练样本为空" }
+        require(samples.all { it.label in 0 until classes && it.bottleneck.size == features && it.bottleneck.all(Float::isFinite) }) {
+            "训练样本的类别或特征无效"
+        }
         var loss = 0f
         for (sample in samples) {
             val bottleneck = sample.bottleneck
             require(bottleneck.size == features) {
                 "特征维度不符：期望 $features，实际 ${bottleneck.size}"
             }
-            val target = sample.label.coerceIn(0, classes - 1)
+            val target = sample.label
             val probabilities = predictInternal(bottleneck)
             loss -= ln(probabilities[target].coerceAtLeast(1e-7f))
             for (label in 0 until classes) {
@@ -145,6 +153,42 @@ internal class SoftmaxHead(
     @Synchronized
     fun predict(bottleneck: FloatArray): FloatArray = predictInternal(bottleneck)
 
+    @Synchronized
+    fun save(file: File) {
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { output ->
+            output.writeInt(CHECKPOINT_VERSION)
+            output.writeInt(features)
+            output.writeInt(classes)
+            listOf(weights, biases, firstWeights, secondWeights, firstBiases, secondBiases).forEach { values ->
+                values.forEach { output.writeFloat(it) }
+            }
+            output.writeFloat(firstPower)
+            output.writeFloat(secondPower)
+        }
+        file.writeAtomically(bytes.toByteArray())
+    }
+
+    @Synchronized
+    fun restore(file: File) {
+        val arrays = listOf(weights, biases, firstWeights, secondWeights, firstBiases, secondBiases)
+        require(file.length() == 20L + arrays.sumOf { it.size.toLong() } * Float.SIZE_BYTES) { "训练存档大小不符" }
+        DataInputStream(ByteArrayInputStream(file.readBytes())).use { input ->
+            require(input.readInt() == CHECKPOINT_VERSION && input.readInt() == features && input.readInt() == classes) {
+                "训练存档版本或维度不匹配"
+            }
+            val loaded = arrays.map { values -> FloatArray(values.size) { input.readFloat() } }
+            val first = input.readFloat()
+            val second = input.readFloat()
+            require(loaded.all { it.all(Float::isFinite) } && first in 0f..1f && second in 0f..1f) { "训练存档包含无效数值" }
+            loaded.forEachIndexed { index, values -> values.copyInto(arrays[index]) }
+            gradWeights.fill(0f)
+            gradBiases.fill(0f)
+            firstPower = first
+            secondPower = second
+        }
+    }
+
     private fun predictInternal(bottleneck: FloatArray): FloatArray {
         require(bottleneck.size == features) {
             "特征维度不符：期望 $features，实际 ${bottleneck.size}"
@@ -160,6 +204,7 @@ internal class SoftmaxHead(
     }
 
     private companion object {
+        const val CHECKPOINT_VERSION = 1
         const val BETA1 = 0.9f
         const val BETA2 = 0.999f
         const val EPSILON = 1e-8f

@@ -52,15 +52,18 @@ import com.example.minimalapk.examples.SuperResolutionRunner
 import com.example.minimalapk.examples.TRAIN_STEPS
 import com.example.minimalapk.examples.TrainingSample
 import com.example.minimalapk.examples.decodeImage
+import com.example.minimalapk.examples.squareBitmap
 import com.example.minimalapk.examples.trainingBatches
 import com.example.minimalapk.log.AppLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.io.File
 
 private const val EXAMPLE_TAG = "Examples"
 
@@ -72,10 +75,12 @@ fun ExamplesScreen() {
         1 -> SuperResolutionScreen(onBack = { page = 0 })
         2 -> TtsScreen(onBack = { page = 0 })
         3 -> TrainingScreen(onBack = { page = 0 })
+        4 -> ModelWorkbenchScreen(onBack = { page = 0 })
         else -> ExampleList(
             onOpenSuperResolution = { page = 1 },
             onOpenTts = { page = 2 },
             onOpenTraining = { page = 3 },
+            onOpenWorkbench = { page = 4 },
         )
     }
 }
@@ -85,6 +90,7 @@ private fun ExampleList(
     onOpenSuperResolution: () -> Unit,
     onOpenTts: () -> Unit,
     onOpenTraining: () -> Unit,
+    onOpenWorkbench: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -99,6 +105,13 @@ private fun ExampleList(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            SettingRow(
+                title = "模型工作台",
+                subtitle = "MoveNet 姿态、图片分类、检测、音频分类；任意 TFLite 导入与配置",
+                onClick = onOpenWorkbench,
+            )
+        }
         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             SettingRow(
                 title = "超分辨率",
@@ -121,8 +134,8 @@ private fun ExampleList(
             )
         }
         Text(
-            text = "当前只移植了超分辨率与设备端训练两个 TFLite 示例。官方示例仓库已没有 TTS 例程；" +
-                "社区 FastSpeech2 模型依赖 Flex 自定义算子，因此语音合成使用系统引擎。",
+            text = "工作台可配置多输入/输出、量化与签名模型。官方示例仓库当前没有 TTS 例程，" +
+                "语音合成使用系统引擎。模型所需自定义算子仍需运行时支持。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -133,7 +146,7 @@ private fun ExampleList(
 private fun SuperResolutionScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var runner by remember { mutableStateOf<SuperResolutionRunner?>(null) }
+    var modelFile by remember { mutableStateOf<File?>(null) }
     var status by remember { mutableStateOf("正在准备模型（首次需下载约 5 MB）…") }
     var error by remember { mutableStateOf<String?>(null) }
     var source by remember { mutableStateOf<Bitmap?>(null) }
@@ -141,21 +154,12 @@ private fun SuperResolutionScreen(onBack: () -> Unit) {
     var running by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        var created: SuperResolutionRunner? = null
         runCatchingCancellable {
-            val file = withContext(Dispatchers.IO) {
+            withContext(Dispatchers.IO) {
                 ExampleDownload.ensure(context, ExampleCatalog.superResolution)
             }
-            try {
-                withContext(Dispatchers.IO) { created = SuperResolutionRunner(file) }
-                currentCoroutineContext().ensureActive()
-                checkNotNull(created)
-            } catch (e: CancellationException) {
-                created?.close()
-                throw e
-            }
         }.onSuccess {
-            runner = it
+            modelFile = it
             status = "模型就绪：50×50 → 200×200（4×）"
         }.onFailure {
             AppLog.e(EXAMPLE_TAG, "超分辨率模型加载失败", it)
@@ -163,22 +167,21 @@ private fun SuperResolutionScreen(onBack: () -> Unit) {
             status = "模型不可用"
         }
     }
-    DisposableEffect(runner) {
-        val model = runner
-        onDispose { model?.close() }
-    }
-
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val model = runner ?: return@rememberLauncherForActivityResult
+        val file = modelFile ?: return@rememberLauncherForActivityResult
+        if (running) return@rememberLauncherForActivityResult
         scope.launch {
             running = true
             error = null
+            result = null
             runCatchingCancellable {
-                val bitmap = withContext(Dispatchers.IO) { decodeImage(context, uri) }
-                    ?: error("无法读取所选图片")
-                val upscaled = withContext(Dispatchers.IO) { model.run(bitmap) }
-                bitmap to upscaled
+                withContext(Dispatchers.IO) {
+                    val bitmap = decodeImage(context, uri) ?: error("无法读取所选图片")
+                    val input = squareBitmap(bitmap, 50)
+                    val upscaled = SuperResolutionRunner(file).use { it.run(input) }
+                    input to upscaled
+                }
             }.onSuccess { (bitmap, upscaled) ->
                 source = bitmap
                 result = upscaled
@@ -206,7 +209,7 @@ private fun SuperResolutionScreen(onBack: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (runner == null && error == null) {
+            if (modelFile == null && error == null) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
             Text(
@@ -222,16 +225,16 @@ private fun SuperResolutionScreen(onBack: () -> Unit) {
                 )
             }
             Button(
-                enabled = runner != null && !running,
+                enabled = modelFile != null && !running,
                 onClick = { picker.launch("image/*") },
             ) {
                 Text(if (running) "推理中…" else "选择图片")
             }
             source?.let { bitmap ->
-                Text("原图", style = MaterialTheme.typography.titleSmall)
+                Text("实际模型输入（中心裁切 50×50）", style = MaterialTheme.typography.titleSmall)
                 Image(
                     bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "原图",
+                    contentDescription = "中心裁切后的模型输入",
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -267,9 +270,9 @@ private fun TtsScreen(onBack: () -> Unit) {
             // The constructor can return before the engine binds; run the setup after assignment.
             Handler(Looper.getMainLooper()).post {
                 val tts = holder[0]
+                if (tts == null) return@post
                 when {
                     code != TextToSpeech.SUCCESS -> status = "系统语音引擎初始化失败"
-                    tts == null -> status = "系统语音引擎初始化失败，请重试"
                     else -> {
                         val result = tts.setLanguage(Locale.CHINA)
                         ready = result != TextToSpeech.LANG_MISSING_DATA &&
@@ -312,7 +315,7 @@ private fun TtsScreen(onBack: () -> Unit) {
             )
             OutlinedTextField(
                 value = text,
-                onValueChange = { text = it },
+                onValueChange = { text = it.take(TextToSpeech.getMaxSpeechInputLength()) },
                 label = { Text("要合成的文本") },
                 minLines = 3,
                 modifier = Modifier.fillMaxWidth(),
@@ -321,7 +324,9 @@ private fun TtsScreen(onBack: () -> Unit) {
                 Button(
                     enabled = ready && text.isNotBlank(),
                     onClick = {
-                        holder[0]?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "example")
+                        if (holder[0]?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "example") == TextToSpeech.ERROR) {
+                            status = "语音合成失败，请检查系统引擎与语音包"
+                        }
                     },
                 ) {
                     Text("朗读")
@@ -347,57 +352,55 @@ private fun TtsScreen(onBack: () -> Unit) {
 private fun TrainingScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var extractor by remember { mutableStateOf<BottleneckExtractor?>(null) }
+    var modelFile by remember { mutableStateOf<File?>(null) }
     val head = remember { SoftmaxHead(BOTTLENECK_SIZE) }
+    val checkpoint = remember { File(context.filesDir, "examples/personalization-head.bin") }
+    var trained by remember { mutableStateOf(false) }
     var samples by remember { mutableStateOf(emptyList<TrainingSample>()) }
-    var pendingClass by remember { mutableIntStateOf(0) }
-    var busy by remember { mutableStateOf(false) }
+    var pendingClass by rememberSaveable { mutableIntStateOf(0) }
+    var busy by remember { mutableStateOf(true) }
     var status by remember { mutableStateOf("正在准备模型（首次需下载约 18 MB）…") }
     var error by remember { mutableStateOf<String?>(null) }
     var loss by remember { mutableStateOf<Float?>(null) }
     var prediction by remember { mutableStateOf<FloatArray?>(null) }
 
     LaunchedEffect(Unit) {
-        extractor = null
-        var created: BottleneckExtractor? = null
         runCatchingCancellable {
-            val file = withContext(Dispatchers.IO) {
+            withContext(Dispatchers.IO) {
                 ExampleDownload.ensure(context, ExampleCatalog.personalization)
             }
-            try {
-                withContext(Dispatchers.IO) { created = BottleneckExtractor(file) }
-                currentCoroutineContext().ensureActive()
-                checkNotNull(created)
-            } catch (e: CancellationException) {
-                created?.close()
-                throw e
-            }
         }.onSuccess {
-            extractor = it
+            modelFile = it
             status = "模型就绪：为 4 个类别各添加至少一张图片后训练"
         }.onFailure {
             AppLog.e(EXAMPLE_TAG, "设备端训练模型加载失败", it)
             error = it.message ?: "模型加载失败"
             status = "模型不可用"
         }
-    }
-    DisposableEffect(extractor) {
-        val model = extractor
-        onDispose { model?.close() }
+        runCatchingCancellable {
+            withContext(Dispatchers.IO) {
+                if (checkpoint.isFile) { head.restore(checkpoint); true } else false
+            }
+        }.onSuccess {
+            trained = it
+            if (it) status = "已恢复训练结果，可直接识别图片；继续训练请重新添加样本"
+        }.onFailure { error = "训练存档读取失败：${it.message}；可重置后重新训练" }
+        busy = false
     }
 
     val addPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val model = extractor ?: return@rememberLauncherForActivityResult
+        val file = modelFile ?: return@rememberLauncherForActivityResult
         if (busy) return@rememberLauncherForActivityResult
         val label = pendingClass
         scope.launch {
             busy = true
             error = null
             runCatchingCancellable {
-                val bitmap = withContext(Dispatchers.IO) { decodeImage(context, uri, 512) }
-                    ?: error("无法读取所选图片")
-                withContext(Dispatchers.IO) { model.extract(bitmap) }
+                withContext(Dispatchers.IO) {
+                    val bitmap = decodeImage(context, uri, 512) ?: error("无法读取所选图片")
+                    BottleneckExtractor(file).use { it.extract(bitmap) }
+                }
             }.onSuccess { bottleneck ->
                 samples = samples + TrainingSample(bottleneck, label)
                 status = "已添加类别 ${label + 1} 的样本（共 ${samples.size} 张）"
@@ -411,16 +414,16 @@ private fun TrainingScreen(onBack: () -> Unit) {
 
     val inferPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val model = extractor ?: return@rememberLauncherForActivityResult
+        val file = modelFile ?: return@rememberLauncherForActivityResult
         if (busy) return@rememberLauncherForActivityResult
         scope.launch {
             busy = true
             error = null
+            prediction = null
             runCatchingCancellable {
-                val bitmap = withContext(Dispatchers.IO) { decodeImage(context, uri, 512) }
-                    ?: error("无法读取所选图片")
                 withContext(Dispatchers.IO) {
-                    head.predict(model.extract(bitmap))
+                    val bitmap = decodeImage(context, uri, 512) ?: error("无法读取所选图片")
+                    BottleneckExtractor(file).use { head.predict(it.extract(bitmap)) }
                 }
             }.onSuccess {
                 prediction = it
@@ -456,7 +459,8 @@ private fun TrainingScreen(onBack: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (extractor == null && error == null) {
+            Text("训练完成后自动保存分类头与 Adam 状态，重新进入页面可继续识别；样本图片不保存。", style = MaterialTheme.typography.bodySmall)
+            if (modelFile == null && error == null) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
             Text(
@@ -482,7 +486,7 @@ private fun TrainingScreen(onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodyLarge,
                     )
                     TextButton(
-                        enabled = extractor != null && !busy,
+                        enabled = modelFile != null && !busy && samples.size < 200,
                         onClick = {
                             pendingClass = label
                             addPicker.launch("image/*")
@@ -494,9 +498,9 @@ private fun TrainingScreen(onBack: () -> Unit) {
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
-                    enabled = extractor != null && !busy && complete,
+                    enabled = modelFile != null && !busy && complete,
                     onClick = {
-                        if (extractor == null) return@Button
+                        if (modelFile == null) return@Button
                         busy = true
                         error = null
                         scope.launch {
@@ -505,13 +509,18 @@ private fun TrainingScreen(onBack: () -> Unit) {
                                     val batches = trainingBatches(samples, samples.size)
                                     var lastLoss = 0f
                                     repeat(TRAIN_STEPS) { step ->
+                                        currentCoroutineContext().ensureActive()
                                         lastLoss = head.train(batches[step % batches.size])
                                     }
+                                    // Complete the atomic save even if navigation cancels result delivery.
+                                    withContext(NonCancellable) { head.save(checkpoint) }
                                     lastLoss
                                 }
                             }.onSuccess {
                                 loss = it
-                                status = "训练完成（$TRAIN_STEPS 步）"
+                                trained = true
+                                prediction = null
+                                status = "训练完成并已保存（$TRAIN_STEPS 步）"
                             }.onFailure {
                                 AppLog.w(EXAMPLE_TAG, "训练失败", it)
                                 error = it.message ?: "训练失败"
@@ -523,7 +532,7 @@ private fun TrainingScreen(onBack: () -> Unit) {
                     Text(if (busy) "处理中…" else "训练")
                 }
                 Button(
-                    enabled = extractor != null && !busy && complete && loss != null,
+                    enabled = modelFile != null && !busy && trained,
                     onClick = { inferPicker.launch("image/*") },
                 ) {
                     Text("识别图片")
@@ -531,11 +540,22 @@ private fun TrainingScreen(onBack: () -> Unit) {
                 TextButton(
                     enabled = !busy,
                     onClick = {
-                        samples = emptyList()
-                        loss = null
-                        prediction = null
-                        head.reset()
-                        status = "已重置：请重新添加 4 类样本"
+                        busy = true
+                        scope.launch {
+                            runCatchingCancellable {
+                                withContext(Dispatchers.IO) {
+                                    check(!checkpoint.exists() || checkpoint.delete()) { "无法删除训练存档" }
+                                    head.reset()
+                                }
+                            }.onSuccess {
+                                samples = emptyList()
+                                loss = null
+                                prediction = null
+                                trained = false
+                                status = "已重置：请重新添加 4 类样本"
+                            }.onFailure { error = "重置失败：${it.message}" }
+                            busy = false
+                        }
                     },
                 ) {
                     Text("重置")
@@ -543,7 +563,7 @@ private fun TrainingScreen(onBack: () -> Unit) {
             }
             if (!complete) {
                 Text(
-                    text = "训练与识别需要 4 个类别都有样本。",
+                    text = "训练需要 4 个类别都有样本（最多 200 张）；已保存的分类头可直接识别。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

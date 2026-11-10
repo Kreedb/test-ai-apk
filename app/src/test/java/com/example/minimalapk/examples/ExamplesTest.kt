@@ -2,6 +2,10 @@ package com.example.minimalapk.examples
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertThrows
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import org.junit.Test
 import kotlin.math.abs
 
@@ -17,6 +21,34 @@ class SuperResolutionTest {
 }
 
 class SoftmaxHeadTest {
+    @get:Rule val folder = TemporaryFolder()
+
+    @Test
+    fun checkpointRestoresPredictionsAndOptimizerForContinuedTraining() {
+        val head = SoftmaxHead(features = 2, classes = 2)
+        val samples = listOf(TrainingSample(floatArrayOf(1f, 0f), 0), TrainingSample(floatArrayOf(0f, 1f), 1))
+        repeat(30) { head.train(samples) }
+        val file = folder.newFile("head.bin")
+        head.save(file)
+        val restored = SoftmaxHead(features = 2, classes = 2)
+        restored.restore(file)
+        assertArrayEquals(head.predict(samples[0].bottleneck), restored.predict(samples[0].bottleneck), 0f)
+        repeat(10) { head.train(samples); restored.train(samples) }
+        assertArrayEquals(head.predict(samples[1].bottleneck), restored.predict(samples[1].bottleneck), 0f)
+        val before = restored.predict(samples[0].bottleneck)
+        file.writeBytes(file.readBytes().dropLast(1).toByteArray())
+        assertThrows(IllegalArgumentException::class.java) { restored.restore(file) }
+        assertArrayEquals(before, restored.predict(samples[0].bottleneck), 0f)
+    }
+
+    @Test
+    fun invalidTrainingBatchDoesNotPoisonLaterTraining() {
+        val head = SoftmaxHead(features = 2, classes = 2)
+        assertThrows(IllegalArgumentException::class.java) {
+            head.train(listOf(TrainingSample(floatArrayOf(1f, 0f), 0), TrainingSample(floatArrayOf(0f, 1f), 2)))
+        }
+        assertArrayEquals(floatArrayOf(.5f, .5f), head.predict(floatArrayOf(1f, 0f)), 0f)
+    }
     @Test
     fun softmaxIsAProbabilityDistribution() {
         val scores = softmax(floatArrayOf(1f, 2f, 3f, 2f))
@@ -71,9 +103,10 @@ class SoftmaxHeadTest {
 class ExampleCatalogTest {
     @Test
     fun modelsAreHttpsAndPinnedToAByteCount() {
-        listOf(ExampleCatalog.superResolution, ExampleCatalog.personalization).forEach { model ->
+        (ExampleCatalog.configurable + listOf(ExampleCatalog.superResolution, ExampleCatalog.personalization)).forEach { model ->
             assertTrue(model.url.startsWith("https://"))
             assertTrue(model.sizeBytes > 0)
+            assertTrue(model.sha256.matches(Regex("[a-f0-9]{64}")))
         }
     }
 

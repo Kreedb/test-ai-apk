@@ -10,7 +10,7 @@
 | --- | --- |
 | 主页 | 推理后端状态、CPU/GPU 占用与应用版本、CPU/GPU 型号、设备型号、系统版本与 ABI |
 | 相机 | 基于 CameraX 的后置摄像头实时预览，内置 YOLO-pose 模型做离线姿态测量与性能指标，可在设置中启用、导入与调参 |
-| 示例 | 超分辨率、设备端训练两个 TFLite 例程，以及系统语音合成 |
+| 示例 | 模型工作台（姿态/分类/检测/分割/音频）、超分辨率、设备端训练、系统语音合成 |
 | 插件 | 姿态识别、身高线、臂长线叠加开关 |
 | 设置 | 推理后端、模型（启用/导入/阈值/防抖）、主题设置与关于 |
 
@@ -20,6 +20,7 @@
 app/src/main/java/com/example/minimalapk/
 ├── MainActivity.kt
 ├── examples/                     # 超分辨率、设备端训练等示例模型
+├── models/                       # 通用 TFLite 配置、导入、输入转换与结果显示
 ├── log/
 │   └── AppLog.kt                 # 应用内日志缓冲
 ├── pose/                         # 姿态模型、后端选择与测量
@@ -33,6 +34,7 @@ app/src/main/java/com/example/minimalapk/
         ├── StatusScreen.kt
         ├── CameraScreen.kt
         ├── ExamplesScreen.kt
+        ├── ModelWorkbenchScreen.kt
         ├── PluginsScreen.kt
         ├── ConfigScreen.kt
         ├── ModelsScreen.kt
@@ -58,9 +60,9 @@ app/src/main/java/com/example/minimalapk/
 - 导入模型可以走系统文件选择器（SAF，不需要存储权限），也可以走“从远程下载模型”：内置目录（`ModelCatalog`）或自定义 `https` 地址，下载上限 64MB，下载后与本地导入使用同一套校验。远程下载需要 `INTERNET` 权限，日常推理仍然离线。
 - 导入时会读取 TFLite 的输入/输出张量形状并自动填写模型配置：
   - 接受单输入单输出、float32、NHWC 正方形输入，以及 `5+3K` 姿态头；值优先 `[1, 5+3K, N]` 与锚点优先 `[1, N, 5+3K]` 都会自动识别。非 17 个关键点的模型也会导入，但骨骼与身体测量只按 COCO 17 点索引，缺失的点不标注、不参与测量。
-  - 只有“配置文件也改不了”的情况才会拒绝导入并给出原因：不是 TFLite 文件、int8/float16 量化、NCHW 输入、非正方形输入、输出不是三维 `5+3K` 姿态头、张量含无法静态化的动态维度。这些都需要重新导出模型。
+  - 不符合相机姿态管线的模型（量化、NCHW、非正方形、多输入/输出、非姿态头、动态维度等）会保留到“模型工作台”，说明不适配原因，并生成可编辑配置。文件格式损坏、超出 64 MB 或存储失败会阻止导入。工作台不会把一般模型强行解释为姿态模型。
   - 自动识别的输入尺寸、anchor 数、关键点数和输出布局都会写进模型配置；输入尺寸由静态输入形状决定，anchor、关键点数、输出布局和框格式可以在模型的编辑弹窗里修正。改错导致加载失败时，相机页会提示检查这些字段或切换推理后端。框格式无法从张量形状推断，导入默认按 `xyxy` 解码，远程目录里的模型则带上已知的框格式。
-  - onnx2tf 导出模型常把 `shape_signature` 里的维度写成 `-1`，TFLite 的 SLICE 等算子据此把张量标为动态，GPU delegate 会以 `Attempting to use a delegate that only supports static-sized tensors...` 直接拒绝整张图。导入时会把签名自动改写成具体形状，并在结果里报告改写了多少个张量；如果具体形状本身也是动态的，则拒绝导入并要求用固定输入尺寸重新导出。
+  - onnx2tf 导出模型常把 `shape_signature` 里的维度写成 `-1`，GPU delegate 可能拒绝这类图。符合相机姿态管线的导入仍会静态化并报告改写数量；无法静态化时转入工作台。工作台保留原始模型字节，用 Interpreter 在运行时调整输入，不修改动态签名。
   - 导入的模型复制到 `filesDir/models/<sha256>.tflite`，加载时用 `CompiledModel.create(路径, ...)`，不需要新依赖。导入只做形状校验，不做试跑：能通过校验的模型仍可能在该设备上编译失败，错误会显示在相机页。
 - 应用按 `LiteRT (NPU)` → `LiteRT (GPU)` → `LiteRT (CPU)` 的顺序自动选择第一个可用的后端。LiteRT GPU 请求同时包含 CPU 加速器，未被 GPU 委托的算子回退到 CPU 执行。第二个模型复用第一个模型已探测成功的加速器，加载失败时只跳过该模型。
 - LiteRT NPU 使用 `litert-npu-runtime-qualcomm` 与 Qualcomm `qnn-runtime` 的 Hexagon HTP 运行时，仅在 Android 12+、`arm64-v8a`、SoC 厂商为 Qualcomm（`Qualcomm`/`QTI`）且 SoC 型号为 `SM8850` 的设备上探测。模型通过 LiteRT 在设备端 JIT 编译到 NPU，首次进入相机延迟明显，编译产物缓存在 `cacheDir`（后续通常复用）；JIT 需要 `libQnnHtpPrepare.so`。当前只打包 HTP v81（SM8850）的 `Skel`/`Stub`，其他 SoC 会跳过 NPU 并回退到 GPU/CPU。LiteRT 2.3.2 会把单独的 NPU 请求扩展为 NPU+CPU，HTP 编译失败时可能静默回退 CPU：LiteRT 的 Kotlin API 只提供环境支持的加速器，不返回实际执行的子图，`QualcommOptions.Profiling` 也只写入 logcat，因此探测链无法判断 HTP 是否真正接管，会按 `LiteRT (NPU)` 接受该模型（这是一项明确的取舍，不是遗漏）。SM8850 门槛下 HTP 应能成功编译；若怀疑回退到 CPU，请查看 QNN 日志确认。QNN 库需在安装时解压到 `nativeLibraryDir`，因此启用了 `useLegacyPackaging`；`arm64-v8a` 包会额外包含约 114MB（解压后）的 QNN 运行库，其中 85MB 是 JIT 编译库，release APK 实测约增大 34MB。
@@ -76,19 +78,50 @@ app/src/main/java/com/example/minimalapk/
 
 ## 示例（TensorFlow Lite 例程）
 
-“示例”选项卡移植了 [tensorflow/examples](https://github.com/tensorflow/examples/tree/master/lite/examples) 中的两条独立 TFLite 推理管线（超分辨率、设备端训练），并提供一个系统语音合成入口。示例模型都在首次使用时从远程下载到 `filesDir/examples/`，不参与 APK 打包，下载后离线推理；文件大小会校验，大小不符时拒绝加载。
+“示例”选项卡提供下列 [tensorflow/examples](https://github.com/tensorflow/examples/tree/master/lite/examples) 能力。模型首次使用时按需下载，校验固定大小与 SHA-256，下载后离线运行；APK 仍只内置 YOLO26n-pose。
 
 | 示例 | 来源 | 输入 → 输出 | 说明 |
 | --- | --- | --- | --- |
+| 姿态估计 | MoveNet Lightning，Google Coral 的量化测试模型（约 3 MB） | `[1,192,192,3]` uint8 → `[1,1,17,3]` float32 | 选择图片，显示 COCO 17 点与骨骼；官方旧 TF Hub 链接已失效，改用固定提交的 Coral 源 |
+| 图片分类 | `image_classification` MobileNet V1（约 4 MB） | 224×224 RGB → 1001 类 | 反量化后显示 Top-5，类别名从模型附带标签读取 |
+| 物体检测 | `object_detection` SSD MobileNet V1（约 4 MB） | 300×300 RGB → 框、类别、分数、数量 | 四输出，显示检测框与标签 |
+| 图片分割 | `image_segmentation` DeepLab V3（约 3 MB） | 257×257 RGB → 21 类像素分数 | 显示逐像素分类色图，背景为黑色 |
+| 音频分类 | `audio_classification` YAMNet（约 4 MB） | 16 kHz、15600 个采样点 → 521 类 | 选择 PCM16 WAV，转单声道、线性重采样，取开头 0.975 秒，不足补零 |
 | 超分辨率 | `lite/examples/super_resolution` 的 `ESRGAN.tflite`（约 5 MB） | `[1,50,50,3]` float32 → `[1,200,200,3]` float32 | 先中心裁切并缩到 50×50，再 4× 放大到 200×200；不是通用无损放大，细节取决于原图 |
 | 设备端训练 | `lite/examples/model_personalization` 的 `model.tflite`（约 18 MB） | 224×224 图片 → MobileNetV2 特征 → 4 类 | 冻结主干，只在本机训练最后的分类头；图片不会上传 |
 | 语音合成 | 设备自带 TTS 引擎 | 文本 → 语音 | 见下方边界说明 |
 
-- 超分辨率使用 `org.tensorflow.lite.Interpreter`（随 LiteRT AAR 提供，JNI 由 `libLiteRt.so` 实现），固定形状，CPU 执行；没有接入 GPU/NPU 委托。
-- 设备端训练只用模型的 `load` 签名提取 62720 维瓶颈特征，分类头由纯 Kotlin 的 `SoftmaxHead`（Adam，学习率 0.001）在本机训练；官方模型自带的 `train`（以及 `save`/`restore`）签名含 `FlexBroadcastGradientArgs` 等 Flex 算子，LiteRT 不带 Flex，因此不使用它们。训练结果只保存在内存里，重置或退出页面即恢复初始权重。
+- 示例与工作台使用 `org.tensorflow.lite.Interpreter`（随 LiteRT AAR 提供，JNI 由 `libLiteRt.so` 实现），CPU 执行。模型在后台线程创建、运行和关闭，退出页面不在主线程等待推理结束。
+- 设备端训练只用模型的 `load` 签名提取 62720 维瓶颈特征，分类头由纯 Kotlin 的 `SoftmaxHead`（Adam，学习率 0.001）在本机训练；官方 `train`、`save`、`restore` 签名含 Flex 算子，因此不使用它们。每类至少一张图片、总计最多 200 张，训练 150 步后原子保存权重与优化器状态；重新进入页面可直接识别，继续训练需重新选样本，重置删除存档。图片与样本特征不持久化。
 - 语音合成没有使用 TFLite：官方示例仓库当前没有 TTS 例程；社区 FastSpeech2 的 TFLite 导出依赖 `FlexRandomUniform` 等 Flex 自定义算子（部分模型还需要音素前端），LiteRT 无法直接加载。这里调用系统 `TextToSpeech`，是否需要下载语音包取决于系统实现。
-- 示例模型来自 TensorFlow 官方示例（Apache-2.0），下载地址是 `storage.googleapis.com/download.tensorflow.org`；首次使用需要 `INTERNET` 权限，之后推理离线。
-- 新增非姿态任务的模型仍不能导入“设置 → 模型”：那里的导入校验只接受单输入单输出的 `5+3K` 姿态头，分类/检测/超分模型会在导入时被明确拒绝并提示原因。
+- 下载源为 TensorFlow 与 Google Coral（Apache-2.0），详情见 `ExampleCatalog` 与 `assets/models/NOTICE.txt`。示例缓存放在 `filesDir/examples/`，可配置模型及其配置放在 `filesDir/configured_models/`；删除工作台模型时删除其配置，示例缓存可供再次添加。
+
+## 模型工作台与配置修正
+
+入口：示例 → 模型工作台，或设置 → 模型 → 模型工作台与配置文件。
+
+1. 导入本地 `.tflite`、填写 HTTPS 地址，或点击示例目录下载。导入不创建原生运行时，也不执行模型；读取张量形状、dtype、量化参数、自定义算子与所有签名。
+2. 选择主子图或命名签名，自动生成 UTF-8 `.properties` 配置。可以直接编辑、保存、从文件导入或导出；重导相同模型保留已有配置。自动推断仅是起点，归一化、标签及输出含义必须与模型说明一致。
+3. 选择每个输入的文件，或填写数值/字符串，然后点击运行。固定维度不能通过配置改变，动态维度可填正整数；每次执行新建 Interpreter，因此一般签名调用之间不保留可变张量状态。
+
+| 配置项 | 含义 |
+| --- | --- |
+| `version=1` / `signature=` | 配置版本；空签名为主子图，其它值为模型中的签名名 |
+| `input.0.shape=1,192,192,3` | 第 0 个输入的运行形状；标量为空；动态维度必须明确填写 |
+| `input.0.source=IMAGE` | `IMAGE` 图片，`NUMBERS` 数值，`TEXT` 字符串，`AUDIO` WAV，`BINARY` 原始张量 |
+| `input.0.layout=NHWC` | 图片支持 `NHWC`/`NCHW`、非正方形及 1/3 通道；按形状拉伸，不做 letterbox |
+| `input.0.mean=0` / `input.0.std=1` | 图片实数值 `(pixel−mean)/std`；uint8/int8 等按模型的 scale/zero-point 量化 |
+| `input.0.values=0` | 数值用空格/逗号分隔，单个值填充整个张量；TEXT 用 `\n` 分隔每个字符串 |
+| `input.0.sampleRate=16000` | AUDIO 的目标采样率；需要 PCM16 单/双声道 WAV |
+| `output.0.render=VALUES` | `VALUES`、`CLASSIFICATION`、`IMAGE`、`MOVENET`、`SEGMENTATION`、`BOXES` |
+| `output.0.scale=1` / `output.0.offset=0` | 图片输出实数值 → 0–255 像素，例如 0–1 输出使用 scale=255 |
+| `output.0.labels=猫\n狗` | 分类/检测标签，按输出类别索引排列 |
+| `output.0.threshold=0.3` | MoveNet 关键点或检测框分数阈值 |
+| `output.0.classesOutput=1` / `scoresOutput=2` / `countOutput=3` | BOXES 对应的其它输出索引；框按归一化 `[ymin,xmin,ymax,xmax]` 读取 |
+
+同样规则适用于 `input.1.*`、`output.1.*` 等多输入/输出。`IMAGE` 输出为 `[1,H,W,1或3]`，`SEGMENTATION` 为 `[1,H,W,类别数]`；未适配的输出可用 VALUES 查看。运行器支持 float32、int32、uint8、int8、int64、int16、bool 与字符串 I/O；BINARY 输入采用模型原始 dtype、小端存储，适合预先分词的 token、视频张量或多模型中间结果。数值文本经 double 解析，大于 2^53 的精确整数请使用 BINARY。输入总计与每个数值输出最多 4,194,304 个元素，配置文件最多 1 MB。
+
+**兼容性边界**：保存合法模型不等于任意模型都能执行。配置可修正布局、动态输入、输入来源、归一化、签名与结果显示，但不能新增缺失的 Flex/自定义算子、改写固定网络结构或代替专用分词器。`bert_qa`、OCR、风格迁移、多阶段检索、视频分类、生成式 AI、强化学习等完整交互流程尚未逐个移植；可以导入其 TFLite 文件并配置支持的张量/签名，但不宣称具备全部上游应用功能。官方仓库没有 TTS 示例，系统 TTS 是否离线取决于已安装的语音包。
 
 ## 自动构建
 
