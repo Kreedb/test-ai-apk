@@ -55,10 +55,11 @@ internal data class ConfiguredResultPreview(
 internal data class ConfiguredPublishedResult(val ticket: ConfiguredRunTicket, val preview: ConfiguredResultPreview)
 
 /** Pure lifecycle seam. One latest request/result across the application, never a request queue. */
-internal class ConfiguredResultStore {
+internal class ConfiguredResultStore(private val reconfigured: () -> Unit = {}) {
     private var plugin = PluginSettings()
     private var sequence = 0L
     private var pending: ConfiguredRunTicket? = null
+    private var cancelPending: (() -> Unit)? = null
     private val mutableResult = MutableStateFlow<ConfiguredPublishedResult?>(null)
     val result = mutableResult.asStateFlow()
 
@@ -67,15 +68,17 @@ internal class ConfiguredResultStore {
         if (settings != plugin) {
             plugin = settings
             clear()
+            reconfigured()
         }
     }
 
     @Synchronized
-    fun begin(model: ConfiguredModel, version: ConfiguredModelVersion, fingerprint: String): ConfiguredRunTicket? {
+    fun begin(model: ConfiguredModel, version: ConfiguredModelVersion, fingerprint: String,
+              onCancel: () -> Unit = {}): ConfiguredRunTicket? {
         if (!plugin.enabled || !version.enabled || version.modelId != model.id ||
             version.path != model.file.absolutePath || version.fingerprint != fingerprint) return null
         clear()
-        return ConfiguredRunTicket(model, version, plugin.revision, ++sequence).also { pending = it }
+        return ConfiguredRunTicket(model, version, plugin.revision, ++sequence).also { pending = it; cancelPending = onCancel }
     }
 
     @Synchronized
@@ -83,6 +86,7 @@ internal class ConfiguredResultStore {
         if (pending != ticket || !plugin.enabled || plugin.revision != ticket.pluginRevision ||
             version != ticket.version || !version.enabled) return false
         pending = null
+        cancelPending = null
         mutableResult.value = ConfiguredPublishedResult(ticket, preview.copy(text = preview.text.take(ConfiguredResultPreview.MAX_TEXT)))
         return true
     }
@@ -93,16 +97,24 @@ internal class ConfiguredResultStore {
     }
 
     @Synchronized
+    fun cancel(ticket: ConfiguredRunTicket) {
+        if (pending == ticket || mutableResult.value?.ticket == ticket) clear()
+    }
+
+    @Synchronized
     fun clear() {
         sequence++
         pending = null
         mutableResult.value = null
+        val cancel = cancelPending
+        cancelPending = null
+        cancel?.invoke()
     }
 }
 
 /** Process-scoped only: no Uri, microphone samples or result images are persisted. */
 internal object ConfiguredModelResults {
-    private val store = ConfiguredResultStore()
+    private val store = ConfiguredResultStore(ConfiguredModelAccess::cancelRun)
     val result = store.result
     private var preferences: SharedPreferences? = null
     private var observer: SharedPreferences.OnSharedPreferenceChangeListener? = null
@@ -126,18 +138,25 @@ internal object ConfiguredModelResults {
             mapOf(PluginIds.CONFIGURED_MODEL to PluginSettings())).getValue(PluginIds.CONFIGURED_MODEL))
     }
 
-    fun begin(context: Context, model: ConfiguredModel, savedText: String): ConfiguredRunTicket? {
+    fun begin(context: Context, model: ConfiguredModel, savedText: String, transfer: AssetTransfer? = null): ConfiguredRunTicket? {
         attach(context)
-        val version = ConfiguredModelStore.version(model) ?: return null
-        return store.begin(model, version, savedText.toByteArray().sha256())
+        return synchronized(ConfiguredModelStore) {
+            val version = ConfiguredModelStore.version(model) ?: return null
+            store.begin(model, version, savedText.toByteArray().sha256()) { transfer?.cancel() }
+        }
     }
 
     fun publish(ticket: ConfiguredRunTicket, output: ModelRunResult): Boolean {
         val preview = ConfiguredResultPreview.from(output)
         refreshSettings()
-        return store.publish(ticket, ConfiguredModelStore.version(ticket.model), preview)
+        val published = synchronized(ConfiguredModelStore) {
+            store.publish(ticket, ConfiguredModelStore.version(ticket.model), preview)
+        }
+        if (!published) (listOfNotNull(preview.input, preview.output)).distinct().forEach { it.recycle() }
+        return published
     }
 
     fun invalidate(model: ConfiguredModel) = store.invalidate(model.file.absolutePath)
+    fun cancel(ticket: ConfiguredRunTicket) = store.cancel(ticket)
     fun clear() = store.clear()
 }

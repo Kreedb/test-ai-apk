@@ -10,11 +10,11 @@ import com.example.minimalapk.examples.SoftmaxHead
 import com.example.minimalapk.examples.personalizationCheckpoint
 import com.example.minimalapk.examples.personalizationPercent
 import com.example.minimalapk.examples.personalizationResultText
+import com.example.minimalapk.examples.fittedImage
 import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.models.AssetTransfer
 import java.io.Closeable
 import java.util.concurrent.CancellationException
-import kotlin.math.roundToInt
 
 /**
  * Camera consumer for the on-device personalization head. The plugin dialog owns training and the
@@ -114,19 +114,13 @@ internal class PersonalizationPlugin(private val application: Context) : CameraP
             is PluginEvent.Frame -> model.runIfReady { request, runner ->
                 if (request.context.token != context.token || !context.isCurrent()) return@runIfReady
                 val frame = event.frame
-                // Training center-crops a real photo. Remove the analysis letterbox first so the
-                // camera sees that same crop, rather than learning/predicting on black padding.
-                val image = frame.image.bitmap
-                val bounds = frame.source.space.photoBounds
-                val left = bounds.left.roundToInt().coerceIn(0, image.width - 1)
-                val top = bounds.top.roundToInt().coerceIn(0, image.height - 1)
-                val right = bounds.right.roundToInt().coerceIn(left + 1, image.width)
-                val bottom = bounds.bottom.roundToInt().coerceIn(top + 1, image.height)
-                val photo = Bitmap.createBitmap(image, left, top, right - left, bottom - top)
+                // Match training's bounded 512px photo, independent of another plugin's analysis
+                // size/letterbox. Rotation is applied before the extractor's same center crop.
+                val photo = personalizationCameraImage(frame)
                 val scores = try {
                     runner.head.predict(runner.extractor.extract(photo))
                 } finally {
-                    if (photo !== image) photo.recycle()
+                    photo.recycle()
                 }
                 context.publish(
                     PluginOutput(
@@ -142,4 +136,14 @@ internal class PersonalizationPlugin(private val application: Context) : CameraP
     }
 
     override fun close() = model.close()
+}
+
+/** Owned upright photo for the same extractor used during training; the caller recycles it. */
+internal fun personalizationCameraImage(frame: CameraFrame): Bitmap {
+    val swapped = frame.source.rotationDegrees % 180 != 0
+    val width = if (swapped) frame.raw.height else frame.raw.width
+    val height = if (swapped) frame.raw.width else frame.raw.height
+    val scale = minOf(1f, 512f / maxOf(width, height))
+    return fittedImage(frame.raw.bitmap, (width * scale).toInt().coerceAtLeast(1),
+        (height * scale).toInt().coerceAtLeast(1), frame.source.rotationDegrees).bitmap
 }

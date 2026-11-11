@@ -32,10 +32,13 @@ internal class LiteRtBackend private constructor(
 
     override fun close() {
         // Attempt every handle: one failed native close must not leak the rest.
-        runCatching { input.close() }.onFailure { AppLog.w(TAG, "关闭输入缓冲区失败", it) }
-        runCatching { output.close() }.onFailure { AppLog.w(TAG, "关闭输出缓冲区失败", it) }
-        runCatching { model.close() }.onFailure { AppLog.w(TAG, "关闭模型失败", it) }
-        runCatching { environment?.close() }.onFailure { AppLog.w(TAG, "关闭运行环境失败", it) }
+        var failure: Throwable? = null
+        listOf<() -> Unit>({ input.close() }, { output.close() }, { model.close() }, { environment?.close() }).forEach { close ->
+            try { close() } catch (error: Throwable) {
+                if (failure == null) failure = error else failure.addSuppressed(error)
+            }
+        }
+        failure?.let { throw it }
     }
 
     companion object {

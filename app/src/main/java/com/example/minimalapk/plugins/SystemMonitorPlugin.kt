@@ -1,5 +1,7 @@
 package com.example.minimalapk.plugins
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
 import com.example.minimalapk.BuildConfig
@@ -13,6 +15,8 @@ import com.example.minimalapk.pose.NpuProbeScheme
 import com.example.minimalapk.pose.NpuProbeState
 import com.example.minimalapk.pose.NpuSource
 import com.example.minimalapk.pose.PoseTimings
+import com.example.minimalapk.pose.ProbeEvidence
+import com.example.minimalapk.pose.UsageMetrics
 import com.example.minimalapk.pose.formatNumber
 
 internal data class SystemMonitorSettings(
@@ -26,6 +30,8 @@ internal data class SystemMonitorSettings(
     val fpsWindowSeconds: Int = DEFAULT_FPS_WINDOW_SECONDS,
     val npuSource: NpuSource = NpuSource.AUTO,
 ) {
+    val usageMetrics: UsageMetrics get() = UsageMetrics(showCpu, showGpu, showNpu)
+
     fun toConfig(): Map<String, String> = mapOf(
         "show_fps" to showFps.toString(),
         "show_timings" to showTimings.toString(),
@@ -67,6 +73,10 @@ internal data class MonitorOutput(
     val metricLines: List<String>,
     val npuResults: List<NpuProbeResult>,
     val npuSource: NpuSource,
+    val sampledAtNanos: Long?,
+    val gpuEvidence: List<ProbeEvidence> = emptyList(),
+    val gpuDetail: String? = null,
+    val samplingFailure: String? = null,
 )
 
 /** Pure, JVM-testable monitor state: camera FPS comes only from frame timestamps, refresh gating
@@ -93,6 +103,8 @@ internal class SystemMonitorEngine(
 
     @Synchronized
     fun reconfigure(next: SystemMonitorSettings) {
+        // Withdraw old-source/hidden samples, including reads still running on the probe worker.
+        if (settings.npuSource != next.npuSource || settings.usageMetrics != next.usageMetrics) usage.reset()
         settings = next
         needsSample = true
     }
@@ -126,7 +138,8 @@ internal class SystemMonitorEngine(
         needsSample = false
         lastSampleNanos = now
 
-        val sample = usage.sample(settings.npuSource, now)
+        val sample = if (settings.usageMetrics.any) usage.sample(settings.npuSource, now, settings.usageMetrics)
+            else DeviceUsage()
         val primaryTimings = frame.poses.firstOrNull()?.timings
         return MonitorOutput(
             timestampNanos = frame.timestampNanos,
@@ -135,6 +148,10 @@ internal class SystemMonitorEngine(
             ),
             npuResults = sample.npuResults,
             npuSource = settings.npuSource,
+            sampledAtNanos = sample.sampledAtNanos,
+            gpuEvidence = sample.gpuEvidence,
+            gpuDetail = sample.gpuDetail,
+            samplingFailure = sample.samplingFailure,
         )
     }
 }
@@ -164,12 +181,16 @@ internal fun monitorMetricLines(
         val mixed = executionProvider?.let { "GPU" in it || "NPU" in it } == true
         add("主姿态后端 ${executionProvider ?: "—"}${if (mixed) " · 实际分区未知（可含 CPU）" else ""}")
     }
-    if (settings.showCpu) add("CPU(应用) ${percentText(usage.cpuPercent)}")
+    val age = usage.sampledAtNanos?.let {
+        " · 采样 ${formatNumber(((nowNanos - it).coerceAtLeast(0) / 1e9).toFloat())}s前"
+    }.orEmpty()
+    if (settings.showCpu) add("CPU(应用/总算力) ${percentText(usage.cpuPercent)}$age")
     if (settings.showGpu) {
         val source = usage.gpuSource?.let { " · ${shortProbePath(it)}" } ?: ""
-        add("GPU ${percentText(usage.gpuPercent)}$source")
+        val state = if (usage.gpuPercent == null) usage.gpuState?.label?.let { " $it" }.orEmpty() else ""
+        add("GPU ${percentText(usage.gpuPercent)}$state$source$age")
     }
-    if (settings.showNpu) add(npuMetricLine(usage))
+    if (settings.showNpu) add(npuMetricLine(usage) + age)
     if (settings.showTimings && asyncResults.isNotEmpty()) {
         val latest = asyncResults.sortedByDescending { it.completedNanos }
         // The host's eight message slots are shared with usage metrics. Explicitly show omitted
@@ -184,13 +205,14 @@ internal fun monitorMetricLines(
 }
 
 internal fun npuMetricLine(usage: DeviceUsage): String {
+    usage.samplingFailure?.let { return "NPU 采样失败：${it.take(100)}" }
     val result = usage.npu ?: return "NPU —"
     val stale = result.state == NpuProbeState.STALE
     if (result.state != NpuProbeState.OK && !stale) {
         val reason = result.detail?.take(40) ?: result.sourcePath ?: ""
         return "NPU ${result.state.label}${if (reason.isNotEmpty()) "：$reason" else ""}"
     }
-    val value = result.value ?: return "NPU ${result.scope}：${result.state.label}"
+    val value = result.value ?: return "NPU ${result.scope}（${result.unit}）：${result.state.label} · ${shortProbePath(result.sourcePath)}"
     val suffix = if (stale) "（stale）" else ""
     if (result.unit != "%") {
         return "NPU ${result.scope} ${formatNumber(value)} ${result.unit}$suffix（非百分比）"
@@ -198,6 +220,8 @@ internal fun npuMetricLine(usage: DeviceUsage): String {
     return when (result.scheme) {
         NpuProbeScheme.SAMSUNG_RQ_LOAD ->
             "NPU 请求队列忙碌率 ${formatNumber(value)}%$suffix · ${shortProbePath(result.sourcePath)}"
+        NpuProbeScheme.ROCKCHIP ->
+            "NPU ${if (result.perCore.size > 1) "核均值 " else ""}${formatNumber(value)}%$suffix · ${shortProbePath(result.sourcePath)}"
         else -> "NPU ${formatNumber(value)}%$suffix · ${shortProbePath(result.sourcePath)}"
     }
 }
@@ -208,47 +232,6 @@ internal data class MonitorDeviceInfo(
     val android: String,
     val appVersion: String,
 )
-
-/** "测试全部" diagnosis: one line per scheme plus a device header, capped to the host limit. */
-internal fun monitorDiagnosis(
-    device: MonitorDeviceInfo,
-    results: List<NpuProbeResult>,
-    nowNanos: Long,
-): List<String> {
-    val header = "NPU 诊断 · ${device.deviceModel} · ${device.soc} · ${device.android} · " +
-        "App ${device.appVersion}（空闲与推理时各测一次；t=$nowNanos）"
-    val lines = DIAGNOSIS_ORDER.mapNotNull { scheme ->
-        val schemeResults = results.filter { it.scheme == scheme }
-        schemeResults.takeIf { it.isNotEmpty() }?.let { list ->
-            "${scheme.id}: " + list.joinToString("; ") { summarizeProbe(it, 105) }
-        }
-    }
-    return (listOf(header.take(PluginHost.MAX_MESSAGE_CHARS)) + lines.map {
-        it.take(PluginHost.MAX_MESSAGE_CHARS)
-    }).take(PluginHost.MAX_MESSAGES)
-}
-
-private fun summarizeProbe(result: NpuProbeResult, limit: Int): String = buildString {
-    append(result.state.label)
-    result.sourcePath?.let { append('@'); append(shortProbePath(it)) }
-    if (result.state == NpuProbeState.OK || result.state == NpuProbeState.STALE) {
-        result.value?.let { append('='); append(formatNumber(it)); append(result.unit) }
-        if (result.perCore.isNotEmpty()) {
-            append(" 每核=")
-            append(result.perCore.joinToString(",") { formatNumber(it) })
-        }
-        if (result.readings.isNotEmpty()) {
-            append(" [")
-            append(result.readings.joinToString(",") { "${it.label}=${formatNumber(it.value)}${it.unit}" })
-            append(']')
-        }
-        result.detail?.let { append(' '); append(it.take(50)) }
-        result.rawExcerpt?.let { append(" raw="); append(it.take(40)) }
-    } else {
-        result.detail?.let { append(' '); append(it.take(60)) }
-        result.rawExcerpt?.let { append(" raw="); append(it.take(25)) }
-    }
-}.take(limit)
 
 private fun timingsText(timings: PoseTimings?, select: (PoseTimings) -> Float): String =
     durationText(timings?.let { select(it).toDouble() })
@@ -278,17 +261,20 @@ private fun defaultMonitorDeviceInfo(): MonitorDeviceInfo {
 }
 
 internal class SystemMonitorPlugin(
-    private val usage: DeviceUsageSource = DeviceUsageSampler(),
+    private val usage: DeviceUsageSource = MonitorUsageSampler(DeviceUsageSampler()),
     private val clock: () -> Long = System::nanoTime,
+    private val copyDiagnosis: ((String) -> Unit)? = null,
     private val deviceInfo: () -> MonitorDeviceInfo = ::defaultMonitorDeviceInfo,
 ) : CameraPlugin {
-    constructor(context: Context) : this() { application = context.applicationContext }
+    constructor(context: Context, usage: DeviceUsageSource = MonitorUsageSampler(DeviceUsageSampler())) : this(usage) {
+        application = context.applicationContext
+    }
 
     private var application: Context? = null
     override val descriptor = PluginDescriptor(
         PluginIds.SYSTEM_MONITOR, "系统监控",
         setOf(PluginCapability.CAMERA_FRAMES, PluginCapability.MONITOR, PluginCapability.TEXT, PluginCapability.ACTIONS),
-        actions = setOf(COMPARE, CANCEL_COMPARISON, HIDE_COMPARISON),
+        actions = setOf(COMPARE, CANCEL_COMPARISON, HIDE_COMPARISON, COPY_DIAGNOSIS),
     )
     private val engine = SystemMonitorEngine(usage, clock)
     private val lock = Any()
@@ -298,21 +284,26 @@ internal class SystemMonitorPlugin(
     private var comparisonVisible = false
     private var runId: Long? = null
     private var lastPublishedNanos = Long.MIN_VALUE
+    private var copyNotice: String? = null
 
     override fun onEvent(event: PluginEvent, context: PluginContext) {
         when (event) {
             PluginEvent.Started -> synchronized(lock) {
+                if (!context.isCurrent()) return
                 owner = context.token
                 lastOutput = null
+                copyNotice = null
                 lastPublishedNanos = Long.MIN_VALUE
                 engine.start(SystemMonitorSettings.from(context.settings))
                 refreshComparison()
                 publish(context)
             }
             PluginEvent.ConfigurationChanged -> synchronized(lock) {
+                if (!context.isCurrent()) return
                 BackendComparisonService.cancel(runId, "监控配置已改变")
                 owner = context.token
                 lastOutput = null
+                copyNotice = null
                 engine.reconfigure(SystemMonitorSettings.from(context.settings))
                 refreshComparison()
                 publish(context)
@@ -344,6 +335,22 @@ internal class SystemMonitorPlugin(
                     }
                     CANCEL_COMPARISON -> BackendComparisonService.cancel(comparison.runId)
                     HIDE_COMPARISON -> comparisonVisible = false
+                    COPY_DIAGNOSIS -> {
+                        val output = lastOutput ?: return
+                        if (output.npuResults.isEmpty() && output.samplingFailure == null) return
+                        val text = monitorDiagnosisReport(deviceInfo(), output, SystemMonitorSettings.from(context.settings))
+                        copyNotice = try {
+                            val copy = copyDiagnosis
+                            if (copy != null) copy(text) else {
+                                val app = application ?: return
+                                val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("系统监控 NPU 诊断", text))
+                            }
+                            "已复制完整诊断（含来源原文及读取限制），请分别记录空闲/推理场景"
+                        } catch (error: Exception) {
+                            "复制失败：${error.message ?: error.javaClass.simpleName}"
+                        }
+                    }
                 }
                 refreshComparison()
                 publish(context)
@@ -371,36 +378,55 @@ internal class SystemMonitorPlugin(
             (timingLines + metrics.filterNot { it in timingLines })
                 .take(PluginHost.MAX_MESSAGES - report.size).map { PluginMessage(it) } +
                 report.map { PluginMessage(it) }
-        } else if (output?.npuSource == NpuSource.ALL) {
-            listOfNotNull(metrics.firstOrNull { it.startsWith("帧率") }?.let { PluginMessage(it) }) +
-                monitorDiagnosis(deviceInfo(), output.npuResults, output.timestampNanos)
-                    .map { PluginMessage(it, MessageKind.STATUS) }
         } else metrics.map { PluginMessage(it) }
+        // Keep configured metrics in the top-right panel even during ALL. The copy action carries
+        // the full bounded report directly; STATUS previews must never be its backing data.
+        val notice = copyNotice ?: output?.takeIf { it.npuSource == NpuSource.ALL }?.let {
+            if (it.npuResults.isEmpty()) "NPU 测试全部：等待采样；需开启 NPU 指标"
+            else "NPU 测试全部：${it.npuResults.size} 项结果；点击“复制完整 NPU 诊断”获取每条来源原文"
+        }
+        val displayedMessages = if (notice == null || messages.size >= PluginHost.MAX_MESSAGES) messages else
+            messages + PluginMessage(notice, MessageKind.STATUS)
         // Async report completion uses a monotonic publication time, not an earlier frame capture
         // timestamp (the host otherwise correctly drops it as out-of-order).
         lastPublishedNanos = maxOf(lastPublishedNanos, clock())
-        context.publish(PluginOutput(lastPublishedNanos, messages.take(PluginHost.MAX_MESSAGES),
-            actions = if (application == null) emptyList() else buildList {
-                add(PluginAction(COMPARE, "比较 CPU / GPU / NPU", enabled = !comparison.running))
-                if (comparison.running) add(PluginAction(CANCEL_COMPARISON, "取消比较（等待释放）", !comparison.cancelling))
-                if (comparisonVisible && !comparison.running) add(PluginAction(HIDE_COMPARISON, "收起比较报告"))
+        context.publish(PluginOutput(lastPublishedNanos, displayedMessages.take(PluginHost.MAX_MESSAGES),
+            actions = buildList {
+                if (application != null) {
+                    add(PluginAction(COMPARE, "比较 CPU / GPU / NPU", enabled = !comparison.running))
+                    if (comparison.running) add(PluginAction(CANCEL_COMPARISON, "取消比较（等待释放）", !comparison.cancelling))
+                    if (comparisonVisible && !comparison.running) add(PluginAction(HIDE_COMPARISON, "收起比较报告"))
+                }
+                if (application != null || copyDiagnosis != null) {
+                    val label = when {
+                        copyNotice?.startsWith("已复制") == true -> "已复制 · 再次复制完整 NPU 诊断"
+                        copyNotice?.startsWith("复制失败") == true -> "复制失败 · 重试完整 NPU 诊断"
+                        else -> "复制完整 NPU 诊断"
+                    }
+                    add(PluginAction(COPY_DIAGNOSIS, label, enabled = output?.npuResults?.isNotEmpty() == true || output?.samplingFailure != null))
+                }
             }))
     }
 
     private fun stop() = synchronized(lock) {
         owner = null
         lastOutput = null
+        copyNotice = null
         comparisonVisible = false
         BackendComparisonService.cancel(runId, "监控已停止/相机离开前台")
         engine.stop()
     }
 
-    override fun close() = stop()
+    override fun close() {
+        stop()
+        (usage as? AutoCloseable)?.close()
+    }
 
     companion object {
         const val COMPARE = "backend_compare"
         const val CANCEL_COMPARISON = "backend_compare_cancel"
         const val HIDE_COMPARISON = "backend_compare_hide"
+        const val COPY_DIAGNOSIS = "npu_diagnosis_copy"
     }
 }
 
@@ -416,12 +442,3 @@ internal fun cameraFrameRate(
     if (spanNanos <= 0f) return 0f
     return (timestamps.size - 1) * 1_000_000_000f / spanNanos
 }
-
-private val DIAGNOSIS_ORDER = listOf(
-    NpuProbeScheme.VENDOR_PERCENT,
-    NpuProbeScheme.DEVFREQ,
-    NpuProbeScheme.ROCKCHIP,
-    NpuProbeScheme.SAMSUNG_RQ_LOAD,
-    NpuProbeScheme.QUALCOMM_DIAGNOSTIC,
-    NpuProbeScheme.COUNTER_DELTA,
-)

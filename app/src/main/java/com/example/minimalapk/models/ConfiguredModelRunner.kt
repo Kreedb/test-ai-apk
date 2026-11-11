@@ -2,12 +2,15 @@ package com.example.minimalapk.models
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.ImageDecoder
 import android.graphics.Paint
 import android.graphics.RectF
 import android.net.Uri
+import android.os.Build
 import androidx.core.graphics.scale
-import com.example.minimalapk.examples.decodeImage
+import com.example.minimalapk.examples.sampleSizeFor
 import com.example.minimalapk.pose.GraphSignature
 import com.example.minimalapk.pose.GraphTensor
 import com.example.minimalapk.pose.ModelDownload
@@ -27,18 +30,36 @@ internal data class ModelRunResult(
     val sourceLabel: String = "单次运行",
 )
 
+/** Dialog and cancelled executions own these bitmaps; retained camera previews are copies. */
+internal fun ModelRunResult.recycle() {
+    (images.map { it.second } + listOfNotNull(inputImage)).distinct().forEach { it.recycle() }
+}
+
 internal object ConfiguredModelRunner {
-    fun run(context: Context, model: ConfiguredModel, config: ModelConfig, files: Map<Int, Uri>): ModelRunResult {
+    fun run(context: Context, model: ConfiguredModel, config: ModelConfig, files: Map<Int, Uri>,
+            transfer: AssetTransfer = AssetTransfer()): ModelRunResult = ConfiguredModelAccess.run(model, transfer) {
+        runScoped(context, model, config, files, transfer)
+    }
+
+    private fun runScoped(context: Context, model: ConfiguredModel, config: ModelConfig, files: Map<Int, Uri>,
+                          transfer: AssetTransfer): ModelRunResult {
+        transfer.checkpoint()
         val description = ConfiguredModelStore.describe(model)
         val graph = description.signatures.single { it.key == config.signature }
+        configuredExecutionProblem(config, graph)?.let { error(it) }
         val images = mutableMapOf<Int, Bitmap>()
         try {
             val inputBuffers = graph.inputs.mapIndexed { index, tensor ->
+                transfer.checkpoint()
                 val input = config.inputs[index]
                 val count = tensorElements(input.shape)
-                fun readFile(): ByteArray = context.contentResolver.openInputStream(
-                    files[index] ?: error("请为输入 $index（${tensor.name}）选择文件"),
-                )?.use { it.readCapped(ModelDownload.MAX_BYTES) } ?: error("无法读取输入 $index")
+                fun readFile(): ByteArray {
+                    transfer.checkpoint()
+                    val stream = context.contentResolver.openInputStream(
+                        files[index] ?: error("请为输入 $index（${tensor.name}）选择文件"),
+                    ) ?: error("无法读取输入 $index")
+                    return transfer.use(stream) { it.readCapped(ModelDownload.MAX_BYTES, transfer::checkpoint) }
+                }
                 when (input.source) {
                     InputSource.TEXT -> configuredTextInput(input.values, input.shape)
                     InputSource.BINARY -> {
@@ -50,10 +71,11 @@ internal object ConfiguredModelRunner {
                         val values = when (input.source) {
                             InputSource.IMAGE -> {
                                 val (width, height, channels) = imageDimensions(input)
-                                val bitmap = decodeImage(context, files[index] ?: error("请为输入 $index 选择图片")) ?: error("无法读取图片")
+                                val bitmap = decodeConfiguredImage(readFile()) ?: error("无法读取图片")
                                 val resized = try { bitmap.scale(width, height) } catch (error: Throwable) { bitmap.recycle(); throw error }
                                 if (resized !== bitmap) bitmap.recycle()
                                 images[index] = resized
+                                transfer.checkpoint()
                                 val pixels = IntArray(width * height)
                                 resized.getPixels(pixels, 0, width, 0, 0, width, height)
                                 imageValues(pixels, channels, input)
@@ -68,21 +90,43 @@ internal object ConfiguredModelRunner {
                     }
                 }
             }
-            Interpreter(model.file, Interpreter.Options().setNumThreads(2)).use { interpreter ->
-                configureInputs(interpreter, config)
-                val output = execute(interpreter, config, graph, inputBuffers.toTypedArray(), images)
-                val source = images.entries.firstOrNull()
-                return output.copy(
-                    inputImage = source?.value?.let { checkNotNull(it.copy(Bitmap.Config.ARGB_8888, false)) },
-                    sourceLabel = if (source != null) "所选文件图片 · 输入 ${source.key}" else
-                        "单次输入：${config.inputs.map { it.source.name }.distinct().joinToString(" / ")}",
-                )
+            transfer.checkpoint()
+            ConfiguredModelAccess.open(model).use { owner ->
+                transfer.onCancel(owner::cancel).use {
+                    return owner.run(discard = ModelRunResult::recycle) { interpreter ->
+                        configureInputs(interpreter, config)
+                        val output = execute(interpreter, config, graph, inputBuffers.toTypedArray(), images)
+                        try {
+                            transfer.checkpoint()
+                            val source = images.entries.firstOrNull()
+                            output.copy(
+                                inputImage = source?.value?.let { checkNotNull(it.copy(Bitmap.Config.ARGB_8888, false)) },
+                                sourceLabel = if (source != null) "所选文件图片 · 输入 ${source.key}" else
+                                    "单次输入：${config.inputs.map { it.source.name }.distinct().joinToString(" / ")}",
+                            )
+                        } catch (error: Throwable) { output.recycle(); throw error }
+                    }
+                }
             }
         } finally {
             images.values.distinct().forEach { it.recycle() }
         }
     }
 }
+
+/** Read SAF bytes through the cancellable, capped stream before invoking a local image decoder. */
+private fun decodeConfiguredImage(bytes: ByteArray): Bitmap? =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) { decoder, info, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            decoder.setTargetSampleSize(sampleSizeFor(maxOf(info.size.width, info.size.height), 2048))
+        }
+    } else {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val options = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(maxOf(bounds.outWidth, bounds.outHeight), 2048) }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+    }
 
 /** Resizes dynamic inputs once; signature calls resize from typed arrays in [execute]. */
 internal fun configureInputs(interpreter: Interpreter, config: ModelConfig) {
@@ -101,6 +145,7 @@ internal fun execute(
     images: Map<Int, Bitmap>,
     transparent: Boolean = false,
 ): ModelRunResult {
+    (graph.inputs + graph.outputs).forEach { tensor -> tensor.quantizationProblem?.let { error(it) } }
     if (config.signature.isEmpty()) {
         interpreter.runForMultipleInputsOutputs(inputBuffers, emptyMap())
     } else {
@@ -121,34 +166,39 @@ internal fun execute(
         tensorOutput(actual, tensor)
     }
     val rendered = mutableListOf<Pair<String, Bitmap>>()
-    val report = outputs.mapIndexed { index, output ->
-        val options = config.outputs[index]
-        val header = "输出 $index · ${graph.outputs[index].name} ${output.shape}"
-        val values = output.values
-        when (options.render) {
-            OutputRender.IMAGE, OutputRender.SEGMENTATION -> {
-                rendered += header to outputBitmap(output.shape, values, options, transparent)
-                header
+    try {
+        val report = outputs.mapIndexed { index, output ->
+            val options = config.outputs[index]
+            val header = "输出 $index · ${graph.outputs[index].name} ${output.shape}"
+            val values = output.values
+            when (options.render) {
+                OutputRender.IMAGE, OutputRender.SEGMENTATION -> {
+                    rendered += header to outputBitmap(output.shape, values, options, transparent)
+                    header
+                }
+                OutputRender.MOVENET -> {
+                    require(output.shape == listOf(1, 1, 17, 3)) { "MoveNet 输出需要 [1,1,17,3]" }
+                    rendered += header to drawMoveNet(
+                        images.values.firstOrNull() ?: error("MoveNet 需要图片输入"), values, options.threshold, transparent,
+                    )
+                    "$header\n平均关键点置信度：${(0 until 17).sumOf { values[it * 3 + 2] } / 17}"
+                }
+                OutputRender.BOXES -> {
+                    val source = images.values.firstOrNull() ?: error("检测框需要图片输入")
+                    rendered += header to drawBoxes(source, values, outputs, options, transparent)
+                    header
+                }
+                OutputRender.CLASSIFICATION -> "$header\n" + values.indices.sortedByDescending { values[it] }.take(5).joinToString("\n") {
+                    "${options.labels.getOrNull(it) ?: "#$it"}：${values[it]}"
+                }
+                else -> "$header\n${output.text ?: values.take(64).joinToString()}${if (values.size > 64) " …（共 ${values.size} 个）" else ""}"
             }
-            OutputRender.MOVENET -> {
-                require(output.shape == listOf(1, 1, 17, 3)) { "MoveNet 输出需要 [1,1,17,3]" }
-                rendered += header to drawMoveNet(
-                    images.values.firstOrNull() ?: error("MoveNet 需要图片输入"), values, options.threshold, transparent,
-                )
-                "$header\n平均关键点置信度：${(0 until 17).sumOf { values[it * 3 + 2] } / 17}"
-            }
-            OutputRender.BOXES -> {
-                val source = images.values.firstOrNull() ?: error("检测框需要图片输入")
-                rendered += header to drawBoxes(source, values, outputs, options, transparent)
-                header
-            }
-            OutputRender.CLASSIFICATION -> "$header\n" + values.indices.sortedByDescending { values[it] }.take(5).joinToString("\n") {
-                "${options.labels.getOrNull(it) ?: "#$it"}：${values[it]}"
-            }
-            else -> "$header\n${output.text ?: values.take(64).joinToString()}${if (values.size > 64) " …（共 ${values.size} 个）" else ""}"
-        }
-    }.joinToString("\n\n")
-    return ModelRunResult(report, rendered)
+        }.joinToString("\n\n")
+        return ModelRunResult(report, rendered)
+    } catch (error: Throwable) {
+        rendered.map { it.second }.distinct().forEach { it.recycle() }
+        throw error
+    }
 }
 
 private data class TensorOutput(val shape: List<Int>, val values: DoubleArray, val text: String? = null)
@@ -172,7 +222,14 @@ private fun tensorOutput(tensor: Tensor, description: GraphTensor): TensorOutput
         return TensorOutput(tensor.shape().toList(), doubleArrayOf(), text)
     }
     val quantization = tensor.quantizationParams()
-    return TensorOutput(tensor.shape().toList(), decodeTensor(buffer, description.type, quantization.scale, quantization.zeroPoint.toLong()))
+    val values = decodeTensor(buffer, description.type, quantization.scale, quantization.zeroPoint.toLong())
+    // Double-backed renderers are intentional, but VALUES must not silently round exact INT64
+    // tokens supplied via BINARY (for example 2^53+1) while reporting a successful round trip.
+    val exactIntegers = if (description.type == 4 && quantization.scale == 0f) {
+        val longs = buffer.duplicate().order(ByteOrder.nativeOrder()).apply { rewind() }.asLongBuffer()
+        (0 until minOf(longs.remaining(), 64)).joinToString { longs.get().toString() }
+    } else null
+    return TensorOutput(tensor.shape().toList(), values, exactIntegers)
 }
 
 internal fun shapedArray(buffer: ByteBuffer, type: Int, shape: List<Int>): Any {

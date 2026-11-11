@@ -132,7 +132,7 @@ private fun PluginCamera(store: PluginSettingsStore, modifier: Modifier) {
             poses, PoseEnhancementPlugin(), ConfiguredModelPlugin(context.applicationContext),
             SystemMonitorPlugin(context.applicationContext), SuperResolutionPlugin(context.applicationContext),
             *ExampleScenes.all.map { ExampleScenePlugin(context.applicationContext, it) }.toTypedArray(),
-            AudioClassificationPlugin(context.applicationContext), TtsPlugin(),
+            AudioClassificationPlugin(context.applicationContext), TtsPlugin(context.applicationContext),
             PersonalizationPlugin(context.applicationContext),
             LiteRtImagePlugin(context.applicationContext, LiteRtScenes.vision),
             LiteRtImagePlugin(context.applicationContext, LiteRtScenes.image),

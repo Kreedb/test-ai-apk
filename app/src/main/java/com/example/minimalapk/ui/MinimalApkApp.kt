@@ -80,6 +80,16 @@ internal fun tabForRestoredState(saved: Any?): Int = when {
     else -> tabForRestoredIndex(saved)
 }
 
+/** Page-local forms/dialogs must never reuse the old numeric 示例/插件/设置 keys. These names
+ * remain stable when switching tabs or restoring the selected tab; durable user data is separate. */
+internal fun tabPageStateKey(index: Int): String = when (index) {
+    HOME_TAB -> "page:v2:home"
+    CAMERA_TAB -> "page:v2:camera"
+    PLUGINS_TAB -> "page:v2:plugins"
+    SETTINGS_TAB -> "page:v2:settings"
+    else -> error("Unknown tab $index")
+}
+
 private val TabIndexSaver = Saver<Int, Any>(
     save = { "$TAB_STATE_PREFIX$it" },
     restore = { tabForRestoredState(it) },
@@ -115,7 +125,7 @@ fun MinimalApkApp(
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
-            stateHolder.SaveableStateProvider(selectedTab) {
+            stateHolder.SaveableStateProvider(tabPageStateKey(selectedTab)) {
                 when (selectedTab) {
                     HOME_TAB -> StatusScreen()
                     CAMERA_TAB -> CameraScreen(plugins)

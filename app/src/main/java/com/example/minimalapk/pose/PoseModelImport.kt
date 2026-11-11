@@ -3,6 +3,7 @@ package com.example.minimalapk.pose
 import android.content.Context
 import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.models.writeAtomically
+import com.example.minimalapk.models.AssetTransfer
 import java.io.File
 import java.security.MessageDigest
 
@@ -158,7 +159,13 @@ internal object PoseModelImport {
         val id = sha256(prepared.bytes).take(16)
         val fileName = "$id.tflite"
         val directory = File(context.filesDir, MODELS_DIR).apply { mkdirs() }
-        File(directory, fileName).writeAtomically(prepared.bytes)
+        val file = File(directory, fileName)
+        synchronized(ModelStore) {
+            PoseModelAccess.checkAvailable(file)
+            // Same content ID: an existing mapped file must not be rewritten during re-import.
+            if (!file.exists()) file.writeAtomically(prepared.bytes)
+            else check(file.isFile) { "姿态模型存储位置不是文件，原有内容已保留" }
+        }
         val contract = prepared.contract
         return ModelSpec(
             id = id,
@@ -171,8 +178,23 @@ internal object PoseModelImport {
         )
     }
 
-    fun delete(context: Context, spec: ModelSpec) {
-        if (spec.imported) modelFile(context, spec).delete()
+    /** Owns both file and registration commit. A cancelled wait cannot leave half a deletion. */
+    fun delete(context: Context, spec: ModelSpec, transfer: AssetTransfer = AssetTransfer()): List<ModelSpec> {
+        require(spec.imported) { "内置模型不能删除" }
+        val file = modelFile(context, spec)
+        fun remaining() = ModelStore.load(context).filterNot { it.id == spec.id }
+        fun shared(specs: List<ModelSpec>) = specs.any { it.imported && modelFile(context, it).canonicalPath == file.canonicalPath }
+        val shared = synchronized(ModelStore) { shared(remaining()) }
+        return PoseModelAccess.deleting(file, spec.id, shared, transfer) {
+            synchronized(ModelStore) {
+                val next = remaining()
+                check(!shared || shared(next)) { "共享模型列表已改变，原文件已保留，请重新删除" }
+                transfer.commit {
+                    deletePoseFile(file, shared(next)) { ModelStore.saveDeletion(context, next) }
+                    next
+                }
+            }
+        }
     }
 
     internal fun isTflite(bytes: ByteArray): Boolean =
@@ -195,4 +217,18 @@ internal object PoseModelImport {
             .joinToString("") { "%02x".format(it) }
 
     private const val FLOAT32 = 0
+}
+
+/** Rename is reversible until the model list is durably saved. Shared aliases only unregister. */
+internal fun deletePoseFile(file: File, shared: Boolean, save: () -> Unit) {
+    if (shared || !file.exists()) { save(); return }
+    check(file.isFile) { "姿态模型路径不是文件，原有内容已保留" }
+    val staged = File.createTempFile(".delete-pose-", ".tmp", file.parentFile)
+    check(staged.delete()) { "无法准备删除姿态模型，原文件已保留" }
+    check(file.renameTo(staged)) { "无法删除姿态模型，原文件已保留" }
+    try { save() } catch (error: Throwable) {
+        if (!staged.renameTo(file)) error.addSuppressed(IllegalStateException("恢复姿态权重失败：${staged.absolutePath}"))
+        throw error
+    }
+    if (!staged.delete()) AppLog.w("ModelImport", "姿态模型已移除，但临时文件清理失败：${staged.name}")
 }

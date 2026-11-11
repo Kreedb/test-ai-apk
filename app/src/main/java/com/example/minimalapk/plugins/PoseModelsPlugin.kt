@@ -6,11 +6,17 @@ import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.PoseAnalyzer
 import com.example.minimalapk.pose.PoseFrame
+import com.example.minimalapk.pose.PoseModelAccess
 import com.example.minimalapk.pose.preferenceFromStorage
 import com.example.minimalapk.pose.TfliteGraph
 import com.example.minimalapk.pose.modelFile
 import com.example.minimalapk.pose.validatePoseModelConfig
 import java.util.concurrent.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 internal data class AnalyzedPose(val frame: PoseFrame, val token: PluginToken, val provider: String)
 
@@ -21,7 +27,7 @@ internal class PoseModelsPlugin(private val application: Context) : CameraPlugin
     override val descriptor = PluginDescriptor(
         PluginIds.POSE_MODELS, "姿态模型", setOf(PluginCapability.POSE_RESULTS, PluginCapability.TEXT),
     )
-    private data class Request(val context: PluginContext)
+    private data class Request(val context: PluginContext, val revision: Long)
     private class Loaded(val analyzer: PoseAnalyzer, val problems: Map<String, PluginMessage>) : AutoCloseable {
         override fun close() = analyzer.close()
     }
@@ -29,6 +35,7 @@ internal class PoseModelsPlugin(private val application: Context) : CameraPlugin
     private var current: PluginContext? = null
     private var status: PluginMessage? = null
     private var problems: Map<String, PluginMessage> = emptyMap()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val model = AsyncModelSlot<Request, Loaded>(
         "PoseModelOwner",
         open = { request ->
@@ -50,23 +57,36 @@ internal class PoseModelsPlugin(private val application: Context) : CameraPlugin
             Loaded(PoseAnalyzer.open(
                 application, preferenceFromStorage(config["backend"]),
                 specs.map { if (it.id in invalid) it.copy(enabled = false) else it },
-                stillNeeded = request.context::isCurrent,
+                stillNeeded = { request.context.isCurrent() && request.revision == PoseModelAccess.revision.value },
             ), invalid)
         },
         ready = { request, loaded -> synchronized(lock) {
-            if (request.context.isCurrent() && current?.token == request.context.token) {
+            if (request.context.isCurrent() && current?.token == request.context.token && request.revision == PoseModelAccess.revision.value) {
                 status = null
                 problems = loaded.problems
                 request.context.publish(PluginOutput(System.nanoTime(), problems.values.toList()))
             }
         } },
         failed = { request, error -> synchronized(lock) {
-            if (request.context.isCurrent() && current?.token == request.context.token) {
+            if (request.context.isCurrent() && current?.token == request.context.token && request.revision == PoseModelAccess.revision.value) {
                 status = PluginMessage(error.message ?: "姿态模型失败", MessageKind.ERROR)
                 request.context.publish(PluginOutput(System.nanoTime(), listOf(checkNotNull(status))))
             }
         } },
     )
+
+    init {
+        scope.launch {
+            PoseModelAccess.revision.collect { revision -> synchronized(lock) {
+                current?.takeIf { it.isCurrent() }?.let { context ->
+                    problems = emptyMap()
+                    status = null
+                    context.publish(PluginOutput(System.nanoTime()))
+                    if (!PoseModelAccess.isChanging()) model.set(Request(context, revision))
+                }
+            } }
+        }
+    }
 
     override fun onEvent(event: PluginEvent, context: PluginContext) {
         when (event) {
@@ -76,7 +96,7 @@ internal class PoseModelsPlugin(private val application: Context) : CameraPlugin
                 problems = emptyMap()
                 val enabled = ModelStore.decode(context.settings.config.getValue("models")).any { it.enabled }
                 status = if (enabled) PluginMessage("正在加载姿态模型，基础预览仍可用", MessageKind.STATUS) else null
-                model.set(if (enabled) Request(context) else null)
+                model.set(if (enabled) Request(context, PoseModelAccess.revision.value) else null)
                 context.publish(PluginOutput(System.nanoTime(), listOfNotNull(status)))
             }
             is PluginEvent.Stopped -> synchronized(lock) {
@@ -110,10 +130,10 @@ internal class PoseModelsPlugin(private val application: Context) : CameraPlugin
     }
 
     fun analyze(source: Bitmap, rotationDegrees: Int): AnalyzedPose? = model.runIfReady { request, loaded ->
-        if (!request.context.isCurrent()) return@runIfReady null
+        if (!request.context.isCurrent() || request.revision != PoseModelAccess.revision.value) return@runIfReady null
         val result = loaded.analyzer.analyze(source, rotationDegrees)
-        if (request.context.isCurrent()) AnalyzedPose(result, request.context.token, loaded.analyzer.executionProvider) else null
+        if (request.context.isCurrent() && request.revision == PoseModelAccess.revision.value) AnalyzedPose(result, request.context.token, loaded.analyzer.executionProvider) else null
     }
 
-    override fun close() = model.close()
+    override fun close() { scope.cancel(); model.close() }
 }

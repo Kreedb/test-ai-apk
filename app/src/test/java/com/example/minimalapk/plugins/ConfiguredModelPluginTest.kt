@@ -20,6 +20,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 class ConfiguredModelPluginTest {
@@ -227,6 +228,50 @@ class ConfiguredModelPluginTest {
             waitFor { "manual answer" !in messages(host) }
             host.configure(mapOf(PluginIds.CONFIGURED_MODEL to PluginSettings(false)))
             assertTrue(host.snapshot.value.reports.isEmpty())
+        }
+    }
+
+    @Test
+    fun backgroundCancelsInFlightImageRunnerBeforeClosingAndDropsItsLateText() {
+        val entered = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val closed = CountDownLatch(1)
+        val worker = Executors.newSingleThreadExecutor()
+        val plugin = ConfiguredModelPlugin({ listOf(selected) }, { _, _ ->
+            object : ConfiguredFrameRunner {
+                override val status = "image ready"
+                override fun run(image: PluginImage): ModelRunResult {
+                    entered.countDown()
+                    assertTrue(release.await(5, TimeUnit.SECONDS))
+                    return ModelRunResult("late image result", emptyList())
+                }
+                override fun cancel() { cancelled.countDown() }
+                override fun close() { closed.countDown() }
+            }
+        }, MutableStateFlow<ConfiguredPublishedResult?>(null))
+        PluginHost(listOf(plugin)).use { host ->
+            try {
+                start(host)
+                waitFor { "image ready" in messages(host) }
+                val source = ImageSource(host.sessionId()!!, 1, ImageSpace(8, 8, PhotoBounds(0f, 0f, 8f, 8f)), 0)
+                val image = object : PluginImage {
+                    override val width = 8
+                    override val height = 8
+                    override val bitmap: Bitmap get() = error("Fake runner does not access pixels")
+                }
+                val frame = worker.submit { host.acceptFrame(CameraFrame(source, System.nanoTime(), image, image,
+                    ViewportMapping(source.space, 8, 8), emptyList())) }
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                host.lifecycle(CameraLifecycle.BACKGROUND)
+                assertTrue(cancelled.await(5, TimeUnit.SECONDS))
+                assertEquals(1L, closed.count) // Native borrower still owns the handle.
+                assertTrue(host.snapshot.value.reports.isEmpty())
+                release.countDown()
+                frame.get(5, TimeUnit.SECONDS)
+                assertTrue(closed.await(5, TimeUnit.SECONDS))
+                assertTrue(host.snapshot.value.reports.isEmpty())
+            } finally { release.countDown(); worker.shutdownNow() }
         }
     }
 }

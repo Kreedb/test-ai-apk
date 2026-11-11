@@ -13,6 +13,7 @@ internal class TfliteGraph(val bytes: ByteArray) {
     init {
         require(PoseModelImport.isTflite(bytes)) { "不是 TFLite 文件（缺少 TFL3 标识）" }
         require(field(tableAt(0), 0)?.let(::i32) == 3) { "不支持的 TFLite 文件版本" }
+        validateStructure()
     }
 
     fun inputs(): List<Int> = tensorReferences(1)
@@ -30,7 +31,7 @@ internal class TfliteGraph(val bytes: ByteArray) {
     }
 
     /** TFLite's element type; the FlatBuffer omits the FLOAT32 default, so absent means 0. */
-    fun elementType(tensor: Int): Int = field(tensor, 1)?.let { bytes[it].toInt() and 0xff } ?: 0
+    fun elementType(tensor: Int): Int = field(tensor, 1, 1)?.let { bytes[it].toInt() and 0xff } ?: 0
 
     fun describe(): GraphDescription {
         val graphs = subgraphs()
@@ -38,17 +39,23 @@ internal class TfliteGraph(val bytes: ByteArray) {
         fun tensors(graph: Int) = tableVector(graph, 0)
         fun describeTensor(tensor: Int, alias: String? = null): GraphTensor {
             val quantization = field(tensor, 4)?.let(::tableAt)
-            val scales = quantization?.let { vector(it, 2) }
-            val zeros = quantization?.let { vector(it, 3, 8) }
+            val scales = quantization?.let { vector(it, 2) }?.let { (start, count) ->
+                List(count) { Float.fromBits(i32(start + it * 4)) }
+            }.orEmpty()
+            val zeros = quantization?.let { vector(it, 3, 8) }?.let { (start, count) ->
+                List(count) { i64(start + it * 8) }
+            }.orEmpty()
             return GraphTensor(
                 name = alias ?: string(tensor, 3),
                 shape = shape(tensor).toList(),
                 signature = shapeSignature(tensor)?.toList() ?: shape(tensor).toList(),
                 type = elementType(tensor),
-                scale = scales?.takeIf { it.second == 1 }?.let { Float.fromBits(i32(it.first)) } ?: 0f,
-                zeroPoint = zeros?.takeIf { it.second == 1 }?.let {
-                    (i32(it.first).toLong() and 0xffffffffL) or (i32(it.first + 4).toLong() shl 32)
-                } ?: 0L,
+                scale = scales.singleOrNull() ?: if (scales.isEmpty()) 0f else Float.NaN,
+                zeroPoint = zeros.singleOrNull() ?: 0L,
+                scales = scales,
+                zeroPoints = zeros,
+                quantizedDimension = quantization?.let { field(it, 6)?.let(::i32) } ?: 0,
+                quantizationDetailsType = quantization?.let { field(it, 4, 1)?.let { position -> bytes[position].toInt() and 0xff } } ?: 0,
             )
         }
         fun mapped(graph: Int, fieldIndex: Int): List<GraphTensor> {
@@ -73,7 +80,116 @@ internal class TfliteGraph(val bytes: ByteArray) {
         val customOps = tableVector(tableAt(0), 1).mapNotNull { code ->
             string(code, 1).takeIf { it.isNotBlank() }
         }.distinct()
-        return GraphDescription(listOf(main) + signatures, customOps)
+        val operators = tableVector(tableAt(0), 1).map { code ->
+            val custom = string(code, 1)
+            val builtin = field(code, 3)?.let(::i32) ?: field(code, 0, 1)?.let { bytes[it].toInt() and 0xff } ?: 0
+            "${if (custom.isNotEmpty()) "CUSTOM:$custom" else "BUILTIN:$builtin"} v${field(code, 2)?.let(::i32) ?: 1}"
+        }
+        return GraphDescription(listOf(main) + signatures, customOps, operators)
+    }
+
+    /** Validate storage references, not operator availability or a second implementation of every
+     * options union. Unknown/custom ops remain importable; their native support is checked at run. */
+    private fun validateStructure() {
+        val root = tableAt(0)
+        val graphs = tableVector(root, 2)
+        require(graphs.isNotEmpty()) { "模型没有子图" }
+        val buffers = tableVector(root, 4)
+        require(buffers.isNotEmpty()) { "模型没有 buffer 表" }
+        val codes = tableVector(root, 1)
+        fun bufferIndex(index: Int) { require(index in buffers.indices) { "TFLite buffer 索引越界" } }
+        fun externalRange(table: Int, offsetField: Int, sizeField: Int) {
+            val offset = field(table, offsetField, 8)?.let(::i64) ?: 0L
+            val size = field(table, sizeField, 8)?.let(::i64) ?: 0L
+            require(offset >= 0 && size >= 0 && (offset <= 1L && size == 0L ||
+                offset > 1L && offset <= bytes.size.toLong() && size <= bytes.size.toLong() - offset)) {
+                "TFLite 外部 buffer/options 越界或文件被截断"
+            }
+        }
+        buffers.forEach { buffer -> vector(buffer, 0, 1); externalRange(buffer, 1, 2) }
+        codes.forEach { code ->
+            field(code, 0, 1); field(code, 2); field(code, 3); string(code, 1)
+        }
+        string(root, 3)
+        intVector(root, 5)?.forEach(::bufferIndex)
+        tableVector(root, 6).forEach { metadata ->
+            string(metadata, 0)
+            bufferIndex(field(metadata, 1)?.let(::i32) ?: 0)
+        }
+        graphs.forEach { graph ->
+            string(graph, 4)
+            val tensors = tableVector(graph, 0)
+            fun references(table: Int, index: Int, optional: Boolean = false): List<Int> =
+                (intVector(table, index) ?: IntArray(0)).toList().also { refs ->
+                    require(refs.all { it in tensors.indices || optional && it == -1 }) { "TFLite 张量引用越界" }
+                }
+            references(graph, 1); references(graph, 2)
+            tensors.forEach { tensor ->
+                shape(tensor); shapeSignature(tensor); elementType(tensor); string(tensor, 3)
+                val bufferId = field(tensor, 2)?.let(::i32) ?: 0
+                bufferIndex(bufferId)
+                val payload = vector(buffers[bufferId], 0, 1)?.second?.toLong()
+                    ?.takeIf { it > 0 } ?: field(buffers[bufferId], 2, 8)?.let(::i64) ?: 0L
+                val width = when (elementType(tensor)) {
+                    0, 2, 15 -> 4; 1, 7, 16 -> 2; 3, 6, 9 -> 1; 4, 10, 12 -> 8; else -> null
+                }
+                // Sparse/STRING/packed/unknown encodings have their own payload contracts.
+                // For ordinary dense constants, a valid vector pointing at too few bytes is still
+                // a truncated model, even though its vector header itself fits in the file.
+                if (payload > 0 && width != null && field(tensor, 6) == null && shape(tensor).all { it >= 0 }) {
+                    var required = width.toLong()
+                    shape(tensor).forEach { size ->
+                        require(size == 0 || required <= bytes.size.toLong() / size) { "TFLite 常量张量超过文件范围" }
+                        required *= size
+                    }
+                    require(payload >= required) { "TFLite 常量 buffer 被截断" }
+                }
+                field(tensor, 4)?.let(::tableAt)?.let { quantization ->
+                    (0..2).forEach { vector(quantization, it) }
+                    vector(quantization, 3, 8)
+                    field(quantization, 4, 1)
+                    field(quantization, 5)?.let(::tableAt)?.let(::checkTable)
+                    field(quantization, 6)
+                }
+                field(tensor, 6)?.let(::tableAt)?.let(::checkTable)
+                tableVector(tensor, 9)
+            }
+            tableVector(graph, 3).forEach { operator ->
+                require((field(operator, 0)?.let(::i32) ?: 0) in codes.indices) { "TFLite 算子代码索引越界" }
+                references(operator, 1, optional = true)
+                references(operator, 2, optional = true)
+                references(operator, 8, optional = true)
+                vector(operator, 5, 1); vector(operator, 7, 1)
+                externalRange(operator, 9, 10)
+                field(operator, 12)?.let(::tableAt)?.let(::checkTable)
+                val options = field(operator, 4)?.let(::tableAt)
+                options?.let(::checkTable)
+                val type = field(operator, 3, 1)?.let { bytes[it].toInt() and 0xff } ?: 0
+                // IF/WHILE/CALL_ONCE/CALL contain subgraph indices, not kernel semantics.
+                val graphFields = when (type) { 92, 93 -> 0..1; 16, 103 -> 0..0; else -> IntRange.EMPTY }
+                if (!graphFields.isEmpty()) {
+                    require(options != null) { "TFLite 控制流缺少子图配置" }
+                    graphFields.forEach { index ->
+                        require((field(options, index)?.let(::i32) ?: 0) in graphs.indices) { "TFLite 控制流子图索引越界" }
+                    }
+                }
+            }
+        }
+        val keys = mutableSetOf<String>()
+        tableVector(root, 7).forEach { signature ->
+            val key = string(signature, 2)
+            require(key.isNotBlank() && keys.add(key)) { "TFLite 签名名称为空或重复" }
+            val graphIndex = field(signature, 4)?.let(::i32) ?: 0
+            require(graphIndex in graphs.indices) { "TFLite 签名子图索引越界" }
+            for (index in 0..1) {
+                val names = mutableSetOf<String>()
+                val refs = intVector(graphs[graphIndex], index + 1)?.toSet().orEmpty()
+                tableVector(signature, index).forEach { mapping ->
+                    require(names.add(string(mapping, 0)) && string(mapping, 0).isNotBlank()) { "TFLite 签名张量名称为空或重复" }
+                    require((field(mapping, 1)?.let(::i32) ?: 0) in refs) { "TFLite 签名引用不属于子图输入/输出" }
+                }
+            }
+        }
     }
 
     fun dynamicSignatureCount(): Int = tensorTables().count { hasDynamicSignature(it) }
@@ -146,29 +262,41 @@ internal class TfliteGraph(val bytes: ByteArray) {
 
     private fun tableVector(table: Int, index: Int): List<Int> {
         val (start, count) = vector(table, index) ?: return emptyList()
-        return List(count) { tableAt(start + it * 4) }
+        return List(count) { tableAt(start + it * 4).also(::checkTable) }
     }
 
     private fun string(table: Int, index: Int): String {
         val (start, count) = vector(table, index, 1) ?: return ""
+        checkRange(start, count + 1)
+        require(bytes[start + count] == 0.toByte()) { "TFLite 字符串被截断" }
         return String(bytes, start, count, Charsets.UTF_8)
     }
 
     /** Absolute position of a table field, or null when the vtable does not define it. */
-    private fun field(table: Int, index: Int): Int? {
+    private fun checkTable(table: Int): Int {
         val vtable = (table.toLong() - i32(table)).also {
             require(it in 0L..(bytes.size - 4).toLong()) { "TFLite 表越界或文件被截断" }
         }.toInt()
-        checkRange(vtable, u16(vtable))
+        val size = u16(vtable)
+        require(size >= 4 && size % 2 == 0 && u16(vtable + 2) >= 4) { "TFLite 表长度无效" }
+        checkRange(vtable, size)
+        checkRange(table, u16(vtable + 2))
+        return vtable
+    }
+
+    private fun field(table: Int, index: Int, width: Int = 4): Int? {
+        val vtable = checkTable(table)
         val fieldOffset = 4 + index * 2
         if (fieldOffset + 2 > u16(vtable)) return null
         val offset = u16(vtable + fieldOffset)
-        return if (offset == 0) null else (table + offset).also { checkRange(it, 1) }
+        if (offset == 0) return null
+        require(offset >= 4 && offset + width <= u16(vtable + 2)) { "TFLite 字段越界" }
+        return (table + offset).also { checkRange(it, width) }
     }
 
     private fun tableAt(position: Int): Int {
         val offset = u32(position)
-        require(offset >= 0 && position <= bytes.size - offset) { "TFLite 偏移越界或文件被截断" }
+        require(offset > 0 && position <= bytes.size - offset) { "TFLite 偏移越界或文件被截断" }
         return (position + offset).also { checkRange(it, 4) }
     }
 
@@ -193,6 +321,9 @@ internal class TfliteGraph(val bytes: ByteArray) {
 
     private fun i32(position: Int): Int = u32(position)
 
+    private fun i64(position: Int): Long =
+        (i32(position).toLong() and 0xffffffffL) or (i32(position + 4).toLong() shl 32)
+
     private fun writeI32(position: Int, value: Int) {
         checkRange(position, 4)
         bytes[position] = value.toByte()
@@ -209,7 +340,19 @@ internal data class GraphTensor(
     val type: Int,
     val scale: Float = 0f,
     val zeroPoint: Long = 0,
+    val scales: List<Float> = if (scale != 0f) listOf(scale) else emptyList(),
+    val zeroPoints: List<Long> = if (scale != 0f) listOf(zeroPoint) else emptyList(),
+    val quantizedDimension: Int = 0,
+    val quantizationDetailsType: Int = 0,
 ) {
+    val quantizationSummary: String get() = "details_type=$quantizationDetailsType scale=$scales zero-point=$zeroPoints quantized_dimension=$quantizedDimension" +
+        if (quantizationDetailsType == 0) "" else "（details 非 NONE，scale/zero-point 按模型 schema 忽略）"
+    val quantizationProblem: String? get() = when {
+        quantizationDetailsType != 0 -> "$name 使用非仿射量化 details_type=$quantizationDetailsType；当前通用转换器不支持该量化方案，不能使用其 scale/zero-point，请使用兼容运行时；原模型可保留"
+        scales.size > 1 || zeroPoints.size > 1 -> "$name 使用逐轴量化（$quantizationSummary），当前通用转换器仅支持逐张量量化；请使用兼容运行时或重新导出，原模型可保留"
+        scales.size != zeroPoints.size || scales.any { !it.isFinite() || it <= 0f } -> "$name 的量化 scale/zero-point 无效；请检查模型导出"
+        else -> null
+    }
     val typeName: String get() = when (type) {
         0 -> "FLOAT32"
         1 -> "FLOAT16"
@@ -231,7 +374,7 @@ internal data class GraphSignature(
     val outputs: List<GraphTensor>,
 )
 
-internal data class GraphDescription(val signatures: List<GraphSignature>, val customOps: List<String>)
+internal data class GraphDescription(val signatures: List<GraphSignature>, val customOps: List<String>, val operators: List<String> = emptyList())
 
 /** Compact file-backed facts only: tensor names, shapes/signatures, dtype and quantization.
  * Normalization, box meaning, labels, tokenizer and sample rate are deliberately not inferred here.
@@ -243,12 +386,13 @@ internal fun GraphDescription.knownSummary(): String = buildString {
         append("；${signature.key.ifEmpty { "主子图" }} 输入 ")
         append(signature.inputs.joinToString { tensor ->
             "${tensor.name} ${tensor.typeName} 形状${tensor.shape} 签名${tensor.signature} " +
-                "量化${tensor.scale}/${tensor.zeroPoint}"
+                "量化 ${tensor.quantizationSummary}"
         }.ifEmpty { "无" })
         append(" 输出 ")
         append(signature.outputs.joinToString { tensor ->
-            "${tensor.name} ${tensor.typeName} 形状${tensor.shape} 签名${tensor.signature}"
+            "${tensor.name} ${tensor.typeName} 形状${tensor.shape} 签名${tensor.signature} 量化 ${tensor.quantizationSummary}"
         }.ifEmpty { "无" })
     }
     if (customOps.isNotEmpty()) append("；自定义算子 ${customOps.joinToString()}")
+    if (operators.isNotEmpty()) append("；算子代码/版本 ${operators.joinToString()}")
 }

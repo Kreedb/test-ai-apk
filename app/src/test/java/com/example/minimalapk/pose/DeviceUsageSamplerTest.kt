@@ -72,6 +72,7 @@ class DeviceUsageSamplerTest {
                 rockchip to ProbeRead.Content("NPU load: Core0: 80%"),
                 "$device/load" to ProbeRead.Content("50"),
                 "$device/rq_load" to ProbeRead.Content("50"),
+                "$device/name" to ProbeRead.Content("exynos-npu"),
             ),
             mapOf("/sys/class/devfreq" to listOf(device)),
         )
@@ -127,6 +128,8 @@ class DeviceUsageSamplerTest {
     fun rejectsBusyTotalWithoutPositiveTotal() {
         assertNull(parseBusyTotal("0 0"))
         assertNull(parseBusyTotal("busy total"))
+        listOf("NaN 100", "1 Infinity", "100 25", "25 100 80").forEach { assertNull(parseBusyTotal(it)) }
+        listOf("Core0: 42%", "1000000 Hz", "0x55", "load 42%", "NaN").forEach { assertNull(parsePercent(it)) }
     }
 
     @Test
@@ -140,5 +143,76 @@ class DeviceUsageSamplerTest {
         assertNull(cpuPercent(cpuDeltaMillis = 0, wallDeltaMillis = 0, cores = 1))
         assertNull(cpuPercent(cpuDeltaMillis = 10, wallDeltaMillis = -1, cores = 1))
         assertNull(cpuPercent(cpuDeltaMillis = 10, wallDeltaMillis = 100, cores = 0))
+    }
+
+    @Test
+    fun hiddenMetricsDoNotReadFilesOrCpuAndCpuRestartsWithANewBaseline() {
+        val reads = mutableListOf<String>()
+        var cpuReads = 0
+        var cpu = 100L
+        val files = object : ProbeFileSystem {
+            override fun read(path: String): ProbeRead { reads += path; return ProbeRead.Missing }
+            override fun listDirectories(parent: String): List<String> { reads += parent; return emptyList() }
+        }
+        val sampler = DeviceUsageSampler(files, { cpuReads++; cpu }, { 4 })
+        val cpuOnly = UsageMetrics(cpu = true, gpu = false, npu = false)
+        assertNull(sampler.sample(NpuSource.ALL, 1_000_000_000, cpuOnly).cpuPercent)
+        cpu = 300
+        assertEquals(5f, sampler.sample(NpuSource.ALL, 2_000_000_000, cpuOnly).cpuPercent!!, .001f)
+        assertTrue(reads.isEmpty())
+        sampler.sample(NpuSource.ALL, 3_000_000_000, UsageMetrics(false, false, false))
+        assertEquals(2, cpuReads)
+        cpu = 1000
+        assertNull(sampler.sample(NpuSource.ALL, 4_000_000_000, cpuOnly).cpuPercent)
+    }
+
+    @Test
+    fun gpuReportsKnownKgslIntervalButNeverInfersUnknownLoadUnits() {
+        val kgsl = "/sys/class/kgsl/kgsl-3d0/gpubusy"
+        val unknown = "/sys/class/devfreq/mali0/load"
+        val files = FakeFiles(mutableMapOf(kgsl to ProbeRead.Content("25 100\n")),
+            mapOf("/sys/class/devfreq" to listOf("/sys/class/devfreq/mali0")))
+        val sampler = DeviceUsageSampler(files)
+        val gpuOnly = UsageMetrics(false, true, false)
+        val known = sampler.sample(NpuSource.AUTO, 1, gpuOnly)
+        assertEquals(25f, known.gpuPercent!!, .01f)
+        assertEquals(kgsl, known.gpuSource)
+        assertTrue(known.gpuDetail!!.contains("驱动采样窗"))
+        files.files.remove(kgsl)
+        files.files[unknown] = ProbeRead.Content("50\n")
+        val raw = sampler.sample(NpuSource.AUTO, 2, gpuOnly)
+        assertNull(raw.gpuPercent)
+        assertEquals(NpuProbeState.UNSUPPORTED, raw.gpuState)
+        assertEquals(unknown, raw.gpuSource)
+        assertEquals("50\n", raw.gpuEvidence.single { it.path == unknown }.text)
+    }
+
+    @Test
+    fun cancelDuringAProbePreventsSubsequentFileIo() {
+        var needed = true
+        var reads = 0
+        val files = object : ProbeFileSystem {
+            override fun read(path: String): ProbeRead { reads++; needed = false; return ProbeRead.Missing }
+            override fun listDirectories(parent: String): List<String> = error("Cancelled sampling must not scan")
+        }
+        val result = DeviceUsageSampler(files).sample(NpuSource.ALL, 1, UsageMetrics(false, false, true)) { needed }
+        assertEquals(1, reads)
+        assertTrue(result.npuResults.flatMap { it.evidence }.any { it.state == NpuProbeState.CANCELLED })
+    }
+
+    @Test
+    fun disappearingRockchipProcfsValueIsStaleEvenWhenDebugfsRemainsDenied() {
+        val debug = "/sys/kernel/debug/rknpu/load"
+        val proc = "/proc/rknpu/load"
+        val files = FakeFiles(mutableMapOf(debug to ProbeRead.PermissionDenied, proc to ProbeRead.Content("NPU load: 35%\n")))
+        val sampler = DeviceUsageSampler(files)
+        val onlyNpu = UsageMetrics(false, false, true)
+        assertEquals(35f, sampler.sample(NpuSource.ROCKCHIP, 1_000_000_000, onlyNpu).npuPercent!!, .01f)
+        files.files.remove(proc)
+        val stale = sampler.sample(NpuSource.ROCKCHIP, 2_000_000_000, onlyNpu)
+        assertEquals(NpuProbeState.STALE, stale.npu!!.state)
+        assertEquals(proc, stale.npu!!.sourcePath)
+        assertEquals(35f, stale.npuPercent!!, .01f)
+        assertTrue(stale.npuResults.flatMap { it.evidence }.any { it.path == proc && it.state == NpuProbeState.MISSING })
     }
 }

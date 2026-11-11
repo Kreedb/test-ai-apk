@@ -3,14 +3,20 @@ package com.example.minimalapk.diagnostics
 import android.util.Base64
 import androidx.test.platform.app.InstrumentationRegistry
 import com.example.minimalapk.models.ConfiguredModel
+import com.example.minimalapk.models.ConfiguredModelStore
 import com.example.minimalapk.models.ModelConfig
 import com.example.minimalapk.models.OutputRender
 import com.example.minimalapk.pose.TfliteGraph
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import java.io.File
 import java.io.RandomAccessFile
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.CancellationException
 
 class ModelSelfCheckTest {
     @Test
@@ -26,6 +32,42 @@ class ModelSelfCheckTest {
     @Test
     fun largeModelRuntimeInspectionDoesNotCacheTheExecutionOutputShape() {
         checkDynamicOutput("infer", large = true)
+    }
+
+    @Test
+    fun deletingConfiguredTargetWaitsForSelfCheckNativeBorrowAndSuppressesPass() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val directory = File(context.cacheDir, "delete-self-check-${System.nanoTime()}").apply { mkdirs() }
+        val pool = Executors.newFixedThreadPool(2)
+        val preparing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        try {
+            val model = ConfiguredModelStore.install(directory, "where", Base64.decode(WHERE_MODEL, Base64.DEFAULT))
+            val graph = ConfiguredModelStore.describe(model).signatures.first()
+            val config = ModelConfig.infer(graph).copy(outputs = listOf(com.example.minimalapk.models.TensorOutputConfig()))
+            ConfiguredModelStore.saveConfig(model, config.encode(), ConfiguredModelStore.describe(model))
+            val check = pool.submit<Boolean> {
+                try {
+                    ModelSelfCheck(context, CheckTarget("where", "WHERE", CheckKind.CONFIGURED, file = model.file, configured = model),
+                        checkpoint = {}, log = {}, onStage = { stage ->
+                            if (stage == "prepare") { preparing.countDown(); assertTrue(release.await(10, TimeUnit.SECONDS)) }
+                        }).run()
+                    false
+                } catch (_: CancellationException) { true }
+            }
+            assertTrue(preparing.await(10, TimeUnit.SECONDS))
+            val before = ConfiguredModelStore.revision.value
+            val deletion = pool.submit { ConfiguredModelStore.delete(model) }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (ConfiguredModelStore.revision.value == before && System.nanoTime() < deadline) Thread.yield()
+            assertTrue(ConfiguredModelStore.revision.value > before)
+            assertTrue(model.file.isFile)
+            assertFalse(deletion.isDone)
+            release.countDown()
+            assertTrue(check.get(10, TimeUnit.SECONDS))
+            deletion.get(10, TimeUnit.SECONDS)
+            assertFalse(model.file.exists())
+        } finally { release.countDown(); pool.shutdownNow(); directory.deleteRecursively() }
     }
 
     private fun checkDynamicOutput(signature: String, large: Boolean = false) {

@@ -43,7 +43,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.minimalapk.examples.ExampleCatalog
 import com.example.minimalapk.examples.ExampleModel
 import com.example.minimalapk.examples.personalizationCheckpoint
-import com.example.minimalapk.plugins.AudioClassificationSettings
+import com.example.minimalapk.plugins.AUDIO_WAV_URI_KEY
+import com.example.minimalapk.plugins.audioUsesMicrophone
 import com.example.minimalapk.plugins.ExampleSceneSpec
 import com.example.minimalapk.plugins.ExampleScenes
 import com.example.minimalapk.plugins.PluginIds
@@ -52,8 +53,6 @@ import com.example.minimalapk.plugins.LocalTextPlugin
 import com.example.minimalapk.plugins.PluginSettings
 import com.example.minimalapk.plugins.PluginSettingsStore
 import com.example.minimalapk.plugins.PoseEnhancementSettings
-import com.example.minimalapk.plugins.SceneThresholdSettings
-import com.example.minimalapk.plugins.SCENE_THRESHOLD_KEY
 import com.example.minimalapk.plugins.SuperResolutionSettings
 import com.example.minimalapk.plugins.SystemMonitorSettings
 import com.example.minimalapk.pose.ModelStore
@@ -132,7 +131,11 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
         item {
             PluginCard(
                 name = "声音识别",
-                status = if (audioClassification.enabled) "已启用 · 在相机中辨识周围声音" else "已停用 · 说话、音乐与环境声分类",
+                status = "${if (audioClassification.enabled) "已启用" else "已停用"} · " + when {
+                    audioUsesMicrophone(audioClassification) -> "共享麦克风 · 说话、音乐与环境声分类"
+                    audioClassification.config[AUDIO_WAV_URI_KEY].isNullOrBlank() -> "WAV 文件 · 待选择文件（不录音）"
+                    else -> "WAV 文件 · 返回相机点击识别（不录音）"
+                },
                 enabled = audioClassification.enabled,
                 onEnabledChange = { store.setEnabled(PluginIds.AUDIO_CLASSIFICATION, it) },
                 onConfigure = { configureAudio = true },
@@ -229,7 +232,7 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
     configureScene?.let { id ->
         val spec = ExampleScenes.all.firstOrNull { it.id == id }
         if (spec != null) {
-            ScenePluginDialog(
+            ExampleSceneSettingsDialog(
                 spec = spec,
                 settings = settings.getValue(id),
                 onSave = { config ->
@@ -241,10 +244,10 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
         }
     }
     if (configureAudio) {
-        AudioClassificationDialog(
+        AudioClassificationSettingsDialog(
             settings = audioClassification,
             onSave = {
-                store.configure(PluginIds.AUDIO_CLASSIFICATION, it.toConfig())
+                store.configure(PluginIds.AUDIO_CLASSIFICATION, it)
                 configureAudio = false
             },
             onDismiss = { configureAudio = false },
@@ -297,104 +300,6 @@ private fun personalizationStatus(context: Context, settings: PluginSettings): S
 }
 
 @Composable
-private fun ScenePluginDialog(
-    spec: ExampleSceneSpec,
-    settings: PluginSettings,
-    onSave: (Map<String, String>) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var thresholdText by rememberSaveable {
-        mutableStateOf(settings.config[SCENE_THRESHOLD_KEY] ?: spec.recommendedThreshold.toString())
-    }
-    val threshold = thresholdText.toFloatOrNull()
-    val valid = !spec.thresholdEnabled || threshold != null &&
-        threshold in SceneThresholdSettings.MIN_THRESHOLD..SceneThresholdSettings.MAX_THRESHOLD
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(spec.name) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(spec.description, style = MaterialTheme.typography.bodySmall)
-                ExampleModelSection(spec.example)
-                if (spec.thresholdEnabled) {
-                    OutlinedTextField(
-                        value = thresholdText,
-                        onValueChange = { thresholdText = it.filter { char -> char.isDigit() || char == '.' }.take(4) },
-                        label = { Text("模型得分阈值") }, singleLine = true, isError = !valid,
-                        supportingText = { Text("0.05–0.95；调高可减少不确定的识别结果") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                Text(
-                    "启用后返回相机即可看到结果。首次使用需要下载模型；下载完成后可离线使用。" +
-                        "同时开启多个模型会增加耗时，关闭插件即可清除对应结果。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(enabled = valid, onClick = {
-                onSave(
-                    if (spec.thresholdEnabled) SceneThresholdSettings(thresholdText).toConfig() else emptyMap(),
-                )
-            }) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
-}
-
-@Composable
-private fun AudioClassificationDialog(
-    settings: PluginSettings,
-    onSave: (AudioClassificationSettings) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var topKText by rememberSaveable { mutableStateOf(AudioClassificationSettings.from(settings).topKText) }
-    val topK = topKText.toIntOrNull()
-    val valid = topK != null && topK in AudioClassificationSettings.MIN_TOP_K..AudioClassificationSettings.MAX_TOP_K
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("声音识别") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("辨识周围的说话声、音乐、动物叫声与环境声。开启后返回相机并授予麦克风权限，每秒更新识别结果。", style = MaterialTheme.typography.bodySmall)
-                ExampleModelSection(ExampleCatalog.audio)
-                OutlinedTextField(
-                    value = topKText, onValueChange = { topKText = it.filter(Char::isDigit).take(1) },
-                    label = { Text("显示类别数") }, singleLine = true, isError = !valid,
-                    supportingText = { Text("1–5；每类显示名称和置信度") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Text(
-                    "只识别声音类别，不转写讲话内容；不保存录音。离开相机或关闭插件会停止监听。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(enabled = valid, onClick = { onSave(AudioClassificationSettings(topKText)) }) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
-}
-
-@Composable
-private fun ExampleModelSection(example: ExampleModel) {
-    val context = LocalContext.current
-    val cached = exampleCached(context, example)
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("模型：${example.name}（约 ${example.sizeBytes / 1024 / 1024} MB）", style = MaterialTheme.typography.titleSmall)
-        Text(
-            if (cached) "模型已缓存，启用时检查完整性"
-            else "首次启用时自动下载，也可在自定义模型 → 从远程下载模型中下载",
-            style = MaterialTheme.typography.bodySmall,
-        )
-    }
-}
-
-@Composable
 private fun ConfiguredModelDialog(
     onDismiss: () -> Unit,
 ) {
@@ -408,6 +313,7 @@ private fun ConfiguredModelDialog(
                     specs = updated
                     ModelStore.save(context, updated)
                 },
+                onSpecsReload = { specs = it },
                 onBack = onDismiss,
                 title = "自定义模型",
             )
@@ -538,7 +444,7 @@ private fun SystemMonitorDialog(
                 Text("显示指标", style = MaterialTheme.typography.titleSmall)
                 TextButton(onClick = onCompare) { Text("比较 CPU / GPU / NPU（内置 YOLO26n）") }
                 Text("同一内置模型与固定合成输入；每后端预热 1 次、测量 3 次，包含读回。返回相机执行，可取消；GPU/NPU 可混合 CPU，实际硬件未必可证明。", style = MaterialTheme.typography.bodySmall)
-                PluginSwitchRow("帧率", "相机帧率，来自帧时间戳", showFps) { showFps = it }
+                PluginSwitchRow("帧率", "实际处理的相机帧流（非传感器标称帧率）", showFps) { showFps = it }
                 PluginSwitchRow("耗时", "主姿态链路 / 同步帧处理 / 异步最近完成（分别显示）", showTimings) { showTimings = it }
                 PluginSwitchRow("后端", "主姿态后端；GPU/NPU 实际分区可能未知", showBackend) { showBackend = it }
                 PluginSwitchRow("CPU", "本应用占设备总 CPU 算力", showCpu) { showCpu = it }
@@ -569,7 +475,7 @@ private fun SystemMonitorDialog(
                     TextButton(onClick = { showSourceOptions = true }) { Text("选择") }
                 }
                 Text(
-                    "自动只尝试有百分比语义的来源；指定方案可单独确认设备是否可读；测试全部会逐个报告状态与原文摘要，不会把不可用写成 0%。",
+                    "自动优先有已验证语义的来源，未知 load 保留 raw；指定方案可单独确认设备是否可读。开启 NPU 并选“测试全部”，保存返回相机后点击“复制完整 NPU 诊断”，包含每条来源原文、失败原因与读取限制；空闲/推理时各复制一次。诊断不写日志、不上传。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

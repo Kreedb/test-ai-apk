@@ -55,6 +55,21 @@ class ExampleSceneSemanticsTest {
         assertNull(points[9])
         assertNull(points[10])
         assertNull(armPosition(points, 400, 200))
+        assertTrue(moveNetConfidenceMessage(points).contains("4/6"))
+        assertTrue(moveNetConfidenceMessage(points).contains("50%"))
+        values[0] = .5
+        values[2] = 2.0
+        assertThrows(IllegalArgumentException::class.java) { moveNetPoints(values, fit, .3f) }
+    }
+
+    @Test
+    fun maskOpacityOnlyAcceptsFiniteDisplayValuesWithoutReusingOldLogitThreshold() {
+        val legacy = PluginSettings(config = mapOf(SCENE_THRESHOLD_KEY to ".9"))
+        assertEquals(120f / 255, sceneMaskOpacity(legacy), 0f)
+        assertEquals(.25f, sceneMaskOpacity(legacy.copy(config = legacy.config + (SCENE_MASK_OPACITY_KEY to ".25"))), 0f)
+        listOf("NaN", "Infinity", ".01", "1", "").forEach { invalid ->
+            assertEquals(120f / 255, sceneMaskOpacity(PluginSettings(config = mapOf(SCENE_MASK_OPACITY_KEY to invalid))), 0f)
+        }
     }
 
     @Test

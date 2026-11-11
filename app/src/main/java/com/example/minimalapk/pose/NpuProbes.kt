@@ -1,7 +1,5 @@
 package com.example.minimalapk.pose
 
-import java.io.File
-import java.nio.charset.StandardCharsets
 import java.util.Locale
 
 /** One selectable NPU source. AUTO only chooses among percentage schemes; ALL is a diagnosis run. */
@@ -45,6 +43,9 @@ internal enum class NpuProbeState(val label: String) {
     UNSUPPORTED("unsupported"),
     PARSE_ERROR("parse_error"),
     STALE("stale"),
+    TRUNCATED("truncated"),
+    TIMEOUT("timeout"),
+    CANCELLED("cancelled"),
 }
 
 /** One additional attribute read from the same source, e.g. Samsung `load` / `fps_load`. */
@@ -69,78 +70,25 @@ internal data class NpuProbeResult(
     val readings: List<NpuReading> = emptyList(),
     val rawExcerpt: String? = null,
     val detail: String? = null,
+    /** Complete bounded reads, including discovery/failures; never routed through message limits. */
+    val evidence: List<ProbeEvidence> = emptyList(),
 )
-
-internal sealed interface ProbeRead {
-    data class Content(val text: String) : ProbeRead
-    data object Missing : ProbeRead
-    data object PermissionDenied : ProbeRead
-    data class Failure(val message: String) : ProbeRead
-}
-
-/** Small filesystem seam so all parsers and states are exercised on the JVM. */
-internal interface ProbeFileSystem {
-    fun read(path: String): ProbeRead
-    fun listDirectories(parent: String): List<String>
-}
-
-internal object RealProbeFileSystem : ProbeFileSystem {
-    override fun read(path: String): ProbeRead {
-        val file = File(path)
-        if (!file.exists()) {
-            // Java reports EACCES as "missing"; a closer existing parent that is unreadable is a
-            // clearer permission_denied signal, especially for 0400 debugfs files.
-            return if (hasUnreadableParent(file)) ProbeRead.PermissionDenied else ProbeRead.Missing
-        }
-        if (!file.canRead()) return ProbeRead.PermissionDenied
-        return try {
-            file.inputStream().use { input ->
-                val buffer = ByteArray(MAX_PROBE_BYTES)
-                val count = input.read(buffer)
-                if (count <= 0) ProbeRead.Content("")
-                else ProbeRead.Content(String(buffer, 0, count, StandardCharsets.UTF_8))
-            }
-        } catch (_: SecurityException) {
-            ProbeRead.PermissionDenied
-        } catch (error: Exception) {
-            ProbeRead.Failure(error.message ?: "读取失败")
-        }
-    }
-
-    override fun listDirectories(parent: String): List<String> {
-        val directory = File(parent)
-        if (!directory.exists() || !directory.canRead()) return emptyList()
-        return try {
-            directory.listFiles()?.asSequence()
-                ?.filter { it.isDirectory }
-                ?.take(MAX_PROBE_DIRECTORIES)
-                ?.map { it.absolutePath }
-                ?.toList()
-                ?: emptyList()
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
-    private fun hasUnreadableParent(file: File): Boolean {
-        var parent = file.parentFile
-        var depth = 0
-        while (parent != null && depth++ < 4) {
-            if (parent.exists()) return !parent.canRead()
-            parent = parent.parentFile
-        }
-        return false
-    }
-
-    private const val MAX_PROBE_BYTES = 4096
-    private const val MAX_PROBE_DIRECTORIES = 64
-}
 
 /** Pure, bounded NPU probes. Only documented vendor contracts produce percentages. Generic
  * load attributes remain raw diagnostics: their names, numeric range or `%` suffix do not prove
  * what the driver measures. Frequency/address/trans_stat are never treated as utilization.
  */
-internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFileSystem) {
+internal class NpuProbeReader(
+    private val files: ProbeFileSystem = RealProbeFileSystem,
+    private val clock: () -> Long = System::nanoTime,
+) {
+    fun probe(source: NpuSource, nowNanos: Long, stillNeeded: () -> Boolean = { true }): List<NpuProbeResult> =
+        NpuProbeRun(ProbeRunFileSystem(files, clock, stillNeeded)).probe(source, nowNanos)
+
+    fun probeAll(nowNanos: Long): List<NpuProbeResult> = probe(NpuSource.ALL, nowNanos)
+}
+
+private class NpuProbeRun(private val files: ProbeRunFileSystem) {
     fun probe(source: NpuSource, nowNanos: Long): List<NpuProbeResult> = when (source) {
         NpuSource.AUTO -> probeAuto(nowNanos)
         NpuSource.ALL -> probeAll(nowNanos)
@@ -148,9 +96,10 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
     }
 
     fun probeAll(nowNanos: Long): List<NpuProbeResult> = buildList {
-        usageSchemes.forEach { addAll(probeScheme(it, nowNanos)) }
-        addAll(probeQualcomm(nowNanos))
-        add(probeCounterDelta(nowNanos))
+        // Known contracts first so raw discovery cannot consume the budget before real values.
+        autoOrder.forEach { addAll(probeScheme(it, nowNanos)) }
+        addAll(probeScheme(NpuProbeScheme.QUALCOMM_DIAGNOSTIC, nowNanos))
+        addAll(probeScheme(NpuProbeScheme.COUNTER_DELTA, nowNanos))
     }
 
     private fun probeAuto(nowNanos: Long): List<NpuProbeResult> {
@@ -163,13 +112,30 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
         return results
     }
 
-    private fun probeScheme(scheme: NpuProbeScheme, nowNanos: Long): List<NpuProbeResult> = when (scheme) {
-        NpuProbeScheme.VENDOR_PERCENT -> probeVendor(nowNanos)
-        NpuProbeScheme.DEVFREQ -> probeDevfreq(nowNanos)
-        NpuProbeScheme.ROCKCHIP -> probeRockchip(nowNanos)
-        NpuProbeScheme.SAMSUNG_RQ_LOAD -> probeSamsung(nowNanos)
-        NpuProbeScheme.QUALCOMM_DIAGNOSTIC -> probeQualcomm(nowNanos)
-        NpuProbeScheme.COUNTER_DELTA -> listOf(probeCounterDelta(nowNanos))
+    private fun probeScheme(scheme: NpuProbeScheme, nowNanos: Long): List<NpuProbeResult> {
+        val start = files.evidence.size
+        val results = when (scheme) {
+            NpuProbeScheme.VENDOR_PERCENT -> probeVendor(nowNanos)
+            NpuProbeScheme.DEVFREQ -> probeDevfreq(nowNanos)
+            NpuProbeScheme.ROCKCHIP -> probeRockchip(nowNanos)
+            NpuProbeScheme.SAMSUNG_RQ_LOAD -> probeSamsung(nowNanos)
+            NpuProbeScheme.QUALCOMM_DIAGNOSTIC -> probeQualcomm(nowNanos)
+            NpuProbeScheme.COUNTER_DELTA -> listOf(probeCounterDelta(nowNanos))
+        }
+        // The small panel may collapse missing candidates, but the copy action retains EVERY
+        // attempted path, directory failure and exact bounded read, not only the winning node.
+        val evidence = files.evidence.drop(start)
+        return results.mapIndexed { index, result ->
+            // Direct node results own their read; the first also owns discovery/auxiliary reads.
+            if (index != 0) result.copy(evidence = evidence.filter { it.path == result.sourcePath }) else {
+                val discoveryFailure = evidence.firstOrNull {
+                    it.state in setOf(NpuProbeState.PERMISSION_DENIED, NpuProbeState.TIMEOUT, NpuProbeState.TRUNCATED)
+                }.takeIf { result.state == NpuProbeState.UNSUPPORTED && result.rawExcerpt == null }
+                if (discoveryFailure == null) result.copy(evidence = evidence)
+                else result.copy(state = discoveryFailure.state, sourcePath = discoveryFailure.path,
+                    detail = discoveryFailure.detail ?: "设备发现失败：${discoveryFailure.state.label}", evidence = evidence)
+            }
+        }
     }
 
     /** Keep the persisted scheme ID, but neither legacy path has a verified percentage contract. */
@@ -224,7 +190,7 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
                 }
                 ProbeRead.Missing -> diagnostic(NpuProbeState.MISSING)
                 ProbeRead.PermissionDenied -> diagnostic(NpuProbeState.PERMISSION_DENIED)
-                is ProbeRead.Failure -> diagnostic(NpuProbeState.PARSE_ERROR, detail = read.message)
+                is ProbeRead.Failure -> diagnostic(read.state, detail = read.message)
             }
         }
         return results.filter { it.state != NpuProbeState.MISSING }.ifEmpty { results.take(1) }
@@ -237,41 +203,32 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
      * drivers/rknpu/rknpu_debugger.c:27–75 (issue #66).
      */
     private fun probeRockchip(nowNanos: Long): List<NpuProbeResult> {
-        var failure: NpuProbeResult? = null
-        for (path in ROCKCHIP_LOAD_NODES) {
+        val results = ROCKCHIP_LOAD_NODES.map { path ->
             when (val read = files.read(path)) {
                 is ProbeRead.Content -> {
                     val parsed = parseRockchipLoad(read.text)
-                    if (parsed != null) return listOf(result(
+                    if (parsed != null) result(
                         NpuProbeScheme.ROCKCHIP, path, parsed.average, "%", LOAD_SCOPE, nowNanos,
                         perCore = parsed.perCore,
                         detail = parsed.coreIndexes.zip(parsed.perCore)
                             .joinToString(" ") { (core, load) -> "Core$core=${formatNumber(load)}%" },
                         rawExcerpt = excerpt(read.text),
-                    ))
-                    if (failure == null || failure.state == NpuProbeState.MISSING) {
-                        failure = stateResult(
-                            NpuProbeScheme.ROCKCHIP, path, NpuProbeState.PARSE_ERROR, nowNanos,
-                            excerpt = excerpt(read.text), detail = "不是 `NPU load: CoreN: x%` 格式",
-                        )
-                    }
-                }
-                ProbeRead.Missing -> if (failure == null) {
-                    failure = stateResult(NpuProbeScheme.ROCKCHIP, path, NpuProbeState.MISSING, nowNanos)
-                }
-                ProbeRead.PermissionDenied -> failure =
-                    stateResult(NpuProbeScheme.ROCKCHIP, path, NpuProbeState.PERMISSION_DENIED, nowNanos)
-                is ProbeRead.Failure -> if (failure == null || failure.state == NpuProbeState.MISSING) {
-                    failure = stateResult(
+                    ) else stateResult(
                         NpuProbeScheme.ROCKCHIP, path, NpuProbeState.PARSE_ERROR, nowNanos,
-                        detail = read.message,
+                        excerpt = excerpt(read.text), detail = "不是完整的 `NPU load: x%` / `NPU load: CoreN: x%` 格式",
                     )
                 }
+                ProbeRead.Missing -> stateResult(NpuProbeScheme.ROCKCHIP, path, NpuProbeState.MISSING, nowNanos)
+                ProbeRead.PermissionDenied ->
+                    stateResult(NpuProbeScheme.ROCKCHIP, path, NpuProbeState.PERMISSION_DENIED, nowNanos)
+                is ProbeRead.Failure -> stateResult(
+                    NpuProbeScheme.ROCKCHIP, path, read.state, nowNanos, detail = read.message,
+                )
             }
         }
-        return listOf(failure ?: stateResult(
-            NpuProbeScheme.ROCKCHIP, ROCKCHIP_LOAD_NODES.last(), NpuProbeState.MISSING, nowNanos,
-        ))
+        // Keep both locations even when one disappears: the sampler's last-good cache is keyed
+        // by actual source path, so collapsing a missing procfs path would lose its stale value.
+        return results
     }
 
     /** Samsung Exynos npu-scheduler.c registers `rq_load` on the NPU device. Raw 0–10000 is
@@ -289,19 +246,23 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
                 detail = "未发现名称含 npu/nna 的 NPU 设备",
             ))
         }
-        var failure: NpuProbeResult? = null
+        val results = mutableListOf<NpuProbeResult>()
         for (device in devices) {
             val path = "$device/rq_load"
             when (val read = files.read(path)) {
                 is ProbeRead.Content -> {
+                    if (!isSamsungIdentity(device)) {
+                        results += stateResult(NpuProbeScheme.SAMSUNG_RQ_LOAD, path, NpuProbeState.UNSUPPORTED, nowNanos,
+                            excerpt = excerpt(read.text), unit = "raw",
+                            detail = "发现 rq_load，但未确认 Samsung exynos-npu 驱动身份，不推定 0.01% 单位")
+                        continue
+                    }
                     val percent = parseSamsungRqLoad(read.text)
                     if (percent == null) {
-                        if (failure == null || failure.state == NpuProbeState.MISSING) {
-                            failure = stateResult(
-                                NpuProbeScheme.SAMSUNG_RQ_LOAD, path, NpuProbeState.PARSE_ERROR, nowNanos,
-                                excerpt = excerpt(read.text), detail = "rq_load 必须是 0–10000 的原始值",
-                            )
-                        }
+                        results += stateResult(
+                            NpuProbeScheme.SAMSUNG_RQ_LOAD, path, NpuProbeState.PARSE_ERROR, nowNanos,
+                            excerpt = excerpt(read.text), detail = "rq_load 必须是 0–10000 的原始整数值",
+                        )
                         continue
                     }
                     val readings = mutableListOf(NpuReading(
@@ -313,31 +274,36 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
                     readNumber(device, "fps_load")?.let { (value, raw) ->
                         readings += NpuReading("fps_load（执行时间/目标帧时间）", value, "raw", raw)
                     }
-                    val policy = readText(device, "load_policy")
-                    return listOf(result(
+                    val policyRaw = readText(device, "load_policy")
+                    val policy = policyRaw?.let(::parseSamsungLoadPolicy)
+                    // These are read-only scheduler diagnostics, never requests to enable it.
+                    val enabled = readText(device, "scheduler_enable")
+                    readText(device, "timestamp")
+                    val reading = result(
                         NpuProbeScheme.SAMSUNG_RQ_LOAD, path, percent, "%",
                         "NPU 请求队列忙碌率", nowNanos, readings = readings,
-                        detail = "load_policy=${policy ?: "未知"}；load 受策略影响，fps_load 为执行时间/目标帧时间，均不并入 rq_load",
-                    ))
+                        rawExcerpt = excerpt(read.text),
+                        detail = "load_policy=${policy?.let { "${it.id} ${it.label}" } ?: "未知"}；load 受策略影响，fps_load 为执行时间/目标帧时间，均不并入 rq_load",
+                    )
+                    results += if (enabled == "0") reading.copy(state = NpuProbeState.STALE,
+                        detail = "scheduler_enable=0，调度器停止更新；${reading.detail}") else reading
                 }
-                ProbeRead.Missing -> if (failure == null) {
-                    failure = stateResult(
-                        NpuProbeScheme.SAMSUNG_RQ_LOAD, device, NpuProbeState.MISSING, nowNanos,
+                ProbeRead.Missing -> {
+                    results += stateResult(
+                        NpuProbeScheme.SAMSUNG_RQ_LOAD, path, NpuProbeState.MISSING, nowNanos,
                     )
                 }
-                ProbeRead.PermissionDenied -> failure =
+                ProbeRead.PermissionDenied -> results +=
                     stateResult(NpuProbeScheme.SAMSUNG_RQ_LOAD, path, NpuProbeState.PERMISSION_DENIED, nowNanos)
-                is ProbeRead.Failure -> if (failure == null || failure.state == NpuProbeState.MISSING) {
-                    failure = stateResult(
-                        NpuProbeScheme.SAMSUNG_RQ_LOAD, path, NpuProbeState.PARSE_ERROR, nowNanos,
+                is ProbeRead.Failure -> {
+                    results += stateResult(
+                        NpuProbeScheme.SAMSUNG_RQ_LOAD, path, read.state, nowNanos,
                         detail = read.message,
                     )
                 }
             }
         }
-        return listOf(failure ?: stateResult(
-            NpuProbeScheme.SAMSUNG_RQ_LOAD, devices.first(), NpuProbeState.MISSING, nowNanos,
-        ))
+        return results.filter { it.state != NpuProbeState.MISSING }.ifEmpty { results.take(1) }
     }
 
     /** qcom_stats.c creates debug-only cdsp/cdsp1 files (0400). Accumulated Duration is hardware
@@ -376,7 +342,7 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
                 unit = "ticks", scope = QUALCOMM_SCOPE,
             )
             is ProbeRead.Failure -> stateResult(
-                NpuProbeScheme.QUALCOMM_DIAGNOSTIC, path, NpuProbeState.PARSE_ERROR, nowNanos,
+                NpuProbeScheme.QUALCOMM_DIAGNOSTIC, path, read.state, nowNanos,
                 detail = read.message, unit = "ticks", scope = QUALCOMM_SCOPE,
             )
         }
@@ -387,16 +353,27 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
      */
     private fun probeCounterDelta(nowNanos: Long): NpuProbeResult = stateResult(
         NpuProbeScheme.COUNTER_DELTA, null, NpuProbeState.UNSUPPORTED, nowNanos,
-        detail = "未找到可证明会更新且对普通 App 导出的 busy/total 计数；不使用 Rockchip devfreq 固定 1/1 占位",
+        unit = "raw",
+        detail = "未找到可证明会更新且对普通 App 导出的 busy/total 计数；不使用 Rockchip devfreq 固定 1/1 占位；已核查 MSM NPU sysfs/debugfs 仅有能力、功耗状态、控制和寄存器调试节点",
     )
 
     private fun isNpuIdentity(path: String): Boolean {
         val base = path.substringAfterLast('/').lowercase(Locale.US)
+        if (NPU_IDENTITY.containsMatchIn(base)) return true
         val name = (files.read("$path/name") as? ProbeRead.Content)?.text?.lowercase(Locale.US).orEmpty()
-        return base.contains("npu") || base.contains("nna") || name.contains("npu") || name.contains("nna")
+        if (NPU_IDENTITY.containsMatchIn(name)) return true
+        // Numeric devfreq names do occur. Device-tree identity is evidence; the address is not.
+        return listOf("device/of_node/compatible", "of_node/compatible").any { attribute ->
+            val identity = (files.read("$path/$attribute") as? ProbeRead.Content)?.text.orEmpty()
+            NPU_IDENTITY.containsMatchIn(identity.lowercase(Locale.US))
+        }
     }
 
     private fun npuDeviceCandidates(): List<String> {
+        // npu-scheduler registers attributes on pdev->dev, not on the devfreq device. The
+        // documented platform driver's bound-device directory discovers the real address.
+        val bound = files.listDirectories(SAMSUNG_DRIVER).filter { it.substringAfterLast('/') != "module" }
+        if (bound.isNotEmpty()) return bound
         val roots = listOf(DEV_FREQ, NPU_CLASS, MISC_CLASS)
         val devices = roots.flatMap { root ->
             files.listDirectories(root).filter { directory ->
@@ -409,6 +386,12 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
         }.distinct()
         return devices.flatMap { listOf(it, "$it/device") }.distinct()
     }
+
+    private fun isSamsungIdentity(path: String): Boolean = path.startsWith("$SAMSUNG_DRIVER/") ||
+        readText(path, "name")?.trim() == "exynos-npu" ||
+        listOf("of_node/compatible", "device/of_node/compatible").any { name ->
+            readText(path, name)?.split('\u0000')?.any { it == "samsung,exynos-npu" } == true
+        }
 
     private fun readText(base: String, name: String): String? =
         (files.read("$base/$name") as? ProbeRead.Content)?.text?.trim()?.takeIf { it.isNotEmpty() }
@@ -449,12 +432,6 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
         rawExcerpt = excerpt, detail = detail,
     )
 
-    private val usageSchemes = listOf(
-        NpuProbeScheme.VENDOR_PERCENT,
-        NpuProbeScheme.DEVFREQ,
-        NpuProbeScheme.ROCKCHIP,
-        NpuProbeScheme.SAMSUNG_RQ_LOAD,
-    )
     private val autoOrder = listOf(
         NpuProbeScheme.ROCKCHIP,
         NpuProbeScheme.SAMSUNG_RQ_LOAD,
@@ -466,8 +443,10 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
         const val DEV_FREQ = "/sys/class/devfreq"
         const val NPU_CLASS = "/sys/class/npu"
         const val MISC_CLASS = "/sys/class/misc"
+        const val SAMSUNG_DRIVER = "/sys/bus/platform/drivers/exynos-npu"
         const val LOAD_SCOPE = "NPU 负载"
         const val QUALCOMM_SCOPE = "DSP 睡眠统计（非利用率）"
+        val NPU_IDENTITY = Regex("(?:^|[^a-z])(?:rknpu|npu|nna)(?:[0-9]|[^a-z]|$)")
 
         val VENDOR_LOAD_NODES = listOf(
             "/sys/class/misc/npu/device/load",
@@ -491,14 +470,22 @@ internal data class RockchipLoad(val coreIndexes: List<Int>, val perCore: List<F
 
 /** One parser shared by RKNPU debugfs and procfs. A missing number is zero, not the core index. */
 internal fun parseRockchipLoad(raw: String): RockchipLoad? {
-    if (!raw.contains("NPU load", ignoreCase = true)) return null
+    val body = ROCKCHIP_HEADER.matchEntire(raw.trim())?.groupValues?.get(1) ?: return null
+    // The same fixed driver omits Core0 when num_irqs == 1, including its whitespace-zero form.
+    ROCKCHIP_SINGLE.matchEntire(body)?.let { match ->
+        val text = match.groupValues[1]
+        val value = if (text.isEmpty()) 0f else text.toFloatOrNull() ?: return null
+        return value.takeIf { it in 0f..100f }?.let { RockchipLoad(listOf(0), listOf(it)) }
+    }
     val cores = mutableMapOf<Int, Float>()
-    for (match in ROCKCHIP_CORE.findAll(raw)) {
+    val parts = body.trim().removeSuffix(",").split(',')
+    for (part in parts) {
+        val match = ROCKCHIP_CORE.matchEntire(part.trim()) ?: return null
         val index = match.groupValues[1].toIntOrNull() ?: return null
         val text = match.groupValues[2]
         val value = if (text.isEmpty()) 0f else text.toFloatOrNull() ?: return null
         if (value !in 0f..100f) return null
-        cores[index] = value
+        if (cores.put(index, value) != null) return null
     }
     if (cores.isEmpty()) return null
     val ordered = cores.toSortedMap()
@@ -507,8 +494,23 @@ internal fun parseRockchipLoad(raw: String): RockchipLoad? {
 
 /** Samsung scheduler `rq_load`: raw 0–10000 in 0.01% units. */
 internal fun parseSamsungRqLoad(raw: String): Float? {
-    val value = raw.trim().toFloatOrNull() ?: return null
-    return (value / 100f).takeIf { value in 0f..10000f }
+    val value = raw.trim().toIntOrNull() ?: return null
+    return (value / 100f).takeIf { value in 0..10000 }
+}
+
+internal enum class SamsungLoadPolicy(val id: Int, val label: String) {
+    IDLE(0, "idle"), FPS(1, "fps"), RQ(2, "rq"), FPS_RQ(3, "fps-rq hybrid"),
+}
+
+/** Fixed npu-scheduler.c emits a menu, with only the selected entry prefixed by '*'. */
+internal fun parseSamsungLoadPolicy(raw: String): SamsungLoadPolicy? {
+    val scalar = raw.trim().toIntOrNull()
+    if (scalar != null) return SamsungLoadPolicy.entries.firstOrNull { it.id == scalar }
+    val selected = raw.lineSequence().map(String::trim).filter { it.startsWith('*') }.toList().singleOrNull() ?: return null
+    val match = Regex("""\*(\d+)\s+(.+)""").matchEntire(selected) ?: return null
+    return SamsungLoadPolicy.entries.firstOrNull {
+        it.id == match.groupValues[1].toIntOrNull() && it.label == match.groupValues[2]
+    }
 }
 
 internal fun parseRawNumber(raw: String): Float? =
@@ -519,4 +521,6 @@ internal fun excerpt(text: String?): String? =
 
 internal fun formatNumber(value: Float): String = String.format(Locale.US, "%.1f", value)
 
+private val ROCKCHIP_HEADER = Regex("""NPU load:\s*(.*)""", RegexOption.IGNORE_CASE)
+private val ROCKCHIP_SINGLE = Regex("""(\d{1,3}(?:\.\d+)?)?\s*%""")
 private val ROCKCHIP_CORE = Regex("""Core\s*(\d+)\s*:\s*(\d{1,3}(?:\.\d+)?)?\s*%""")

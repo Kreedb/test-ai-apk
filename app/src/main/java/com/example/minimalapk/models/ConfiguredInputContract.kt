@@ -15,6 +15,9 @@ internal data class ConfiguredInputContract(
 )
 
 internal fun configuredInputContract(config: ModelConfig, graph: GraphSignature): ConfiguredInputContract {
+    configuredExecutionProblem(config, graph)?.let {
+        return ConfiguredInputContract(ConfiguredInputMode.ON_DEMAND, "未就绪：$it；原模型和配置已保留，请调整配置或更换兼容运行时")
+    }
     if (config.inputs.isNotEmpty() && config.inputs.all { it.source == InputSource.IMAGE }) {
         return ConfiguredInputContract(ConfiguredInputMode.CAMERA, "相机图片实时运行；也可选择图片单次运行")
     }
@@ -39,6 +42,46 @@ internal fun configuredInputContract(config: ModelConfig, graph: GraphSignature)
     } else "请在模型配置填写 TEXT/NUMBERS 或选择文件后运行"
     return ConfiguredInputContract(ConfiguredInputMode.ON_DEMAND, "按需运行：$reason；保存并启用后结果显示在相机")
 }
+
+/** File facts plus this runner's actual protocol, not a claim that arbitrary operators will run. */
+internal fun configuredExecutionProblem(config: ModelConfig, graph: GraphSignature): String? = runCatching {
+    (graph.inputs + graph.outputs).forEach { tensor -> tensor.quantizationProblem?.let { error(it) } }
+    require(config.inputs.size == graph.inputs.size && config.outputs.size == graph.outputs.size) { "配置与签名的输入/输出数量不符" }
+    require(config.inputs.isNotEmpty()) { "当前 LiteRT Java API 不支持空输入签名" }
+    val numericTypes = setOf(0, 2, 3, 4, 6, 7, 9)
+    config.inputs.forEachIndexed { index, input ->
+        val tensor = graph.inputs[index]
+        validateInputShape(input.shape, tensor)
+        if (input.source == InputSource.AUDIO) configuredWaveformProblem(input, tensor)?.let { error(it) }
+        if (input.source == InputSource.TEXT) {
+            require(tensor.type == 5) { "输入 $index 不是 STRING；tokenizer 不会自动生成，请提供 NUMBERS/BINARY token 张量" }
+        } else {
+            require(tensor.type in numericTypes) { "输入 $index 的 ${tensor.typeName} 不支持 ${input.source} 转换" }
+        }
+        if (input.source == InputSource.IMAGE) imageDimensions(input)
+    }
+    require(config.inputs.sumOf { tensorElements(it.shape).toLong() } <= MAX_TENSOR_ELEMENTS) { "输入张量合计超过 $MAX_TENSOR_ELEMENTS 个元素" }
+    config.outputs.forEachIndexed { index, output ->
+        val tensor = graph.outputs[index]
+        require(tensor.type in numericTypes || tensor.type == 5) { "输出 $index 的 ${tensor.typeName} 尚不支持解码" }
+        require(tensor.type != 5 || output.render == OutputRender.VALUES) { "STRING 输出 $index 需要 VALUES 显示，不能当作数值/图片" }
+        if (output.render in listOf(OutputRender.MOVENET, OutputRender.BOXES)) {
+            require(config.inputs.any { it.source == InputSource.IMAGE }) { "${output.render} 输出需要 IMAGE 输入；其它输入请使用 VALUES 等显示" }
+        }
+        if (output.render == OutputRender.BOXES) {
+            require(listOf(output.classesOutput, output.scoresOutput, output.countOutput).all { it in graph.outputs.indices }) { "检测框关联输出索引越界" }
+        }
+        if (output.render == OutputRender.MOVENET) {
+            require(tensor.shape.size == 4 && listOf(1, 1, 17, 3).withIndex().all { (axis, dimension) ->
+                tensor.shape[axis] == dimension || tensor.signature.getOrNull(axis) == -1
+            }) { "MoveNet 输出需要 [1,1,17,3]" }
+        }
+        if (output.render in listOf(OutputRender.IMAGE, OutputRender.SEGMENTATION)) {
+            require(tensor.shape.size == 4 && (tensor.shape[0] == 1 || tensor.signature.getOrNull(0) == -1)) { "图片/分割输出需要 [1,H,W,C]" }
+            if (output.render == OutputRender.IMAGE) require(tensor.shape[3] in listOf(1, 3) || tensor.signature.getOrNull(3) == -1) { "图片输出需要 1 或 3 个通道" }
+        }
+    }
+}.exceptionOrNull()?.message
 
 /** Shared by WAV and microphone paths so a spectrogram-shaped tensor is never fed raw samples. */
 internal fun configuredWaveformProblem(input: TensorInputConfig, tensor: GraphTensor): String? {

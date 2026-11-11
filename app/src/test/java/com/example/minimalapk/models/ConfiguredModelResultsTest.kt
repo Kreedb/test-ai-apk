@@ -6,6 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.io.File
 
@@ -94,5 +95,48 @@ class ConfiguredModelResultsTest {
         assertEquals(ConfiguredResultPreview.MAX_TEXT, store.result.value!!.preview.text.length)
         store.begin(model, version, version.fingerprint)
         assertNull(store.result.value)
+    }
+
+    @Test
+    fun cancellingAnOldDialogCannotWithdrawANewerResultAndBackgroundRejectsLatePublish() {
+        val store = store()
+        val old = store.begin(model, version, version.fingerprint)!!
+        val fresh = store.begin(model, version, version.fingerprint)!!
+        store.cancel(old)
+        assertTrue(store.publish(fresh, version, preview))
+        store.cancel(old)
+        assertEquals(fresh, store.result.value!!.ticket)
+        store.cancel(fresh)
+        assertNull(store.result.value)
+        val background = store.begin(model, version, version.fingerprint)!!
+        store.cancel(background)
+        assertFalse(store.publish(background, version, preview))
+    }
+
+    @Test
+    fun masterSettingChangeCancelsActiveWorkButAnIdenticalCameraAttachDoesNot() {
+        var cancellations = 0
+        val store = ConfiguredResultStore { cancellations++ }
+        store.configure(settings)
+        assertEquals(1, cancellations)
+        store.configure(settings)
+        assertEquals(1, cancellations)
+        store.configure(settings.copy(enabled = false, revision = 3))
+        assertEquals(2, cancellations)
+    }
+
+    @Test
+    fun invalidationCancelsARegisteredRequestBeforeItsNativeRunnerStarts() {
+        val store = store()
+        val transfer = AssetTransfer()
+        val pending = store.begin(model, version, version.fingerprint, transfer::cancel)!!
+        store.invalidate(version.path)
+        assertThrows(java.util.concurrent.CancellationException::class.java) { transfer.checkpoint() }
+        assertFalse(store.publish(pending, version, preview))
+        val completed = AssetTransfer()
+        val next = store.begin(model, version, version.fingerprint, completed::cancel)!!
+        assertTrue(store.publish(next, version, preview))
+        store.cancel(next)
+        completed.checkpoint() // A finished run no longer owns cancellation resources.
     }
 }

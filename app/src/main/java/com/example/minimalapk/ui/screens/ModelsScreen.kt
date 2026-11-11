@@ -69,6 +69,7 @@ import com.example.minimalapk.pose.ModelSpec
 import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.OutputLayout
 import com.example.minimalapk.pose.PoseModelImport
+import com.example.minimalapk.pose.PoseModelAccess
 import com.example.minimalapk.pose.RemoteModel
 import com.example.minimalapk.pose.TfliteGraph
 import com.example.minimalapk.pose.knownSummary
@@ -79,6 +80,7 @@ import com.example.minimalapk.pose.validatePoseModelConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -88,6 +90,7 @@ import java.util.Locale
 internal fun ModelsScreen(
     specs: List<ModelSpec>,
     onSpecsChange: (List<ModelSpec>) -> Unit,
+    onSpecsReload: (List<ModelSpec>) -> Unit,
     onBack: () -> Unit,
     title: String = "模型",
 ) {
@@ -105,6 +108,7 @@ internal fun ModelsScreen(
     var downloadError by remember { mutableStateOf<String?>(null) }
     var lastAttempt by remember { mutableStateOf<RemoteModel?>(null) }
     var configuredModels by remember { mutableStateOf(emptyList<ConfiguredModel>()) }
+    var configuredStatus by remember { mutableStateOf(emptyMap<String, String>()) }
     var editingConfigured by remember { mutableStateOf<ConfiguredModel?>(null) }
     val directory = remember(context) { ConfiguredModelStore.directory(context) }
     // Imports run for seconds; use the latest list so a toggle made meanwhile is not discarded.
@@ -121,7 +125,12 @@ internal fun ModelsScreen(
     LaunchedEffect(directory) {
         ConfiguredModelStore.revision.collect {
             try {
-                configuredModels = withContext(Dispatchers.IO) { ConfiguredModelStore.list(directory) }
+                val loaded = withContext(Dispatchers.IO) {
+                    val models = ConfiguredModelStore.list(directory)
+                    models to models.associate { it.id to ConfiguredModelStore.readiness(it) }
+                }
+                configuredModels = loaded.first
+                configuredStatus = loaded.second
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -134,7 +143,13 @@ internal fun ModelsScreen(
         // Re-importing the same bytes keeps the existing toggles and corrected configuration.
         // The small accepted commit can outlive dismissal. Read the persisted latest list so an
         // immediately reopened dialog's toggles/deletions cannot be replaced by this old UI list.
-        onSpecsChange(ModelStore.withImported(ModelStore.load(context), spec))
+        synchronized(ModelStore) {
+            if (spec.imported) {
+                PoseModelAccess.checkAvailable(modelFile(context, spec))
+                check(modelFile(context, spec).isFile) { "该姿态模型已删除，本次旧导入不会恢复已删除记录" }
+            }
+            onSpecsChange(ModelStore.withImported(ModelStore.load(context), spec))
+        }
         status = message
     }
 
@@ -214,7 +229,7 @@ internal fun ModelsScreen(
         ) {
             item {
                 Text(
-                    text = "自定义模型总开关开启后，相机逐帧运行下方所有已启用的模型，无需另选模型。" +
+                    text = "自定义模型总开关开启后，已启用的图片模型逐帧运行，明确配置的单输入原始 AUDIO 接收共享麦克风；文本、数值与混合输入按需运行并回传相机，无需另选模型。" +
                         "姿态增强也可单独使用已启用的姿态模型。" +
                         "姿态模型最多同时开启 ${ModelStore.MAX_ENABLED} 个；模型越多帧率越低。点击卡片配置参数，音频等模型可在卡片内选择文件测试。",
                     style = MaterialTheme.typography.bodySmall,
@@ -278,7 +293,7 @@ internal fun ModelsScreen(
             items(configuredModels, key = { "configured:${it.id}" }) { model ->
                 ModelCard(
                     name = model.name,
-                    summary = "通用 TFLite · 点击配置输入、输出与标签",
+                    summary = "通用 TFLite · 点击配置输入、输出与标签\n${configuredStatus[model.id].orEmpty()}",
                     enabled = model.enabled,
                     onToggle = { enabled ->
                         scope.launch {
@@ -323,9 +338,29 @@ internal fun ModelsScreen(
                 editing = null
             },
             onDelete = {
-                PoseModelImport.delete(context, spec)
-                onSpecsChange(currentSpecs.filterNot { it.id == spec.id })
-                editing = null
+                if (!importing) {
+                    importing = true
+                    editing = null
+                    operation = scope.launch {
+                        try {
+                            runAssetTransfer { transfer -> PoseModelImport.delete(context, spec, transfer) }
+                            status = "已删除 ${spec.name}"
+                        } catch (error: CancellationException) {
+                            status = "已取消删除，未提交的模型与配置已保留"
+                            throw error
+                        } catch (error: Exception) {
+                            status = "删除失败：${error.message}"
+                        } finally {
+                            // The storage transaction owns registration. Even prompt cancellation
+                            // after commit must refresh from disk, never save a captured old list.
+                            withContext(NonCancellable) {
+                                onSpecsReload(withContext(Dispatchers.IO) { ModelStore.load(context) })
+                            }
+                            importing = false
+                            operation = null
+                        }
+                    }
+                }
             },
             onDismiss = { editing = null },
         )

@@ -73,5 +73,10 @@ class TensorDataTest {
         }.array()
         assertArrayEquals(doubleArrayOf(0.0, .25, .5, .5, 0.0), wavSamples(bytes, 16000, 5), 1e-8)
         assertThrows(IllegalArgumentException::class.java) { wavSamples(bytes.copyOf(51), 16000, 5) }
+        val wrongContainerSize = bytes.copyOf().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putInt(4, 36) }
+        assertThrows(IllegalArgumentException::class.java) { wavSamples(wrongContainerSize, 16000, 5) }
+        val wrongByteRate = bytes.copyOf().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putInt(28, 1) }
+        assertThrows(IllegalArgumentException::class.java) { wavSamples(wrongByteRate, 16000, 5) }
+        assertThrows(IllegalArgumentException::class.java) { wavSamples(bytes, 0, 5) }
     }
 }

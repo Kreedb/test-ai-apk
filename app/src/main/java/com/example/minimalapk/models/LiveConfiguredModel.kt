@@ -3,7 +3,6 @@ package com.example.minimalapk.models
 import android.graphics.Bitmap
 import androidx.core.graphics.scale
 import com.example.minimalapk.pose.GraphSignature
-import org.tensorflow.lite.Interpreter
 
 /** Numeric outputs retain their tensor identity; scene plugins must never parse the debug text. */
 internal data class LiveTensorOutput(val shape: List<Int>, val values: DoubleArray)
@@ -23,46 +22,51 @@ internal class LiveConfiguredModel(
         if (thresholdOverride == null) config
         else config.copy(outputs = config.outputs.map { it.copy(threshold = thresholdOverride) })
     private val graph: GraphSignature
-    private val interpreter: Interpreter
+    private val owner: ConfiguredInterpreter
 
     init {
         cameraModelProblem(this.config)?.let { error(it) }
+        configuredExecutionProblem(this.config, graph)?.let { error(it) }
         this.graph = graph
-        val opened = Interpreter(model.file, Interpreter.Options().setNumThreads(2))
+        val opened = ConfiguredModelAccess.open(model)
         try {
-            configureInputs(opened, this.config)
+            opened.run { configureInputs(it, this.config) }
         } catch (t: Throwable) {
             opened.close()
             throw t
         }
-        interpreter = opened
+        owner = opened
     }
 
     fun run(source: Bitmap): ModelRunResult = withInputs(source) { inputs, images ->
-        execute(interpreter, config, graph, inputs, images, transparent = true)
+        owner.run(discard = ModelRunResult::recycle) { interpreter ->
+            execute(interpreter, config, graph, inputs, images, transparent = true)
+        }
     }
 
     /** Fixed scene contracts use the same encoder and interpreter, with task-specific decoding. */
     fun runTensors(source: Bitmap): List<LiveTensorOutput> = withInputs(source) { inputs, _ ->
-        if (config.signature.isEmpty()) {
-            interpreter.runForMultipleInputsOutputs(inputs, emptyMap())
-        } else {
-            val named = graph.inputs.mapIndexed { index, tensor ->
-                val buffer = inputs[index] as java.nio.ByteBuffer
-                tensor.name to if (config.inputs[index].shape == tensor.shape) buffer
-                    else shapedArray(buffer, tensor.type, config.inputs[index].shape)
-            }.toMap()
-            interpreter.runSignature(named, emptyMap(), config.signature)
-        }
-        graph.outputs.mapIndexed { index, tensor ->
-            val actual = if (config.signature.isEmpty()) interpreter.getOutputTensor(index)
-                else interpreter.getOutputTensorFromSignature(tensor.name, config.signature)
-            val shape = actual.shape().toList()
-            require(tensorElements(shape) <= MAX_TENSOR_ELEMENTS) { "场景输出张量超过上限" }
-            val quantization = actual.quantizationParams()
-            LiveTensorOutput(shape, decodeTensor(
-                actual.asReadOnlyBuffer(), tensor.type, quantization.scale, quantization.zeroPoint.toLong(),
-            ))
+        owner.run { interpreter ->
+            if (config.signature.isEmpty()) {
+                interpreter.runForMultipleInputsOutputs(inputs, emptyMap())
+            } else {
+                val named = graph.inputs.mapIndexed { index, tensor ->
+                    val buffer = inputs[index] as java.nio.ByteBuffer
+                    tensor.name to if (config.inputs[index].shape == tensor.shape) buffer
+                        else shapedArray(buffer, tensor.type, config.inputs[index].shape)
+                }.toMap()
+                interpreter.runSignature(named, emptyMap(), config.signature)
+            }
+            graph.outputs.mapIndexed { index, tensor ->
+                val actual = if (config.signature.isEmpty()) interpreter.getOutputTensor(index)
+                    else interpreter.getOutputTensorFromSignature(tensor.name, config.signature)
+                val shape = actual.shape().toList()
+                require(tensorElements(shape) <= MAX_TENSOR_ELEMENTS) { "场景输出张量超过上限" }
+                val quantization = actual.quantizationParams()
+                LiveTensorOutput(shape, decodeTensor(
+                    actual.asReadOnlyBuffer(), tensor.type, quantization.scale, quantization.zeroPoint.toLong(),
+                ))
+            }
         }
     }
 
@@ -70,6 +74,7 @@ internal class LiveConfiguredModel(
         val images = mutableMapOf<Int, Bitmap>()
         try {
             val inputs = Array<Any>(graph.inputs.size) { index ->
+                owner.cancellation.checkpoint()
                 val input = config.inputs[index]
                 val (width, height, channels) = imageDimensions(input)
                 val resized = source.scale(width, height)
@@ -84,7 +89,8 @@ internal class LiveConfiguredModel(
         }
     }
 
-    override fun close() = interpreter.close()
+    fun cancel() = owner.cancel()
+    override fun close() = owner.close()
 }
 
 /** Returns a user-facing reason when a model cannot take a camera frame, else null. */

@@ -18,6 +18,7 @@ import com.example.minimalapk.models.LiveConfiguredModel
 import com.example.minimalapk.models.ModelConfig
 import com.example.minimalapk.models.ModelRunResult
 import com.example.minimalapk.models.configuredInputContract
+import com.example.minimalapk.models.configuredExecutionProblem
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -63,6 +64,7 @@ internal class ConfiguredModelPlugin(
     private val reports = linkedMapOf<String, List<PluginMessage>>()
     private var layer: PluginLayer? = null
     private var audioPreview: ConfiguredResultPreview? = null
+    private var activeGroup: ConfiguredModelGroup? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val model = AsyncModelSlot<Request, ConfiguredModelGroup>(
@@ -76,6 +78,7 @@ internal class ConfiguredModelPlugin(
         ready = { request, group ->
             synchronized(lock) {
                 if (current?.token == request.context.token && request.context.isCurrent()) {
+                    activeGroup = group
                     pcmContracts = group.pcmContracts
                     windows = newWindows()
                     reports.clear()
@@ -140,6 +143,8 @@ internal class ConfiguredModelPlugin(
                     pcmContracts = emptyMap()
                     reports.clear()
                     layer = null
+                    activeGroup?.cancel()
+                    activeGroup = null
                     model.set(null)
                 }
             }
@@ -192,6 +197,8 @@ internal class ConfiguredModelPlugin(
         if (!context.isCurrent()) return@synchronized
         if (requested?.context?.token == context.token && requested?.permission == permission) return@synchronized
         current = context
+        activeGroup?.cancel()
+        activeGroup = null
         invalidateAudio()
         windows = emptyMap()
         if (!preserveAudioIntent) pcmContracts = emptyMap()
@@ -294,6 +301,8 @@ internal class ConfiguredModelPlugin(
             pcmContracts = emptyMap()
             reports.clear()
             layer = null
+            activeGroup?.cancel()
+            activeGroup = null
         }
         scope.cancel()
         audioWorker.close()
@@ -305,12 +314,14 @@ private fun openConfiguredRunner(selected: ConfiguredModel, permission: AudioPer
     val description = ConfiguredModelStore.describe(selected)
     val config = ModelConfig.decode(selected.configFile.readText(), description)
     val graph = description.signatures.single { it.key == config.signature }
+    configuredExecutionProblem(config, graph)?.let { error(it) }
     val contract = configuredInputContract(config, graph)
     return when (contract.mode) {
         ConfiguredInputMode.CAMERA -> {
             val runner = LiveConfiguredModel(selected, config, graph)
             object : ConfiguredFrameRunner {
                 override fun run(image: PluginImage) = runner.run(image.bitmap)
+                override fun cancel() = runner.cancel()
                 override fun close() = runner.close()
             }
         }
@@ -322,6 +333,7 @@ private fun openConfiguredRunner(selected: ConfiguredModel, permission: AudioPer
                 override val status = contract.description + if (runner == null) "；${configuredAudioPermissionMessage(permission)}" else ""
                 override fun run(image: PluginImage): ModelRunResult = error("需要 PCM 窗口")
                 override fun runPcm(samples: FloatArray) = checkNotNull(runner).run(samples)
+                override fun cancel() { runner?.cancel() }
                 override fun close() { runner?.close() }
             }
         }
@@ -348,6 +360,8 @@ internal interface ConfiguredFrameRunner : AutoCloseable {
     val status: String get() = "已就绪"
     fun run(image: PluginImage): ModelRunResult
     fun runPcm(samples: FloatArray): ModelRunResult = error("未配置原始 PCM 输入")
+    /** May run concurrently with invoke; close remains owned by the serial worker. */
+    fun cancel() {}
 }
 
 internal class ConfiguredModelGroup(
@@ -355,7 +369,7 @@ internal class ConfiguredModelGroup(
     stillNeeded: () -> Boolean,
     open: (ConfiguredModel) -> ConfiguredFrameRunner,
 ) : AutoCloseable {
-    private class Entry(val model: ConfiguredModel, var runner: ConfiguredFrameRunner? = null, var failure: Throwable? = null)
+    private class Entry(val model: ConfiguredModel, @Volatile var runner: ConfiguredFrameRunner? = null, var failure: Throwable? = null)
     private val entries = mutableListOf<Entry>()
 
     init {
@@ -380,7 +394,7 @@ internal class ConfiguredModelGroup(
     }
 
     val modelStatus: Map<String, PluginMessage> get() = entries.associate { entry -> entry.model.id to (
-        entry.failure?.let { PluginMessage("${entry.model.name}：${it.message}", MessageKind.ERROR) }
+        entry.failure?.let { PluginMessage("${entry.model.name}：未就绪：${it.message}", MessageKind.ERROR) }
             ?: PluginMessage("${entry.model.name}：${entry.runner?.status}", MessageKind.STATUS)) }
     val status: List<PluginMessage> get() = modelStatus.values.toList()
     val needsFrames: Boolean get() = entries.any { it.runner?.acceptsFrames == true }
@@ -426,6 +440,8 @@ internal class ConfiguredModelGroup(
             entry.runner = null
         }
     }
+
+    fun cancel() { entries.forEach { entry -> runCatching { entry.runner?.cancel() } } }
 }
 
 internal fun modelOutputMessages(name: String, text: String, kind: MessageKind = MessageKind.TEXT): List<PluginMessage> {

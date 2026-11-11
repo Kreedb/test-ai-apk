@@ -108,7 +108,9 @@ class PoseAnalyzer internal constructor(
         var preview: Bitmap? = null
         var photoBounds: PhotoBounds? = null
         val results = ArrayList<ModelResult>(runners.size)
-        for ((index, runner) in runners.withIndex()) {
+        for (runner in runners) {
+            if ((runner.backend as? PoseModelReader)?.isCurrent == false) continue
+            val primary = results.isEmpty()
             val spec = runner.spec
             val start = System.nanoTime()
             val layout = poseInputLayout(source.width, source.height, rotationDegrees, spec.inputSize)
@@ -118,19 +120,27 @@ class PoseAnalyzer internal constructor(
                 size = spec.inputSize,
                 // The primary bitmap is published to the display, so Compose may still draw an
                 // older frame; it must never be reused. Others are consumed within this loop.
-                reuse = if (index == 0) null else runner.scratch,
+                reuse = if (primary) null else runner.scratch,
                 paint = paint,
             )
             val rendered = System.nanoTime()
             input.getPixels(runner.pixels, 0, spec.inputSize, 0, 0, spec.inputSize, spec.inputSize)
             val preprocessed = System.nanoTime()
-            val raw = runner.backend.analyze(runner.pixels)
+            val raw = try { runner.backend.analyze(runner.pixels) } catch (error: CancellationException) {
+                if ((runner.backend as? PoseModelReader)?.isCurrent != false) throw error
+                if (primary) input.recycle()
+                continue
+            }
+            if ((runner.backend as? PoseModelReader)?.isCurrent == false) {
+                if (primary) input.recycle()
+                continue
+            }
             val inferred = System.nanoTime()
             // Selecting and decoding anchors is CPU postprocessing, not inference. Only the top
             // detection is kept: this build does single-person measurement, not multi-person tracking.
             val published = runner.publish(PoseDecoder.decode(raw, spec).firstOrNull())
             val finished = System.nanoTime()
-            if (index == 0) preview = input else runner.scratch = input
+            if (primary) preview = input else runner.scratch = input
             if (photoBounds == null) photoBounds = layout.photoBounds
             results += ModelResult(
                 spec = spec,
@@ -364,7 +374,7 @@ class PoseAnalyzer internal constructor(
                         continue
                     }
                     val budgetMs = if (name == NPU_PROBE_NAME) NPU_PROBE_BUDGET_MS else PROBE_BUDGET_MS
-                    val backend = loadCandidate(name, budgetMs, worker) { load(context, enabled.first()) }
+                    val backend = loadCandidate(name, budgetMs, worker) { openTracked(context, enabled.first(), worker, load) }
                     if (backend != null) {
                         return PoseAnalyzer(
                             buildRunners(context, worker, name, load, enabled, backend),
@@ -375,7 +385,7 @@ class PoseAnalyzer internal constructor(
                     unavailableGpuBackends += name
                 }
                 for ((name, load) in cpuBackends) {
-                    val backend = loadCandidate(name, PROBE_BUDGET_MS, worker) { load(context, enabled.first()) }
+                    val backend = loadCandidate(name, PROBE_BUDGET_MS, worker) { openTracked(context, enabled.first(), worker, load) }
                     if (backend != null) {
                         return PoseAnalyzer(
                             buildRunners(context, worker, name, load, enabled, backend),
@@ -421,7 +431,7 @@ class PoseAnalyzer internal constructor(
                         PROBE_BUDGET_MS
                     }
                     val backend = try {
-                        loadWithTimeout(backendName, budgetMs, worker) { load(context, spec) }
+                        loadWithTimeout(backendName, budgetMs, worker) { openTracked(context, spec, worker, load) }
                     } catch (e: TimeoutException) {
                         // The worker is blocked inside native compilation, so it can neither serve
                         // frames nor run a queued close. Returning an analyzer now would freeze the
@@ -447,6 +457,11 @@ class PoseAnalyzer internal constructor(
                 throw t
             }
         }
+
+        private fun openTracked(context: Context, spec: ModelSpec, worker: ExecutorService,
+                                load: (Context, ModelSpec) -> PoseBackend?): PoseBackend? =
+            if (spec.imported) PoseModelAccess.open(modelFile(context, spec), spec.id, worker) { load(context, spec) }
+            else load(context, spec)
 
         /**
          * Queues a close for every backend opened during a failed open. Unlike [closeOnWorker]
