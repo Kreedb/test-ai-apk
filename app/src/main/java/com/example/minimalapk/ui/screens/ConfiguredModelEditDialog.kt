@@ -65,6 +65,7 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
     var showRawConfig by remember { mutableStateOf(false) }
     var showFileRun by remember { mutableStateOf(false) }
     val parsed = remember(text, description) { description?.let { runCatching { ModelConfig.decode(text, it) } } }
+    val signature = remember(text, description) { description?.let { modelConfigSignature(text, it) } }
 
     LaunchedEffect(model.id) {
         try {
@@ -128,9 +129,8 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
                             style = MaterialTheme.typography.bodySmall)
                     }
                 }
-                description?.let { graph ->
-                    val signature = parsed?.getOrNull()?.signature ?: graph.signatures.first().key
-                    ModelConfigFields(text, graph.signatures.first { it.key == signature }, !busy) {
+                signature?.let { graph ->
+                    ModelConfigFields(text, graph, !busy) {
                         text = it
                         result = null
                     }
@@ -138,7 +138,7 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
                 TextButton(onClick = { showDetails = !showDetails }) { Text(if (showDetails) "收起模型文件信息" else "模型文件信息与签名") }
                 if (showDetails) {
                     description?.let { graph ->
-                        val active = graph.signatures.firstOrNull { it.key == parsed?.getOrNull()?.signature } ?: graph.signatures.first()
+                        val active = signature ?: graph.signatures.first()
                         SelectionContainer {
                             Text(buildString {
                                 appendLine("可用签名：${graph.signatures.joinToString { it.key.ifEmpty { "主子图" } }}")

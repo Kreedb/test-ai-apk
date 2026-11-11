@@ -1,0 +1,82 @@
+package com.example.minimalapk.diagnostics
+
+import android.util.Base64
+import androidx.test.platform.app.InstrumentationRegistry
+import com.example.minimalapk.models.ConfiguredModel
+import com.example.minimalapk.models.ModelConfig
+import com.example.minimalapk.models.OutputRender
+import com.example.minimalapk.pose.TfliteGraph
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.File
+import java.io.RandomAccessFile
+
+class ModelSelfCheckTest {
+    @Test
+    fun namedMainSubgraphSignatureValidatesDataDependentOutputShape() {
+        checkDynamicOutput("infer")
+    }
+
+    @Test
+    fun indexedMainSubgraphValidatesDataDependentOutputShape() {
+        checkDynamicOutput("")
+    }
+
+    @Test
+    fun largeModelRuntimeInspectionDoesNotCacheTheExecutionOutputShape() {
+        checkDynamicOutput("infer", large = true)
+    }
+
+    private fun checkDynamicOutput(signature: String, large: Boolean = false) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val directory = File(context.cacheDir, "dynamic-self-check-${System.nanoTime()}").apply { mkdirs() }
+        try {
+            val bytes = Base64.decode(WHERE_MODEL, Base64.DEFAULT)
+            val description = TfliteGraph(bytes).describe()
+            val graph = description.signatures.single { it.key == signature }
+            assertEquals(0, graph.subgraph)
+            assertEquals(listOf(2), graph.inputs.single().shape)
+            assertEquals(listOf(2), graph.inputs.single().signature)
+            assertEquals(listOf(1, 1), graph.outputs.single().shape)
+            assertEquals(listOf(-1, 1), graph.outputs.single().signature)
+
+            val file = File(directory, "where.tflite").apply { writeBytes(bytes) }
+            if (large) RandomAccessFile(file, "rw").use { it.setLength(64L * 1024 * 1024 + 1) }
+            val model = ConfiguredModel("where", "WHERE", file)
+            val inferred = ModelConfig.infer(graph)
+            model.configFile.writeText(inferred.copy(
+                inputs = inferred.inputs.map { it.copy(values = "1") },
+                outputs = inferred.outputs.map { it.copy(render = OutputRender.VALUES) },
+            ).encode())
+            val logs = mutableListOf<String>()
+            val check = ModelSelfCheck(context,
+                CheckTarget("where", "WHERE", CheckKind.CONFIGURED, file = file, configured = model),
+                checkpoint = {}, log = { logs += it }, onStage = {})
+
+            val result = check.run()
+
+            assertEquals(CheckStatus.PASS, result.status)
+            assertTrue(result.inferenceRan)
+            assertEquals(1, result.validatedOutputs)
+            assertTrue(logs.any { "actualShape=[2, 1]" in it && "bytes=16" in it })
+            assertTrue(logs.any { "elements=2 finite=true range=0.0..1.0" in it })
+            assertEquals(large, "inspect-runtime" in result.timingsMs)
+        } finally { directory.deleteRecursively() }
+    }
+
+    companion object {
+        // Minimal TFLite v3 WHERE: BOOL x[2] -> INT64 indices[?,1], with infer on subgraph 0.
+        // Serialized output shape is [1,1]; two true inputs produce [[0],[1]] without resizing x.
+        private const val WHERE_MODEL = """
+            HAAAAFRGTDMUABgAFAAMABAAAAAIAAAAAAAEABQAAAAUAAAAGAAAABwAAAAgAAAAAwAAAAEAAAAoAAAA
+            AQAAAIgAAAABAAAAkAAAAAEAAACkAAAAAAAKABAADAAIAAQACgAAAAwAAAAUAAAAOAAAAAUAAABpbmZl
+            cgAAAAEAAAAMAAAACAAMAAgABAAIAAAAAQAAAAQAAAAHAAAAaW5kaWNlcwABAAAADAAAAAAABgAIAAQA
+            BgAAAAQAAAABAAAAeAAAAAQABAAEAAAADAAOAAcAAAAAAAgADAAAAAAAAG1tAAAAAAAOABgAFAAQAAwA
+            CAAEAA4AAAAUAAAAHAAAADgAAAA8AAAAQAAAAAQAAABtYWluAAAAAAEAAAAQAAAAAAAKAAwAAAAIAAQA
+            CgAAAAgAAAAMAAAAAQAAAAEAAAABAAAAAAAAAAIAAABUAAAABAAAAMj///8QAAAAGAAAAAAAAAQcAAAA
+            AgAAAP////8BAAAAAgAAAAEAAAABAAAABwAAAGluZGljZXMAFAAUAAgADwAAABAAAAAAAAAABAAUAAAA
+            EAAAABQAAAAAAAAGFAAAAAEAAAACAAAAAQAAAAIAAAABAAAAeAAAAA==
+        """
+    }
+}

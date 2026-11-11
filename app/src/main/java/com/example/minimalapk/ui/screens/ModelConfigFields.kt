@@ -19,6 +19,7 @@ import com.example.minimalapk.models.ImageLayout
 import com.example.minimalapk.models.InputSource
 import com.example.minimalapk.models.MAX_CONFIG_BYTES
 import com.example.minimalapk.models.OutputRender
+import com.example.minimalapk.pose.GraphDescription
 import com.example.minimalapk.pose.GraphSignature
 import java.io.StringWriter
 import java.util.Properties
@@ -27,6 +28,12 @@ import java.util.Properties
 internal fun updateModelProperty(text: String, key: String, value: String): String {
     val properties = Properties().apply { load(text.reader()); setProperty(key, value) }
     return StringWriter().also { properties.store(it, "Model configuration (UTF-8)") }.toString()
+}
+
+/** Field validation must not change the signature whose parameters are being edited. */
+internal fun modelConfigSignature(text: String, description: GraphDescription): GraphSignature {
+    val key = runCatching { Properties().apply { load(text.reader()) }.getProperty("signature", "") }.getOrNull()
+    return description.signatures.firstOrNull { it.key == key } ?: description.signatures.first()
 }
 
 @Composable

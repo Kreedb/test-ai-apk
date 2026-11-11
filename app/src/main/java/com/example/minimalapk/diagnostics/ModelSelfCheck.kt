@@ -245,20 +245,31 @@ internal class ModelSelfCheck(
         personalization: Boolean,
     ) {
         val modelFile = checkNotNull(target.file)
+        val options = Interpreter.Options().setNumThreads(2).setUseXNNPACK(false)
+        // LiteRT caches output shapes in Tensor wrappers. Inspect large models on a separate
+        // interpreter so the execution interpreter first reads its outputs after invoke.
+        val inspected = description ?: step("inspect-runtime") {
+            val inspector = Interpreter(modelFile, options)
+            try {
+                val key = chooseCheckSignature(inspector.signatureKeys.toList(), requestedSignature, personalization)
+                GraphDescription(listOf(runtimeGraph(inspector, key)), emptyList())
+            } finally { stepClose { inspector.close() } }
+        }
         val interpreter = step("load") {
-            Interpreter(modelFile, Interpreter.Options().setNumThreads(2).setUseXNNPACK(false))
+            Interpreter(modelFile, options)
         }
         try {
             val keys = interpreter.signatureKeys.toList()
             val key = chooseCheckSignature(keys, requestedSignature, personalization)
-            val runtimeGraph = runtimeGraph(interpreter, key)
-            checkSignature(runtimeGraph, personalization, keys)
-            val graph = description?.signatures?.singleOrNull { it.key == key } ?: runtimeGraph
+            val graph = inspected.signatures.single { it.key == key }
+            checkSignature(graph, personalization, keys)
             val config = step("config") {
                 val configured = if (configText != null) {
-                    ModelConfig.decode(configText, description ?: GraphDescription(listOf(runtimeGraph), emptyList()))
+                    ModelConfig.decode(configText, inspected)
                 } else exampleConfig(ModelConfig.infer(graph))
-                require(configured.inputs.size == runtimeGraph.inputs.size && configured.outputs.size == runtimeGraph.outputs.size) {
+                val inputCount = if (key.isEmpty()) interpreter.inputTensorCount else interpreter.getSignatureInputs(key).size
+                val outputCount = if (key.isEmpty()) interpreter.outputTensorCount else interpreter.getSignatureOutputs(key).size
+                require(configured.inputs.size == inputCount && configured.outputs.size == outputCount) {
                     "配置 I/O 数量与运行时不符"
                 }
                 configured.inputs.forEachIndexed { index, input ->
@@ -272,10 +283,10 @@ internal class ModelSelfCheck(
                 if (description == null || configText == null) logConfig(configured)
                 configured
             }
-            (runtimeGraph.inputs + runtimeGraph.outputs).forEach { checkTensorType(it.type) }
-            runtimeGraph.outputs.filter { it.shape.isNotEmpty() && it.shape.all { size -> size > 0 } }
+            (graph.inputs + graph.outputs).forEach { checkTensorType(it.type) }
+            graph.outputs.filter { it.shape.isNotEmpty() && it.shape.all { size -> size > 0 } }
                 .forEach { checkInputElements(it.shape) }
-            logGraph(runtimeGraph)
+            logGraph(graph)
             val images = mutableMapOf<Int, Bitmap>()
             val rendered = mutableListOf<Bitmap>()
             try {

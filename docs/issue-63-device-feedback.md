@@ -54,9 +54,9 @@ Android [ZipFile 源码](https://android.googlesource.com/platform/libcore/+/ref
 
 ## 验证边界
 
-本次运行环境 `adb devices -l` 无设备，`/dev/kvm` 无读写权限；不把 JVM 或主机 CPU 推理作为手机 CameraX、Bitmap、TTS 引擎、麦克风和 GPU/NPU 的执行证据。
+初次实现时，运行环境 `adb devices -l` 无设备，`/dev/kvm` 无读写权限；不把 JVM 或主机 CPU 推理作为手机 CameraX、Bitmap、TTS 引擎、麦克风和 GPU/NPU 的执行证据。
 
-当前 JVM 回归：**300 tests，0 failures，0 errors，1 skipped**（既有可选大文件网络冒烟）。覆盖旧模型开关迁移、模型失败隔离、标签 CRC/偏移、TTS 乱序回调、权限重新授权、完整抬臂周期、分割 logits、整幅分块、旧/新训练存档、只读分类头自检与全部模型枚举。
+初次实现的 JVM 回归：**300 tests，0 failures，0 errors，1 skipped**（既有可选大文件网络冒烟）。覆盖旧模型开关迁移、模型失败隔离、标签 CRC/偏移、TTS 乱序回调、权限重新授权、完整抬臂周期、分割 logits、整幅分块、旧/新训练存档、只读分类头自检与全部模型枚举。
 
 JDK 21 执行 `assembleDebug assembleRelease lintDebug testDebugUnitTest --build-cache --parallel --console=plain` 成功，lint **0 errors / 20 warnings / 1 hint**。警告为版本更新、固定方向、可分配存储建议及 KTX 风格建议。两个 ABI 的 Release 签名校验成功，APK 均只内置 YOLO26n；arm64-v8a 90,021,282 字节、x86_64 19,372,340 字节。
 
@@ -67,3 +67,12 @@ JDK 21 执行 `assembleDebug assembleRelease lintDebug testDebugUnitTest --build
 Google Coral 固定提交的 `grace_hopper.bmp` 语义冒烟：按目录的 mean/std=127.5 预处理后，MobileNet 首项为 `military uniform`（0.867），SSD 输出含 `person` 与 `tie`，DeepLab 主体为 `person`（约 61.9%）。用于核对标签索引与基础数值范围，不是准确率评测集。
 
 独立代码审计的两项发现已处理：固定视觉插件直接使用校验后的场景缓存与自身契约，不再解析用户的通用模型配置；自定义模型多行输出按 240 字限制分行，超过 8 行显式提示裁剪。复审未发现新的可证问题。
+
+## PR #79 评审回归
+
+- 参数表单和签名选择器直接读取 `signature`，不依赖整份配置校验成功；两输入签名的第二路形状、归一化或输出阈值暂时无效时，保留原有字段并显示校验错误。JVM 回归覆盖清空、修正和显式切换签名。
+- 自检推理实例仅在 invoke 后读取输出张量；小模型复用 FlatBuffer 元数据，超过 64 MiB 的模型使用独立且先关闭的解释器读取元数据，避免 LiteRT 缓存旧输出形状。原有字节数、形状、数值校验保留。
+- `ModelSelfCheckTest` 使用 460 字节的真实 `WHERE` 模型：主子图命名签名 `infer`，固定 BOOL 输入 `[2]`，动态 INT64 输出从 `[1,1]` 变为 `[2,1]`（16 字节）；另覆盖索引入口和超过 64 MiB 的文件路径。
+- JVM 与静态检查：`./gradlew compileDebugKotlin testDebugUnitTest lintDebug assembleDebugAndroidTest --build-cache --parallel --console=plain`，301 tests，0 failures，0 errors，1 skipped；lint 0 errors / 20 warnings / 1 hint。
+- 原生回归：Android 15/API 35 x86_64 模拟器、APK 内 LiteRT 2.3.2，三项 `ModelSelfCheckTest` 全部通过；Debug APK 构建成功。KVM 权限受限，使用软件 CPU 模拟；首次启动因系统负载触发应用启动 ANR，预编译 APK 后重试通过。
+- 连接 Android 设备或模拟器后可运行原生回归：`./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.example.minimalapk.diagnostics.ModelSelfCheckTest`。
