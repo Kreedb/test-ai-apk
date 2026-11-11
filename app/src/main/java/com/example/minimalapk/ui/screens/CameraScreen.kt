@@ -182,7 +182,8 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
                 lastFrame = -1
             } else if (frame.source.frameNumber != lastFrame) {
                 lastFrame = frame.source.frameNumber
-                frameTimes.addLast(frame.timestampNanos)
+                // Observe on arrival: capture timestamps predate inference and stretch the first interval.
+                frameTimes.addLast(System.nanoTime())
                 fps = frameRate(frameTimes, System.nanoTime())
             }
         }

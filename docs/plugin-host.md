@@ -7,7 +7,7 @@
 1. 在 `PluginIds` 添加稳定 ID、在 `pluginDefaults` 添加默认配置；新下载模型、音频消费者默认停用。不要用中文名称或 tab 索引作 ID。
 2. 实现 `CameraPlugin`，声明实际需要的 `PluginCapability`，加入 `CameraScreen.kt` 的 `PluginHost(listOf(...))`。复用 `PluginsScreen.kt` 的 `PluginCard` 和 `PluginSwitchRow`；卡片配置区域与总开关是兄弟点击区域，停用仍能打开设置弹层。
 3. 设置通过 `PluginSettingsStore.setEnabled/configure/update` 保存到 `app_settings` 的 `plugin.<id>.enabled/revision/config.<key>`，通过 `settings: StateFlow` 订阅。保存配置不改变开关，开关不改配置。旧 `pose_models`、`pose_backend`、主题及用户模型文件保持原格式。
-4. 在 `Started` / `ConfigurationChanged` 更新消费者，在 `Stopped` 停止排队并释放资源。每次回调带 `PluginContext(token, settings)`：异步任务保留它，工作前调用 `isCurrent()`，完成后只用该 context 的 `publish()`。不能用任务结束时取到的新 context 包装旧结果。
+4. 在 `Started` / `ConfigurationChanged` 更新消费者，在 `Stopped` 停止排队，并在离开/停止或配置变化时释放资源（跨前后台复用的已编译模型见「资源与恢复」）。每次回调带 `PluginContext(token, settings)`：异步任务保留它，工作前调用 `isCurrent()`，完成后只用该 context 的 `publish()`。不能用任务结束时取到的新 context 包装旧结果。
 5. 模型复用现有 `ModelConfig` / `ConfiguredModelStore` / `LiveConfiguredModel`，不要重建张量解析器。`AsyncModelSlot` 在同一个专用线程创建/运行/关闭，一个在用模型、一个合并的待加载配置；`runIfReady()` 在加载中立即返回 null。慢的图片/音频消费者可用 `BoundedFrameWorker`（一项执行中 + 一项最新待处理）；禁用、换配置、取消按压时 `clear()`，宿主最终 `CameraPlugin.close()` 时关闭 worker，前后台 `Stopped` 后仍可再次 `Started`。工作函数需处理失败并报告带 ID 的错误。
 
 现有 `PoseModelsPlugin` 持有唯一 `PoseAnalyzer`，同时供基础骨架与 `PoseEnhancementPlugin` 使用；增强开关不加载/关闭它、不改写启用模型列表。`ConfiguredModelPlugin` 是旧相机模型选择器的兼容适配器；下游迁移该入口时保留 `configured_model` 的选择与用户文件。监控、示例、设置模型页仍保留，后续迁移导航时须处理旧数字 tab 与 `SettingsPage.MODELS` 恢复。
@@ -43,7 +43,7 @@
 
 `CameraSession` 是唯一 CameraX 所有者，只绑定一个 `ImageAnalysis`，保留 `KEEP_ONLY_LATEST`。关闭在 UI 同步 clearAnalyzer / unbind **自己的** use case，provider future 迟到不会再绑定。proxy 保持到主线程收到显示交付后才 close；analysis executor 正常 shutdown，不 interrupt 仍借用 Bitmap 的推理。配置更改不重新绑定 CameraX。
 
-`PoseAnalyzer.preview()` 是不进入模型加载锁的纯 bitmap 路径：零模型、正在加载、配置失败或模型加载超时均继续预览。模型失败停止该 runner 后续推理直到配置/会话改变。`AsyncModelSlot` 先撤销旧借用资格，排空在用模型再同线程 close/open；迟到打开的旧模型同线程关闭。原有 `PoseAnalyzer` 的 GPU 创建/运行/关闭线程与探测超时机制保留。原生驱动永久卡住不能安全强杀；已有超时锁避免反复打开姿态后端，预览不依赖该锁。
+`PoseAnalyzer.preview()` 是不进入模型加载锁的纯 bitmap 路径：零模型、正在加载、配置失败或模型加载超时均继续预览。模型失败停止该 runner 后续推理直到配置/会话改变。`AsyncModelSlot` 先撤销旧借用资格，排空在用模型再同线程 close/open；迟到打开的旧模型同线程关闭。原有 `PoseAnalyzer` 的 GPU 创建/运行/关闭线程与探测超时机制保留。原生驱动永久卡住不能安全强杀；已有超时锁避免反复打开姿态后端，预览不依赖该锁。`PoseModelsPlugin` 在后台 `Stopped` 时保留已编译的 `PoseAnalyzer`；配置未变的下次前台直接复用，不重新探测/编译加速器，离开/停止或模型配置变化才关闭重开。
 
 配置来源：`CameraModelSettingsStore` 监听旧 `app_settings` 的模型/后端变更，`ConfiguredModelStore.revision` 在成功安装/原子保存配置/删除后更新；`cameraPluginSettings()` 合并依赖，重载同 ID 模型。`PoseAnalyzer.open(stillNeeded=...)` 在获取编译锁后再次判废，避免切页时排队打开已无消费者的旧请求。
 
