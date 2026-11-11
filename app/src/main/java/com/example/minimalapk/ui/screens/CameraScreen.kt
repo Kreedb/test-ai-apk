@@ -89,9 +89,9 @@ internal fun CameraScreen(store: PluginSettingsStore) {
     LaunchedEffect(Unit) { if (!granted) launcher.launch(Manifest.permission.CAMERA) }
 
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        ScreenHeader("相机", "离线姿态与插件预览")
+        ScreenHeader("相机", "实时预览 · 开启插件显示对应结果")
         if (granted) {
-            PoseCamera(store, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(16.dp)))
+            PluginCamera(store, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(16.dp)))
         } else {
             Column(
                 Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally,
@@ -107,7 +107,7 @@ internal fun CameraScreen(store: PluginSettingsStore) {
 }
 
 @Composable
-private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
+private fun PluginCamera(store: PluginSettingsStore, modifier: Modifier) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val models = remember(context, lifecycleOwner) { CameraModelSettingsStore(context) }
@@ -188,7 +188,7 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
         val frame = snapshot.frame
         val image = snapshot.displayedImage
         if (image != null && frame != null) {
-            Image(image.bitmap.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            CameraFramePreview(snapshot, Modifier.fillMaxSize())
             // Never draw current-frame bones on an older replacement snapshot.
             if (snapshot.displayedSource == frame.source) {
                 BasePoseOverlay(frame.poses.firstOrNull(), frame.source, Modifier.fillMaxSize())
@@ -236,17 +236,7 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
                 }
             }
         }
-        // Monitor metric lines stay in the top-right panel; its STATUS/ERROR lines (for example the
-        // "测试全部" NPU diagnosis) and every other plugin's text share the copyable bottom area.
-        val monitorIds = snapshot.monitors.mapTo(mutableSetOf()) { it.pluginId }
-        val reports = snapshot.reports.mapNotNull { report ->
-            val messages = if (report.pluginId in monitorIds) {
-                report.output.messages.filter { it.kind != MessageKind.TEXT }
-            } else {
-                report.output.messages
-            }
-            messages.takeIf { it.isNotEmpty() }?.let { report to it }
-        }
+        val reports = snapshot.reports
         if (reports.isNotEmpty()) {
             SelectionContainer(
                 Modifier.align(Alignment.BottomStart).fillMaxWidth(),
@@ -256,8 +246,8 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
                         .background(Color.Black.copy(alpha = 0.55f)).verticalScroll(rememberScrollState()).padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    reports.forEach { (report, messages) ->
-                        messages.forEach { message ->
+                    reports.forEach { report ->
+                        report.output.messages.forEach { message ->
                             Text(
                                 "${report.name}：${message.text}", style = MaterialTheme.typography.bodySmall,
                                 color = when (message.kind) {

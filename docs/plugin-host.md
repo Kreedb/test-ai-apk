@@ -10,14 +10,16 @@
 4. 在 `Started` / `ConfigurationChanged` 更新消费者，在 `Stopped` 停止排队并释放资源。每次回调带 `PluginContext(token, settings)`：异步任务保留它，工作前调用 `isCurrent()`，完成后只用该 context 的 `publish()`。不能用任务结束时取到的新 context 包装旧结果。
 5. 模型复用现有 `ModelConfig` / `ConfiguredModelStore` / `LiveConfiguredModel`，不要重建张量解析器。`AsyncModelSlot` 在同一个专用线程创建/运行/关闭，一个在用模型、一个合并的待加载配置；`runIfReady()` 在加载中立即返回 null。慢的图片/音频消费者可用 `BoundedFrameWorker`（一项执行中 + 一项最新待处理）；禁用、换配置、取消按压时 `clear()`，宿主最终 `CameraPlugin.close()` 时关闭 worker，前后台 `Stopped` 后仍可再次 `Started`。工作函数需处理失败并报告带 ID 的错误。
 
-现有 `PoseModelsPlugin` 持有唯一 `PoseAnalyzer`，同时供基础骨架与 `PoseEnhancementPlugin` 使用；增强开关不加载/关闭它、不改写启用模型列表。`ConfiguredModelPlugin` 已承接“自定义模型”插件：稳定 ID 仍为 `configured_model`，配置页复用 `ModelsScreen`/`ModelWorkbenchScreen`，相机模型选择保存在 `plugin.configured_model.config.model_id`；停用只停止该消费者并清空输出。`SystemMonitorPlugin` 只消费相机帧事件，输出右上角指标和底部 NPU 诊断；不依赖姿态增强或任何模型是否启用。`ExampleScenePlugin` 以四个固定示例模型实例化（`movenet_scene`、`image_classification_scene`、`object_detection_scene`、`image_segmentation_scene`），沿用 `ExampleDownload.install`、`LiveConfiguredModel` 和 `ConfiguredModelRunner`，阈值只作为运行时覆盖，不改写已存在的 `.properties`。`AudioClassificationPlugin`（`audio_classification`）只消费共享 `AUDIO_PCM`，用有界窗口和专用 worker 运行 YAMNet；`TtsPlugin`（`tts`）只发布系统 TTS 状态，朗读动作在配置弹层中显式触发；`PersonalizationPlugin`（`model_personalization`）只读取 `filesDir/examples/personalization-head.bin` 与示例模型，在相机帧上运行特征提取与 4 类 softmax，训练与存档写入只属于插件弹层。设置中的旧“模型”页已删除，恢复旧 `SettingsPage.MODELS` 状态时回落到根页；示例页已删除，旧 tab 索引 2 回落到主页，模型工作台只从“插件 → 自定义模型”进入。
+`PoseModelsPlugin` 持有唯一 `PoseAnalyzer`，由自定义模型或姿态增强需要时启动，二者均关闭时不再运行或发布状态；增强仍共享已有推理、不改写模型列表。`ConfiguredModelPlugin` 逐个运行所有已启用的通用图片模型，单模型失败隔离；开关保存在 `configured_models/<sha>.enabled`，旧 `plugin.configured_model.config.model_id` 在启动时幂等迁移，原配置和权重不移动。配置入口统一为 `ModelsScreen` 的每个模型卡片，工作台页面与单选器已删除。
+
+`SystemMonitorPlugin` 输出右上角指标与底部显式 NPU 诊断。四个 `ExampleScenePlugin` 保留稳定 ID，分别提供抬臂计次、物品识别、物品定位与计数、区域覆盖分析；固定模型契约与通用模型的用户配置独立。`AudioClassificationPlugin` 使用共享 PCM，授权代次更新时重新加载，撤权释放窗口与模型；TTS 仅由配置弹层显式朗读，监听播放完成并保存引擎选择。`PersonalizationPlugin` 只读本机分类头存档，训练页负责命名、样本收集与原子保存。设置旧 `MODELS` 页面恢复到根页，旧示例 tab 索引恢复到主页。
 
 ## 事件与线程
 
 - 控制事件（启停、配置、生命周期、按压）来自相机 UI 所有者；帧事件来自唯一 CameraX analysis worker。两者可并发，插件控制回调必须短，不在 UI 等待模型结束。宿主不在输出锁内调用插件。
 - UI 控制器从主线程调用 `configure/lifecycle/press/release/cancel/permissionChanged`；音频采集线程可调用 `audio`，异步结果可从任意线程 `publish`。不要在帧回调里重入控制方法。停止事件携带失效 token 用于释放资源，清理不能以 `isCurrent()` 为前置条件；新会话的资源用 token 区分。
 - `PluginToken` = 插件 ID + 会话号 + 配置代次。后台/离开/停止立即使 token 无效、清空帧/图层/文字；下次前台生成新会话。更改配置也增加代次并清空该插件结果。基础姿态配置变化同时使测量消费者失效。
-- `CameraFrame` 含会话/帧号、`System.nanoTime()` 时间、原始 Bitmap 尺寸和旋转、朝上的预览图、真实照片 `PhotoBounds`、`ViewportMapping` 及共享姿态结果。`rawMapping.toImage/toRaw` 使用与 `PoseAnalyzer` 一致的旋转/缩放/letterbox 舍入中心，把原始分辨率 ROI 与预览坐标互转。时间戳是宿主收到帧的单调时间，**不是传感器曝光时间**；按压和未来音频同用该时基。
+- `CameraFrame` 含会话/帧号、`System.nanoTime()` 时间、原始 Bitmap 尺寸和旋转、朝上的分析图、真实照片 `PhotoBounds`、`ViewportMapping` 及共享姿态结果。`rawMapping.toImage/toRaw` 使用与 `PoseAnalyzer` 一致的旋转/缩放/letterbox 舍入中心，原始像素与模型坐标互转。UI 通过 `CameraFramePreview` 直接绘制高分辨率 `raw`，不显示降采样的模型输入；图层、姿态与手势仍使用同一坐标映射。时间戳是宿主收到帧的单调时间，**不是传感器曝光时间**。
 - 图像借用为只读。保留 `PluginImage` / `CameraFrame` 引用即可跨回调保活；宿主不会 recycle 已发布图片。禁止修改其 `bitmap`。需要绘制/写入时 `copyBitmap()`，自己拥有并在不再使用时释放该副本。发布图片后也不可 recycle/原地复用，交由 GC 在 Compose 和所有消费者释放引用后回收。不得保留无界帧历史。
 - `Press` 不等长按阈值，包含 pointer ID、预览坐标、单调时间和独立 `PressToken`。释放、出真实照片/视口边界、第二根手指、系统取消、视口改变、切页、后台、停止都会撤回替换。多指后要全松开再按；TalkBack 提供“开始按压预览”与“结束按压，恢复实时画面”动作。停用/改配置的插件失去当前按压资格，重新启用不能接管旧按压。
 - 仅启用且声明相应输入能力的消费者接收帧、姿态、按压、生命周期、权限或 PCM。`Started/ConfigurationChanged/Stopped` 是每个消费者必须处理的控制事件。
@@ -27,11 +29,13 @@
 
 `PluginOutput` 一次替换该插件的完整输出槽，包含时间戳、`PluginMessage(TEXT/STATUS/ERROR)`、`PluginLayer` 和可选 `PreviewReplacement`。文字按时间更新，与图像帧独立；小于已有输出时间的结果被拒绝。每插件最多 8 条 × 240 字、4 图层 × 128 线段，关闭/会话结束清空。错误被归到该插件，基础相机的错误区域只显示权限/绑定/取帧问题。
 
+`MONITOR` 插件的文字独立于帧号归入右上角面板，不需要空图层占位；它的像素图层仍严格检查来源。`TEXT` 指标由宿主排除出底部 `reports`，`STATUS/ERROR` 诊断仍可复制。默认刷新间隔 250 ms，保留用户保存的其它间隔；最多 8 条时合并预处理/后处理行，确保 NPU 指标不会被截掉。
+
 合成：基础图片 → 有效替换图片 → 来源兼容的基础骨架/插件图层 → 监控 → 插件文字。图层按稳定 ID 排序。`ImageSource` 的会话、帧号、旋转、图像尺寸、真实照片区域必须**全部相等**才可叠加。没有用“最接近时间”猜测旧框属于新帧。`ImageSpace` 使用完整预览坐标（含 letterbox）；图像图层可有不同分辨率，但宽高比必须一致，线条以 source 像素为单位。
 
 替换者必须声明 `REPLACEMENT` + `POINTER` 并交回同一次按压 token。高 `replacementPriority` 获胜；同优先级按稳定 ID 升序，失败方显示冲突提示。同插件新输出应携带需保留的替换图；发仅文字输出会主动撤回其旧替换。
 
-慢超分允许显示按压期间取得的旧来源帧快照，不要求等于最新帧。**输出必须是完整来源帧合成图**：ROI 增强先贴回那一帧的原图，不能把旧 ROI 贴到宿主当前帧。宿主继续采集最新原画，释放/取消立刻切回最新帧；晚到替换被拒绝。与旧快照不同源的骨架/框隐藏，而不是错位展示。
+超分显示按压时取得的完整来源帧快照，不要求等于最新帧。整张照片按比例转换到受限工作分辨率，带上下文的 50×50 输入分块经 ESRGAN 输出 4× 图，再按同一来源坐标拼接；处理预算、进度与分辨率显式报告。宿主继续采集最新原画，释放/取消立刻切回最新帧；晚到替换被拒绝。与快照不同源的骨架/框隐藏，不能把旧块贴到当前帧。
 
 ### 按帧坐标核对
 
@@ -63,14 +67,14 @@ JVM 覆盖 settings restore/observable/save、关闭/代次/会话失效、有�
 - [ ] 增强关闭后测量线、人体文字、限制说明消失，基础骨架及用户启用模型列表保持原设置。
 - [ ] 禁用所有姿态与图片模型仍持续预览；加载慢、损坏配置、模型失败时仍有新相机帧，错误归属正确。
 - [ ] 连续切相机/插件/设置 20 次，前后台 20 次；包括模型加载过程中离开/回来；检查无重复绑定、黑屏、use case 泄漏或后台推理。
-- [ ] 更新同 ID 工作台 `.properties` 并保存，配置自动重载；快速启停/切配置，旧结果不恢复。
+- [ ] 点击模型卡片更新同 ID `.properties` 并保存，配置自动重载；快速启停/切配置，旧结果不恢复。
 - [ ] 真机 0/90/180/270 旋转、不同视口比例核对上述坐标；增强替换多帧延迟后松手、滑出、多指、系统取消、切页、后台、停用均恢复最新原图。
 - [ ] 监控内存、CPU/GPU 线程：展示中的 Bitmap 没有提前 recycle，离开后模型/Interpreter/GPU 同线程排空释放；release/R8 APK 能安装并完成相同流程。
 - [ ] #68 音频：录音拒绝/撤权/隐私静音、系统 ASR 麦克风互斥、前后台与停用释放；未经录音权限时视频仍可用。
 - [ ] #68 场景插件：四个卡片分别启用后下载/加载对应示例模型，关键点、检测框、分割掩码与相机预览对齐；阈值修改只影响相机叠加；停用/切页/后台停止推理且不留下旧图层。
-- [ ] #68 声音识别：授予麦克风后约 1 秒窗口持续更新声音/环境声前几类；拒绝/撤权/系统 ASR 占用时停用音频插件但相机继续；启停/切页不残留旧结果，工作台 WAV 路径仍可运行。
+- [ ] #68 声音识别：授权后约 1 秒窗口持续更新类别；拒绝/撤权时停用采集但相机继续，再授权可重启；已缓存模型升级后标签可读，模型卡片内 WAV 测试可运行。
 - [ ] #68 语音朗读：系统 TTS 引擎就绪/缺失中文语音包提示正确；只在按下朗读时发声，重复点按不叠加；关闭弹层、切后台、停用插件立即停止，不与声音识别形成回环。
-- [ ] #68 设备端学习：4 类各添加一张图片后训练完成并保存；重启/重新进入可识别相册图片；启用插件后相机持续输出最高类别与置信度；无存档显示“未就绪：请先在插件中训练”，下载/加载失败不阻塞取帧；停用/切页/后台释放 Interpreter。旧 `personalization-head.bin` 可直接加载，相机插件不改写存档。
+- [ ] #68 设备端学习：4 类各至少 5 张不同照片后训练保存；重启恢复名称/阈值；低分显示未知。旧存档的类别先保持未命名，确认映射后可升级保存；相机不改写存档，训练失败保留旧分类器。
 - [ ] #68 导航：升级后旧保存索引 0/1/3/4 分别落到主页/相机/插件/设置，旧示例索引 2 与越界值落到主页；四个 tab 均保留自身滚动/子页面状态，示例页与旧工作台入口不可达。
 
 相机卡片交互和实际替换消费者接入后的设备演示仍待执行；这里的 JVM 仲裁测试使用假图片尺寸，不声称跑过相机或超分模型。Bitmap 借用只读通过应用内约定保证，并非运行时沙箱；原生模型推理若永久阻塞，无法安全强制回收它，需设备验证和驱动恢复。当前兼容图片模型按帧同步执行，慢模型会降低基础帧率；异步超分应使用有界 worker。

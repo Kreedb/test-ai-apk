@@ -18,7 +18,7 @@ class ExamplePluginSettingsTest {
             assertFalse("$id must be opt-in", defaults.getValue(id).enabled)
         }
         assertEquals(0.3f, SceneThresholdSettings.from(defaults.getValue(PluginIds.MOVENET_SCENE)).threshold!!, 0.0001f)
-        assertEquals(0.3f, SceneThresholdSettings.from(defaults.getValue(PluginIds.OBJECT_DETECTION_SCENE)).threshold!!, 0.0001f)
+        assertEquals(0.5f, SceneThresholdSettings.from(defaults.getValue(PluginIds.OBJECT_DETECTION_SCENE)).threshold!!, 0.0001f)
         assertEquals(0.3f, SceneThresholdSettings.from(defaults.getValue(PluginIds.IMAGE_SEGMENTATION_SCENE)).threshold!!, 0.0001f)
         assertEquals(3, AudioClassificationSettings.from(defaults.getValue(PluginIds.AUDIO_CLASSIFICATION)).topK!!)
         assertTrue(defaults.getValue(PluginIds.TTS).config.getValue(TTS_TEXT_KEY).isNotBlank())
@@ -39,6 +39,8 @@ class ExamplePluginSettingsTest {
         val restored = restorePluginSettings(mapOf("plugin.movenet_scene.config.threshold" to "0.45"))
             .getValue(PluginIds.MOVENET_SCENE)
         assertEquals("0.45", SceneThresholdSettings.from(restored).thresholdText)
+        val saved = restorePluginSettings(mapOf("plugin.object_detection_scene.config.threshold" to "0.3"))
+        assertEquals("0.3", SceneThresholdSettings.from(saved.getValue(PluginIds.OBJECT_DETECTION_SCENE)).thresholdText)
     }
 
     @Test
@@ -47,5 +49,21 @@ class ExamplePluginSettingsTest {
         assertEquals("", clampTtsText("abc", 0))
         assertEquals("语音", clampTtsText("语音朗读", 2))
         assertEquals("", clampTtsText("", 10))
+    }
+
+    @Test
+    fun selectedSpeechEngineRestoresAlongsideExistingTextWithoutEnablingPlugin() {
+        val restored = restorePluginSettings(mapOf(
+            "plugin.tts.config.$TTS_TEXT_KEY" to "用户保存的文本",
+            "plugin.tts.config.$TTS_ENGINE_KEY" to "org.example.speech",
+        )).getValue(PluginIds.TTS)
+        assertEquals("用户保存的文本", restored.config[TTS_TEXT_KEY])
+        assertEquals("org.example.speech", restored.config[TTS_ENGINE_KEY])
+        assertFalse(restored.enabled)
+
+        val legacy = restorePluginSettings(mapOf("plugin.tts.config.$TTS_TEXT_KEY" to "保留旧文本"))
+            .getValue(PluginIds.TTS)
+        assertEquals("保留旧文本", legacy.config[TTS_TEXT_KEY])
+        assertEquals("", legacy.config[TTS_ENGINE_KEY].orEmpty())
     }
 }

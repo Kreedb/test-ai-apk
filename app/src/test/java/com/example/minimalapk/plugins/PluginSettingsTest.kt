@@ -28,6 +28,7 @@ class PluginSettingsTest {
         val restored = restorePluginSettings(emptyMap<String, Any>())
         assertTrue(restored.getValue(PluginIds.POSE_ENHANCEMENT).enabled)
         assertFalse(restored.getValue(PluginIds.CONFIGURED_MODEL).enabled)
+        assertTrue(restored.getValue(PluginIds.CONFIGURED_MODEL).config.isEmpty())
         assertEquals(PoseEnhancementSettings(), PoseEnhancementSettings.from(restored.getValue(PluginIds.POSE_ENHANCEMENT)))
     }
 
@@ -70,20 +71,16 @@ class PluginSettingsTest {
     }
 
     @Test
-    fun configuredModelSelectionKeepsItsStablePreferenceKey() {
+    fun legacyConfiguredModelSelectionRemainsReadableForMigration() {
         val preferences = MemoryPreferences()
+        preferences.values["plugin.configured_model.config.model_id"] = "model-1"
         PluginSettingsStore(preferences).use { store ->
-            assertEquals(
-                "",
-                store.settings.value.getValue(PluginIds.CONFIGURED_MODEL).config[CONFIGURED_MODEL_ID_KEY],
-            )
-            store.configure(PluginIds.CONFIGURED_MODEL, mapOf(CONFIGURED_MODEL_ID_KEY to "model-1"))
             assertEquals("model-1", preferences.values["plugin.configured_model.config.model_id"])
             assertEquals(
                 "model-1",
                 store.settings.value.getValue(PluginIds.CONFIGURED_MODEL).config[CONFIGURED_MODEL_ID_KEY],
             )
-            // Choosing a model must not silently enable the camera consumer.
+            // Migrating a selected model must not silently enable the master switch.
             assertFalse(store.settings.value.getValue(PluginIds.CONFIGURED_MODEL).enabled)
         }
     }
@@ -105,16 +102,17 @@ class PluginSettingsTest {
     @Test
     fun changingEnhancementNeverReloadsBaseModelsButBaseChangesInvalidateMeasurements() {
         val base = CameraModelSettings(ModelStore.builtIn, PoseBackendPreference.AUTO)
-        val first = cameraPluginSettings(pluginDefaults, base, 0)
-        val disabled = pluginDefaults + (PluginIds.POSE_ENHANCEMENT to pluginDefaults.getValue(PluginIds.POSE_ENHANCEMENT).copy(enabled = false))
+        val plugins = pluginDefaults + (PluginIds.CONFIGURED_MODEL to PluginSettings(enabled = true))
+        val first = cameraPluginSettings(plugins, base, 0)
+        val disabled = plugins + (PluginIds.POSE_ENHANCEMENT to plugins.getValue(PluginIds.POSE_ENHANCEMENT).copy(enabled = false))
         val second = cameraPluginSettings(disabled, base, 0)
         assertEquals(first.getValue(PluginIds.POSE_MODELS), second.getValue(PluginIds.POSE_MODELS))
         assertFalse(second.getValue(PluginIds.POSE_ENHANCEMENT).enabled)
         val changedBase = base.copy(specs = base.specs.map { it.copy(enabled = false) })
-        val third = cameraPluginSettings(pluginDefaults, changedBase, 0)
+        val third = cameraPluginSettings(plugins, changedBase, 0)
         assertNotEquals(first.getValue(PluginIds.POSE_ENHANCEMENT), third.getValue(PluginIds.POSE_ENHANCEMENT))
         assertEquals(first.getValue(PluginIds.CONFIGURED_MODEL), third.getValue(PluginIds.CONFIGURED_MODEL))
-        val newModelConfig = cameraPluginSettings(pluginDefaults, base, 1)
+        val newModelConfig = cameraPluginSettings(plugins, base, 1)
         assertNotEquals(first.getValue(PluginIds.CONFIGURED_MODEL), newModelConfig.getValue(PluginIds.CONFIGURED_MODEL))
         assertEquals(first.getValue(PluginIds.POSE_ENHANCEMENT), newModelConfig.getValue(PluginIds.POSE_ENHANCEMENT))
     }

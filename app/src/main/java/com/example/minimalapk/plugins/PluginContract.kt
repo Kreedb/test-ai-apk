@@ -35,7 +35,7 @@ internal class BitmapImage(override val bitmap: Bitmap) : PluginImage {
 internal data class CameraFrame(
     val source: ImageSource,
     val timestampNanos: Long,
-    /** Original camera resolution/orientation, retained for e.g. source-frame super resolution. */
+    /** Original camera pixels used by both the sharp preview and source-frame super resolution. */
     val raw: PluginImage,
     val image: PluginImage,
     val viewport: ViewportMapping,
@@ -146,6 +146,7 @@ internal data class HostSnapshot(
     val frame: CameraFrame? = null,
     val replacement: PluginContribution? = null,
     val layers: List<PluginContribution> = emptyList(),
+    /** Interval metrics persist independently of frame-bound drawing layers. */
     val monitors: List<PluginContribution> = emptyList(),
     val reports: List<PluginContribution> = emptyList(),
     val press: PressToken? = null,

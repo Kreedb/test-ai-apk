@@ -11,17 +11,18 @@ import com.example.minimalapk.models.sha256
 import com.example.minimalapk.models.writeAtomically
 import com.example.minimalapk.pose.GitHubMirrorPreference
 import com.example.minimalapk.pose.ModelDownload
-import com.example.minimalapk.pose.readCapped
 import java.io.File
-import java.util.zip.ZipFile
 
-/** A demo model fetched on demand; the APK only bundles the pose model. */
+/** A scene model fetched on demand; the APK only bundles the pose model. */
 data class ExampleModel(
     val id: String,
     val name: String,
     val url: String,
     val sizeBytes: Long,
     val sha256: String,
+    /** Exact associated file in the pinned model, downloaded and verified with the weights. */
+    val labelFile: String? = null,
+    val labelCount: Int = 0,
 )
 
 /**
@@ -53,21 +54,25 @@ object ExampleCatalog {
         "classification", "MobileNet 图片分类",
         "https://storage.googleapis.com/download.tensorflow.org/models/tflite/task_library/image_classification/android/mobilenet_v1_1.0_224_quantized_1_metadata_1.tflite",
         4_287_874, "d3949e8a3556c79739cb675e0be7476503bcce76938031c6a1048e13e0cb7d8b",
+        labelFile = "labels.txt", labelCount = 1001,
     )
     val detection = ExampleModel(
         "detection", "SSD 物体检测",
         "https://storage.googleapis.com/download.tensorflow.org/models/tflite/task_library/object_detection/android/lite-model_ssd_mobilenet_v1_1_metadata_2.tflite",
         4_185_175, "cbdecd08b44c5dea3821f77c5468e2936ecfbf43cde0795a2729fdb43401e58b",
+        labelFile = "labelmap.txt", labelCount = 90,
     )
     val audio = ExampleModel(
         "audio", "YAMNet 音频分类",
         "https://storage.googleapis.com/download.tensorflow.org/models/tflite/task_library/audio_classification/android/lite-model_yamnet_classification_tflite_1.tflite",
         4_126_810, "10c95ea3eb9a7bb4cb8bddf6feb023250381008177ac162ce169694d05c317de",
+        labelFile = "yamnet_label_list.txt", labelCount = 521,
     )
     val segmentation = ExampleModel(
         "segmentation", "DeepLab 图片分割",
         "https://storage.googleapis.com/download.tensorflow.org/models/tflite/task_library/image_segmentation/android/lite-model_deeplabv3_1_metadata_2.tflite",
         2_780_051, "9711334db2b01d5894feb8ed0f5cb3e97d125b8d229f8d8692f625801818f5ef",
+        labelFile = "labelmap.txt", labelCount = 21,
     )
     val configurable = listOf(moveNet, classification, detection, segmentation, audio)
 
@@ -93,39 +98,52 @@ internal object ExampleDownload {
         return target
     }
 
-    /** Reads the label file embedded after the TFLite buffer by the metadata packer. */
-    fun labels(file: File): List<String> = ZipFile(file).use { zip ->
-        val entry = zip.entries().asSequence().firstOrNull { it.name.endsWith(".txt") } ?: return emptyList()
-        zip.getInputStream(entry).use { it.readCapped(1024 * 1024) }.toString(Charsets.UTF_8).trimEnd().lines()
-    }
+    /** Never substitute an unrelated TXT file or a label list from a different model version. */
+    fun labels(file: File, example: ExampleModel): List<String> = example.labelFile?.let { name ->
+        ModelLabels.read(file, name).also {
+            require(it.size == example.labelCount) { "${example.name} 标签数不符：需要 ${example.labelCount}，实际 ${it.size}" }
+        }
+    } ?: emptyList()
 
     @Synchronized
     fun install(context: Context, example: ExampleModel): ConfiguredModel {
         val file = ensure(context, example)
+        // Validate resources before install writes an inferred config. A failed label read must
+        // not leave an apparently installed, permanently unlabeled catalog model behind.
+        val labels = labels(file, example)
         val directory = ConfiguredModelStore.directory(context)
         val existing = File(directory, "${example.sha256}.properties").exists()
         val model = ConfiguredModelStore.install(directory, example.name, file.readBytes())
-        if (!existing) {
-            val description = ConfiguredModelStore.describe(model)
+        val description = ConfiguredModelStore.describe(model)
+        val config = if (existing) {
+            ModelConfig.decode(model.configFile.readText(), description)
+        } else {
             val inferred = ModelConfig.infer(description.signatures.first())
-            val labels = if (example in listOf(ExampleCatalog.classification, ExampleCatalog.detection, ExampleCatalog.audio)) {
-                labels(file)
-            } else emptyList()
-            val config = inferred.copy(
+            inferred.copy(
                 inputs = inferred.inputs.map { input -> when (example) {
                     ExampleCatalog.classification, ExampleCatalog.detection, ExampleCatalog.segmentation -> input.copy(mean = 127.5f, std = 127.5f)
                     ExampleCatalog.audio -> input.copy(source = InputSource.AUDIO)
                     else -> input
                 } },
                 outputs = inferred.outputs.mapIndexed { index, output -> when {
-                    example == ExampleCatalog.detection && index == 0 -> output.copy(render = OutputRender.BOXES, labels = labels)
+                    example == ExampleCatalog.detection && index == 0 -> output.copy(render = OutputRender.BOXES)
                     example == ExampleCatalog.detection -> output.copy(render = OutputRender.VALUES)
                     example == ExampleCatalog.segmentation -> output.copy(render = OutputRender.SEGMENTATION)
-                    else -> output.copy(labels = labels)
+                    else -> output
                 } },
             )
-            ConfiguredModelStore.saveConfig(model, config.encode(), description)
         }
+        val repaired = repairCatalogLabels(config, example, labels)
+        if (!existing || repaired != config) ConfiguredModelStore.saveConfig(model, repaired.encode(), description)
         return model
     }
+}
+
+/** Repair older failed/partial installs without resetting user input, output or label choices. */
+internal fun repairCatalogLabels(config: ModelConfig, example: ExampleModel, labels: List<String>): ModelConfig {
+    if (labels.isEmpty()) return config
+    return config.copy(outputs = config.outputs.mapIndexed { index, output ->
+        val usesLabels = index == 0 || example == ExampleCatalog.detection && output.render == OutputRender.BOXES
+        if (usesLabels && output.labels.isEmpty()) output.copy(labels = labels) else output
+    })
 }

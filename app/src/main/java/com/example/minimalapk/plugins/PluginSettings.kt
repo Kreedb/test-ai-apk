@@ -3,6 +3,8 @@ package com.example.minimalapk.plugins
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
+import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.models.ConfiguredModelStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,7 +25,7 @@ internal object PluginIds {
     const val PERSONALIZATION = "model_personalization"
 }
 
-/** Stable key inside `plugin.configured_model.config`; shared by the runner and its configuration UI. */
+/** Legacy single-model choice, migrated to each model's independent enabled sidecar. */
 internal const val CONFIGURED_MODEL_ID_KEY = "model_id"
 
 /** Minimum score for MoveNet keypoints, detection boxes and segmentation pixels. */
@@ -93,12 +95,12 @@ internal data class PoseEnhancementSettings(
 internal val pluginDefaults = mapOf(
     // Preserve the previously visible enhancement and metrics. New model consumers remain opt-in.
     PluginIds.POSE_ENHANCEMENT to PluginSettings(true, PoseEnhancementSettings().toConfig()),
-    PluginIds.CONFIGURED_MODEL to PluginSettings(config = mapOf(CONFIGURED_MODEL_ID_KEY to "")),
+    PluginIds.CONFIGURED_MODEL to PluginSettings(),
     PluginIds.SYSTEM_MONITOR to PluginSettings(true, SystemMonitorSettings().toConfig()),
     PluginIds.SUPER_RESOLUTION to PluginSettings(config = SuperResolutionSettings().toConfig()),
     PluginIds.MOVENET_SCENE to PluginSettings(config = SceneThresholdSettings().toConfig()),
     PluginIds.IMAGE_CLASSIFICATION_SCENE to PluginSettings(),
-    PluginIds.OBJECT_DETECTION_SCENE to PluginSettings(config = SceneThresholdSettings().toConfig()),
+    PluginIds.OBJECT_DETECTION_SCENE to PluginSettings(config = SceneThresholdSettings("0.5").toConfig()),
     PluginIds.IMAGE_SEGMENTATION_SCENE to PluginSettings(config = SceneThresholdSettings().toConfig()),
     PluginIds.AUDIO_CLASSIFICATION to PluginSettings(config = AudioClassificationSettings().toConfig()),
     PluginIds.TTS to PluginSettings(config = mapOf(TTS_TEXT_KEY to "你好，这是插件语音朗读。")),
@@ -179,6 +181,17 @@ internal fun restorePluginSettings(
 
 private class AndroidPluginPreferences(context: Context) : PluginPreferences {
     private val preferences = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+
+    init {
+        val key = "plugin.${PluginIds.CONFIGURED_MODEL}.config.$CONFIGURED_MODEL_ID_KEY"
+        val legacyId = preferences.all[key] as? String
+        if (legacyId != null) {
+            runCatching {
+                ConfiguredModelStore.migrateLegacySelection(ConfiguredModelStore.directory(context), legacyId)
+                preferences.edit { remove(key) }
+            }.onFailure { AppLog.e("Models", "旧模型开关迁移失败，保留原选择以便重试", it) }
+        }
+    }
 
     override fun read(): Map<String, *> = preferences.all
 

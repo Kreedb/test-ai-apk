@@ -33,6 +33,7 @@ android {
         targetSdk { version = release(37) }
         versionCode = 1
         versionName = "1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -125,4 +126,5 @@ dependencies {
     implementation(libs.qnn.runtime)
 
     testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
 }

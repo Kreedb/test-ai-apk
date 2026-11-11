@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.minimalapk.examples.AudioClassificationRunner
 import com.example.minimalapk.examples.ExampleCatalog
 import com.example.minimalapk.examples.ExampleDownload
+import com.example.minimalapk.log.AppLog
 import java.util.Locale
 import java.util.concurrent.CancellationException
 
@@ -27,10 +28,10 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
     )
 
     private val lock = Any()
+    private var permission = AudioPermission.NOT_REQUESTED
+    private var activeToken: PluginToken? = null
     private var window: AudioSampleWindow? = null
     private val gate = AudioResultGate()
-    @Volatile private var labelCount = 0
-
     private val model = AsyncModelSlot<Request, AudioClassificationRunner>(
         "AudioClassificationOwner",
         open = { request ->
@@ -41,12 +42,13 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
         },
         ready = { request, runner ->
             if (request.context.isCurrent()) {
-                labelCount = runner.labels.size
-                synchronized(lock) {
+                val accepted = synchronized(lock) {
+                    if (activeToken != request.context.token) return@synchronized false
                     window?.reset()
                     window = AudioSampleWindow(runner.windowSamples, runner.sampleRate)
+                    true
                 }
-                request.context.publish(
+                if (accepted) request.context.publish(
                     PluginOutput(
                         System.nanoTime(),
                         listOf(
@@ -60,6 +62,14 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
             }
         },
         failed = { request, error ->
+            if (error !is CancellationException) AppLog.e("AudioClassification", "YAMNet 加载或推理失败", error)
+            synchronized(lock) {
+                if (activeToken == request.context.token) {
+                    window?.reset()
+                    window = null
+                    gate.reset()
+                }
+            }
             request.context.publish(
                 PluginOutput(
                     System.nanoTime(),
@@ -72,6 +82,7 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
     private val worker = BoundedFrameWorker<WindowRequest>(
         "AudioClassificationWork",
         failed = { request, error ->
+            AppLog.e("AudioClassification", "声音窗口推理失败", error)
             if (request.context.isCurrent()) {
                 request.context.publish(
                     PluginOutput(
@@ -86,16 +97,39 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
 
     override fun onEvent(event: PluginEvent, context: PluginContext) {
         when (event) {
-            PluginEvent.Started, PluginEvent.ConfigurationChanged -> restart(context)
-            is PluginEvent.Stopped -> stop()
+            PluginEvent.Started, PluginEvent.ConfigurationChanged -> updatePermission(context)
+            is PluginEvent.AudioPermissionChanged -> {
+                permission = event.permission
+                updatePermission(context)
+            }
+            is PluginEvent.Stopped -> {
+                permission = AudioPermission.NOT_REQUESTED
+                stop()
+            }
             is PluginEvent.Audio -> onAudio(event, context)
             else -> Unit
+        }
+    }
+
+    private fun updatePermission(context: PluginContext) {
+        if (permission == AudioPermission.GRANTED) {
+            restart(context)
+        } else {
+            stop()
+            context.publish(PluginOutput(System.nanoTime(), listOf(PluginMessage(
+                when (permission) {
+                    AudioPermission.MICROPHONE_BUSY -> "麦克风被占用，请释放后重新进入相机"
+                    AudioPermission.DENIED, AudioPermission.REVOKED -> "请授予麦克风权限以识别周围声音"
+                    else -> "等待麦克风权限"
+                }, MessageKind.STATUS,
+            ))))
         }
     }
 
     private fun restart(context: PluginContext) {
         if (!context.isCurrent()) return
         synchronized(lock) {
+            activeToken = context.token
             window?.reset()
             window = null
             gate.reset()
@@ -117,6 +151,7 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
 
     private fun stop() {
         synchronized(lock) {
+            activeToken = null
             window?.reset()
             window = null
             gate.reset()
@@ -129,6 +164,7 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
     private fun onAudio(event: PluginEvent.Audio, context: PluginContext) {
         if (!context.isCurrent()) return
         val request = synchronized(lock) {
+            if (activeToken != context.token) return
             val active = window ?: return
             val samples = try {
                 active.append(event.block)
@@ -142,8 +178,8 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
 
     private fun classify(request: WindowRequest) {
         if (!request.context.isCurrent() || !gate.isCurrent(request.generation)) return
-        val labels = model.runIfReady { _, runner ->
-            if (!request.context.isCurrent()) return@runIfReady null
+        val labels = model.runIfReady { owner, runner ->
+            if (owner.context.token != request.context.token || !request.context.isCurrent()) return@runIfReady null
             runner.classify(request.samples)
         } ?: return
         // A stop/config change between inference start and publish must not restore old text.
@@ -152,7 +188,7 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
         val messages = buildList {
             add(
                 PluginMessage(
-                    "声音分类（YAMNet $labelCount 类声音/环境声，不是语音识别/转写）",
+                    "声音分类（YAMNet ${labels.size} 类声音/环境声，不是语音识别/转写）",
                     MessageKind.STATUS,
                 ),
             )
@@ -167,6 +203,7 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
         String.format(Locale.US, "%.1f%%", score.coerceIn(0f, 1f) * 100f)
 
     override fun close() {
+        stop()
         worker.close()
         model.close()
     }

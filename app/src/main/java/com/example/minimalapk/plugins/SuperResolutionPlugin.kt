@@ -3,15 +3,16 @@ package com.example.minimalapk.plugins
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import com.example.minimalapk.examples.ExampleCatalog
 import com.example.minimalapk.examples.ExampleDownload
 import com.example.minimalapk.examples.SuperResolutionRunner
+import com.example.minimalapk.examples.fittedImage
 import com.example.minimalapk.log.AppLog
 import java.util.concurrent.CancellationException
+import java.util.Locale
 
 internal data class SuperResolutionSettings(
     val replacePreview: Boolean = true,
@@ -27,9 +28,8 @@ internal data class SuperResolutionSettings(
 }
 
 /**
- * Press-to-compare ESRGAN plugin. A press copies the current source frame once, enhances only the
- * centered half-size square ROI, and publishes that whole-frame composite with the active press
- * token. The live camera frame keeps streaming; release/cancel drops the replacement in the host.
+ * One whole-photo snapshot per press. Overlapping fixed-shape inferences have bounded pixel/call
+ * budgets; the native model is never resized to a camera-sized tensor. Release cancels between tiles.
  */
 internal class SuperResolutionPlugin(private val application: Context) : CameraPlugin {
     override val descriptor = PluginDescriptor(
@@ -54,6 +54,7 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
     private var activePress: PressToken? = null
     private var pendingPress: PressToken? = null
     private var pendingContext: PluginContext? = null
+    private var current: PluginContext? = null
 
     private val model = AsyncModelSlot<ModelRequest, SuperResolutionRunner>(
         name = "SuperResolutionOwner",
@@ -65,7 +66,7 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
         },
         ready = { request, _ ->
             request.context.publish(PluginOutput(
-                System.nanoTime(), listOf(PluginMessage("超分辨率模型已就绪", MessageKind.STATUS)),
+                System.nanoTime(), listOf(PluginMessage("已就绪：按住预览处理整张照片，完成后显示；松手恢复实时原图", MessageKind.STATUS)),
             ))
         },
         failed = { request, error ->
@@ -90,11 +91,11 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
     override fun onEvent(event: PluginEvent, context: PluginContext) {
         when (event) {
             PluginEvent.Started, PluginEvent.ConfigurationChanged -> restart(context)
-            is PluginEvent.Stopped -> stop()
+            is PluginEvent.Stopped -> stop(context)
             is PluginEvent.Frame -> onFrame(event.frame, context)
             is PluginEvent.Press -> startPress(event, context)
-            is PluginEvent.Release -> endPress(event.token)
-            is PluginEvent.Cancel -> endPress(event.token)
+            is PluginEvent.Release -> endPress(event.token, context)
+            is PluginEvent.Cancel -> endPress(event.token, context)
             else -> Unit
         }
     }
@@ -103,6 +104,8 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
         if (!context.isCurrent()) return
         val settings = SuperResolutionSettings.from(context.settings)
         synchronized(lock) {
+            if (!context.isCurrent()) return
+            current = context
             latestFrame = null
             activePress = null
             pendingPress = null
@@ -124,8 +127,10 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
         model.set(ModelRequest(context))
     }
 
-    private fun stop() {
+    private fun stop(context: PluginContext) {
         synchronized(lock) {
+            if (current?.token != context.token) return
+            current = null
             latestFrame = null
             activePress = null
             pendingPress = null
@@ -141,6 +146,8 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
         if (!context.isCurrent()) return
         val request = synchronized(lock) {
             activePress = event.token
+            pendingPress = null
+            pendingContext = null
             val frame = latestFrame
             if (frame != null && frame.source.session == event.token.session &&
                 frame.source.frameNumber >= event.token.firstFrame
@@ -159,11 +166,13 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
 
     private fun onFrame(frame: CameraFrame, context: PluginContext) {
         if (!context.isCurrent()) return
-        latestFrame = frame
         val request = synchronized(lock) {
+            if (current?.token != context.token || !context.isCurrent()) return
+            latestFrame = frame
             val press = pendingPress
             val pending = pendingContext
-            if (press != null && pending != null) {
+            if (press != null && pending != null && activePress == press &&
+                frame.source.session == press.session && frame.source.frameNumber >= press.firstFrame) {
                 pendingPress = null
                 pendingContext = null
                 EnhanceRequest(pending, press, frame)
@@ -172,72 +181,125 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
         if (request != null) worker.offer(request)
     }
 
-    private fun endPress(token: PressToken) {
+    private fun endPress(token: PressToken, context: PluginContext) {
         synchronized(lock) {
-            if (activePress == token) activePress = null
+            if (activePress != token) return
+            activePress = null
             if (pendingPress == token) {
                 pendingPress = null
                 pendingContext = null
             }
         }
         worker.clear()
+        // The host removes replacements synchronously; also retire the old "processing" text.
+        if (context.isCurrent()) context.publish(PluginOutput(System.nanoTime(), listOf(PluginMessage(
+            "已恢复实时原图；按住预览可重新处理整张照片", MessageKind.STATUS,
+        ))))
     }
 
-    private fun isStill(request: EnhanceRequest): Boolean =
-        request.context.isCurrent() &&
-            request.context.currentPress() == request.press &&
-            synchronized(lock) { activePress == request.press }
+    private fun isStill(request: EnhanceRequest): Boolean = superResolutionRequestIsCurrent(
+        request.context.isCurrent(), request.press, request.context.currentPress(),
+        synchronized(lock) { activePress }, request.frame.source,
+    )
+
+    /** Order status updates against release as well as images: a late tile must not restore
+     * "processing" after endPress has published "restored". Host independently checks the image. */
+    private fun publishForPress(request: EnhanceRequest, output: PluginOutput): Boolean = synchronized(lock) {
+        if (!isStill(request)) false else request.context.publish(output)
+    }
 
     private fun enhance(request: EnhanceRequest) {
         if (!isStill(request)) return
         val frame = request.frame
-        val roi = try {
-            superResolutionRoi(frame.source, frame.raw.width, frame.raw.height)
-        } catch (error: Throwable) {
-            publishEnhanceFailure(request, error)
-            return
-        }
-        val base = frame.image.copyBitmap()
+        var composite: Bitmap? = null
         var published = false
         try {
-            val upscaled = model.runIfReady { _, runner ->
+            val enhanced = model.runIfReady { loaded, runner ->
+                if (loaded.context.token != request.context.token) return@runIfReady null
                 if (!isStill(request)) return@runIfReady null
-                val crop = Bitmap.createBitmap(
-                    frame.raw.bitmap, roi.raw.left, roi.raw.top, roi.raw.width, roi.raw.height,
+                val swapped = frame.source.rotationDegrees % 180 != 0
+                val plan = superResolutionPlan(
+                    if (swapped) frame.raw.height else frame.raw.width,
+                    if (swapped) frame.raw.width else frame.raw.height,
                 )
-                // The raw crop is in sensor orientation; rotate it upright before ESRGAN so the
-                // paste-back ROI is not sideways at 90/270.
-                val rotation = ((frame.source.rotationDegrees % 360) + 360) % 360
-                val input = if (rotation == 0) crop else Bitmap.createBitmap(
-                    crop, 0, 0, crop.width, crop.height,
-                    Matrix().apply { postRotate(rotation.toFloat()) }, true,
-                )
+                val started = System.nanoTime()
+                AppLog.i("SuperResolution", "整帧请求 raw=${frame.raw.width}x${frame.raw.height} " +
+                    "rotation=${frame.source.rotationDegrees} working=${plan.width}x${plan.height} " +
+                    "tiles=${plan.tiles.size}/${SUPER_RESOLUTION_MAX_TILES} model=50→200 CPU budget=30s " +
+                    "session=${frame.source.session} frame=${frame.source.frameNumber}")
+                publishForPress(request, PluginOutput(started, listOf(PluginMessage(
+                    "整帧处理中：${plan.width}×${plan.height} → ${plan.outputWidth}×${plan.outputHeight}，" +
+                        "${plan.tiles.size} 块；请保持按住，松手可取消", MessageKind.STATUS,
+                ))))
+                val fitted = fittedImage(frame.raw.bitmap, plan.width, plan.height, frame.source.rotationDegrees)
+                val input = fitted.bitmap
+                val pixels = IntArray(plan.width * plan.height)
                 try {
-                    runner.run(input)
+                    input.getPixels(pixels, 0, plan.width, 0, 0, plan.width, plan.height)
                 } finally {
-                    if (input !== crop) input.recycle()
-                    if (crop !== frame.raw.bitmap) crop.recycle()
+                    input.recycle()
                 }
-            } ?: return
-            try {
-                if (!isStill(request)) return
-                Canvas(base).drawBitmap(
-                    upscaled,
-                    Rect(0, 0, upscaled.width, upscaled.height),
-                    RectF(
-                        roi.composite.left.toFloat(), roi.composite.top.toFloat(),
-                        roi.composite.right.toFloat(), roi.composite.bottom.toFloat(),
-                    ),
-                    paint,
-                )
-            } finally {
-                upscaled.recycle()
+                val (width, height) = superResolutionCompositeSize(frame.source.space, plan)
+                val base = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                composite = base
+                val canvas = Canvas(base)
+                canvas.drawBitmap(frame.image.bitmap, null, RectF(0f, 0f, width.toFloat(), height.toFloat()), paint)
+                val bounds = frame.source.space.photoBounds
+                val sx = width.toFloat() / frame.source.space.width
+                val sy = height.toFloat() / frame.source.space.height
+                val photoWidth = (bounds.right - bounds.left) * sx
+                val photoHeight = (bounds.bottom - bounds.top) * sy
+                canvas.save()
+                canvas.clipRect(bounds.left * sx, bounds.top * sy, bounds.right * sx, bounds.bottom * sy)
+                var lastProgress = started
+                for ((index, tile) in plan.tiles.withIndex()) {
+                    if (!isStill(request)) return@runIfReady null
+                    if (System.nanoTime() - started > MAX_ENHANCE_NANOS) {
+                        publishEnhanceFailure(request, IllegalStateException("整帧处理超过 30 秒预算，已保留原图；可再次按住重试"))
+                        return@runIfReady null
+                    }
+                    val upscaled = runner.runTile(pixels, plan.width, plan.height, tile.sampleLeft, tile.sampleTop)
+                    try {
+                        if (!isStill(request)) return@runIfReady null
+                        if (System.nanoTime() - started > MAX_ENHANCE_NANOS) {
+                            publishEnhanceFailure(request, IllegalStateException("整帧处理超过 30 秒预算，已保留原图；可再次按住重试"))
+                            return@runIfReady null
+                        }
+                        val crop = tile.outputCrop
+                        canvas.drawBitmap(
+                            upscaled, Rect(crop.left, crop.top, crop.right, crop.bottom),
+                            RectF(
+                                bounds.left * sx + (tile.core.left - fitted.fit.left) * photoWidth / fitted.fit.photoWidth,
+                                bounds.top * sy + (tile.core.top - fitted.fit.top) * photoHeight / fitted.fit.photoHeight,
+                                bounds.left * sx + (tile.core.right - fitted.fit.left) * photoWidth / fitted.fit.photoWidth,
+                                bounds.top * sy + (tile.core.bottom - fitted.fit.top) * photoHeight / fitted.fit.photoHeight,
+                            ), paint,
+                        )
+                    } finally { upscaled.recycle() }
+                    val now = System.nanoTime()
+                    if (now - lastProgress >= 1_000_000_000L && isStill(request)) {
+                        publishForPress(request, PluginOutput(now, listOf(PluginMessage(
+                            "整帧处理中：${index + 1}/${plan.tiles.size} 块，松手取消并恢复实时原图", MessageKind.STATUS,
+                        ))))
+                        lastProgress = now
+                    }
+                }
+                canvas.restore()
+                plan to (System.nanoTime() - started)
             }
+            // Loading/error callbacks own the diagnostic when no model was borrowed. Do not mask
+            // an actual inference failure (runIfReady closes the model and reports it) as loading.
+            if (enhanced == null) return
             if (!isStill(request)) return
-            published = request.context.publish(PluginOutput(
+            val (plan, elapsed) = enhanced
+            val base = checkNotNull(composite)
+            published = publishForPress(request, PluginOutput(
                 timestampNanos = System.nanoTime(),
                 messages = listOf(
-                    PluginMessage("按压：仅增强中心 50% 区域（模型 4×），松手恢复实时原图", MessageKind.STATUS),
+                    PluginMessage(
+                        "整帧增强快照：工作图 ${plan.width}×${plan.height}，模型 4×，显示 ${base.width}×${base.height}；" +
+                            "耗时 ${String.format(Locale.ROOT, "%.1f", elapsed / 1e9)} 秒，松手恢复实时原图", MessageKind.STATUS,
+                    ),
                 ),
                 replacement = PreviewReplacement(
                     source = frame.source,
@@ -245,11 +307,13 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
                     press = request.press,
                 ),
             ))
+            if (published) AppLog.i("SuperResolution", "整帧完成 output=${base.width}x${base.height} " +
+                "tiles=${plan.tiles.size} elapsedMs=${elapsed / 1_000_000}; snapshot only, source frame=${frame.source.frameNumber}")
         } catch (error: Throwable) {
             publishEnhanceFailure(request, error)
         } finally {
             // Published images are GC-owned; only recycle a composite the host rejected/dropped.
-            if (!published) base.recycle()
+            if (!published) composite?.recycle()
         }
     }
 
@@ -257,7 +321,7 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
         if (!isStill(request)) return
         val message = error.message ?: "推理失败"
         AppLog.w("SuperResolution", "超分辨率推理失败", error)
-        request.context.publish(PluginOutput(
+        publishForPress(request, PluginOutput(
             System.nanoTime(),
             listOf(PluginMessage("超分辨率失败：${message.take(200)}", MessageKind.ERROR)),
         ))
@@ -266,5 +330,9 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
     override fun close() {
         worker.close()
         model.close()
+    }
+
+    private companion object {
+        const val MAX_ENHANCE_NANOS = 30_000_000_000L
     }
 }

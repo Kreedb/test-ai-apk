@@ -5,8 +5,11 @@ import androidx.core.graphics.scale
 import com.example.minimalapk.pose.GraphSignature
 import org.tensorflow.lite.Interpreter
 
+/** Numeric outputs retain their tensor identity; scene plugins must never parse the debug text. */
+internal data class LiveTensorOutput(val shape: List<Int>, val values: DoubleArray)
+
 /**
- * Camera-side runner for a workbench/example model. One CPU Interpreter stays open across frames;
+ * Camera-side runner for a configured/scene model. One CPU Interpreter stays open across frames;
  * only models whose inputs all come from an image can be fed the camera preview.
  */
 internal class LiveConfiguredModel(
@@ -35,7 +38,35 @@ internal class LiveConfiguredModel(
         interpreter = opened
     }
 
-    fun run(source: Bitmap): ModelRunResult {
+    fun run(source: Bitmap): ModelRunResult = withInputs(source) { inputs, images ->
+        execute(interpreter, config, graph, inputs, images, transparent = true)
+    }
+
+    /** Fixed scene contracts use the same encoder and interpreter, with task-specific decoding. */
+    fun runTensors(source: Bitmap): List<LiveTensorOutput> = withInputs(source) { inputs, _ ->
+        if (config.signature.isEmpty()) {
+            interpreter.runForMultipleInputsOutputs(inputs, emptyMap())
+        } else {
+            val named = graph.inputs.mapIndexed { index, tensor ->
+                val buffer = inputs[index] as java.nio.ByteBuffer
+                tensor.name to if (config.inputs[index].shape == tensor.shape) buffer
+                    else shapedArray(buffer, tensor.type, config.inputs[index].shape)
+            }.toMap()
+            interpreter.runSignature(named, emptyMap(), config.signature)
+        }
+        graph.outputs.mapIndexed { index, tensor ->
+            val actual = if (config.signature.isEmpty()) interpreter.getOutputTensor(index)
+                else interpreter.getOutputTensorFromSignature(tensor.name, config.signature)
+            val shape = actual.shape().toList()
+            require(tensorElements(shape) <= MAX_TENSOR_ELEMENTS) { "场景输出张量超过上限" }
+            val quantization = actual.quantizationParams()
+            LiveTensorOutput(shape, decodeTensor(
+                actual.asReadOnlyBuffer(), tensor.type, quantization.scale, quantization.zeroPoint.toLong(),
+            ))
+        }
+    }
+
+    private fun <T> withInputs(source: Bitmap, consume: (Array<Any>, Map<Int, Bitmap>) -> T): T {
         val images = mutableMapOf<Int, Bitmap>()
         try {
             val inputs = Array<Any>(graph.inputs.size) { index ->
@@ -47,8 +78,7 @@ internal class LiveConfiguredModel(
                 resized.getPixels(pixels, 0, width, 0, 0, width, height)
                 encodeTensor(imageValues(pixels, channels, input), graph.inputs[index], input.source)
             }
-            // Transparent renderers allocate independent outputs; the input resizes never escape.
-            return execute(interpreter, config, graph, inputs, images, transparent = true)
+            return consume(inputs, images)
         } finally {
             images.values.filter { it !== source }.distinct().forEach { it.recycle() }
         }
@@ -60,4 +90,4 @@ internal class LiveConfiguredModel(
 /** Returns a user-facing reason when a model cannot take a camera frame, else null. */
 internal fun cameraModelProblem(config: ModelConfig): String? =
     if (config.inputs.all { it.source == InputSource.IMAGE }) null
-    else "相机叠加只支持 IMAGE 输入；音频、文本或数值模型请在 插件 → 自定义模型 → 模型工作台 中运行"
+    else "相机叠加只支持 IMAGE 输入；请在 插件 → 自定义模型 → 对应模型配置 中检查输入，音频、文本或数值输入不能用于相机叠加"

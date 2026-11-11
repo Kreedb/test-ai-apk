@@ -2,79 +2,91 @@ package com.example.minimalapk.plugins
 
 import com.example.minimalapk.examples.SR_INPUT_SIZE
 import com.example.minimalapk.examples.SR_OUTPUT_SIZE
-import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Default ROI: the center half of the frame's smaller side, never the whole preview. */
-internal const val SUPER_RESOLUTION_ROI_FRACTION = 0.5f
+internal const val SUPER_RESOLUTION_HALO = 5
+internal const val SUPER_RESOLUTION_MAX_TILES = 96
+internal const val SUPER_RESOLUTION_MAX_INPUT_EDGE = 512
+internal const val SUPER_RESOLUTION_MAX_OUTPUT_EDGE = 2048
+
+/** Shared publication predicate, evaluated before/after each native tile and by host on publish. */
+internal fun superResolutionRequestIsCurrent(
+    contextCurrent: Boolean,
+    requested: PressToken,
+    hostPress: PressToken?,
+    localPress: PressToken?,
+    source: ImageSource,
+): Boolean = contextCurrent && requested == hostPress && requested == localPress &&
+    source.session == requested.session && source.frameNumber >= requested.firstFrame
 
 internal data class PixelRect(val left: Int, val top: Int, val width: Int, val height: Int) {
-    init {
-        require(width > 0 && height > 0)
-    }
-
+    init { require(width > 0 && height > 0) }
     val right: Int get() = left + width
     val bottom: Int get() = top + height
 }
 
-internal data class SuperResolutionRoi(
-    /** Square ROI in upright source pixels; also the destination on the full-frame composite. */
-    val source: PixelRect,
-    /** The same ROI in original camera pixels, used for the 50×50 model crop. */
-    val raw: PixelRect,
-    /** Fixed model input rectangle. */
-    val input: PixelRect,
-) {
-    val composite: PixelRect get() = source
+/** Disjoint useful regions with a real-image halo on every inference; no center-only ROI. */
+internal data class SuperResolutionTile(val core: PixelRect) {
+    val sampleLeft: Int get() = core.left - SUPER_RESOLUTION_HALO
+    val sampleTop: Int get() = core.top - SUPER_RESOLUTION_HALO
+    val outputCrop: PixelRect get() = PixelRect(
+        SUPER_RESOLUTION_HALO * SR_SCALE, SUPER_RESOLUTION_HALO * SR_SCALE,
+        core.width * SR_SCALE, core.height * SR_SCALE,
+    )
 }
 
-/**
- * Maps one square ROI from the original sensor frame to the upright source/composite frame.
- * The source rect is derived from the raw rect through [RawImageMapping], so 90/270 rotation and
- * any raw/source scale (including letterboxing) stay aligned. Nothing here claims whole-frame SR.
- */
-internal fun superResolutionRoi(
-    source: ImageSource,
-    rawWidth: Int,
-    rawHeight: Int,
-    fraction: Float = SUPER_RESOLUTION_ROI_FRACTION,
-    inputSize: Int = SR_INPUT_SIZE,
-    outputSize: Int = SR_OUTPUT_SIZE,
-): SuperResolutionRoi {
-    require(fraction > 0f && fraction <= 1f) { "ROI fraction must be in (0, 1]" }
-    require(inputSize > 0 && outputSize > 0)
-    val mapping = RawImageMapping(rawWidth, rawHeight, source)
-    val smaller = min(rawWidth, rawHeight)
-    val rawSide = (smaller * fraction).roundToInt().coerceIn(1, smaller)
-    val raw = PixelRect(
-        left = (rawWidth - rawSide) / 2,
-        top = (rawHeight - rawSide) / 2,
-        width = rawSide,
-        height = rawSide,
-    )
+internal const val SR_SCALE = SR_OUTPUT_SIZE / SR_INPUT_SIZE
 
-    val center = mapping.toImage(ImagePoint(rawWidth / 2f, rawHeight / 2f))
-    val edge = mapping.toImage(ImagePoint(rawWidth / 2f + rawSide / 2f, rawHeight / 2f))
-    // Rotation puts the raw-x offset on either the source x or y axis; the length is the sum.
-    val half = abs(edge.x - center.x) + abs(edge.y - center.y)
-    val bounds = source.space.photoBounds
-    val photoWidth = floor(bounds.right - bounds.left).toInt()
-    val photoHeight = floor(bounds.bottom - bounds.top).toInt()
-    val maxSide = min(min(photoWidth, photoHeight), min(source.space.width, source.space.height))
-        .coerceAtLeast(1)
-    val side = (half * 2f).roundToInt().coerceIn(1, maxSide)
-    val minLeft = ceil(bounds.left).toInt().coerceIn(0, source.space.width - side)
-    val minTop = ceil(bounds.top).toInt().coerceIn(0, source.space.height - side)
-    val maxLeft = (floor(bounds.right).toInt() - side).coerceAtLeast(minLeft)
-    val maxTop = (floor(bounds.bottom).toInt() - side).coerceAtLeast(minTop)
-    val left = (center.x - side / 2f).roundToInt().coerceIn(minLeft, maxLeft)
-    val top = (center.y - side / 2f).roundToInt().coerceIn(minTop, maxTop)
-    return SuperResolutionRoi(
-        source = PixelRect(left, top, side, side),
-        raw = raw,
-        input = PixelRect(0, 0, inputSize, inputSize),
+internal data class SuperResolutionPlan(val width: Int, val height: Int, val tiles: List<SuperResolutionTile>) {
+    val outputWidth: Int get() = width * SR_SCALE
+    val outputHeight: Int get() = height * SR_SCALE
+}
+
+// shortcut: the fixed CPU model uses a bounded whole-photo working size; upgrade for native-resolution real-time SR.
+/** Bounds both native calls and output memory, uniformly resampling the whole photo when needed. */
+internal fun superResolutionPlan(width: Int, height: Int): SuperResolutionPlan {
+    require(width > 0 && height > 0)
+    val core = SR_INPUT_SIZE - SUPER_RESOLUTION_HALO * 2
+    fun dimensions(scale: Double) = Pair(
+        (width * scale).roundToInt().coerceAtLeast(1),
+        (height * scale).roundToInt().coerceAtLeast(1),
     )
+    fun fits(scale: Double): Boolean {
+        val (w, h) = dimensions(scale)
+        return (w + core - 1) / core * ((h + core - 1) / core) <= SUPER_RESOLUTION_MAX_TILES
+    }
+    var upper = min(1.0, SUPER_RESOLUTION_MAX_INPUT_EDGE.toDouble() / maxOf(width, height))
+    if (!fits(upper)) {
+        var lower = 0.0
+        repeat(40) {
+            val middle = (lower + upper) / 2
+            if (fits(middle)) lower = middle else upper = middle
+        }
+        upper = lower
+    }
+    val (w, h) = dimensions(upper)
+    val tiles = buildList {
+        for (y in 0 until h step core) for (x in 0 until w step core) {
+            add(SuperResolutionTile(PixelRect(x, y, min(core, w - x), min(core, h - y))))
+        }
+    }
+    return SuperResolutionPlan(w, h, tiles)
+}
+
+/** Exact host aspect ratio, bounded to 2048², without magnifying past the inferred photo pixels. */
+internal fun superResolutionCompositeSize(space: ImageSpace, plan: SuperResolutionPlan): Pair<Int, Int> {
+    fun gcd(a: Int, b: Int): Int = if (b == 0) a else gcd(b, a % b)
+    val divisor = gcd(space.width, space.height)
+    val bounds = space.photoBounds
+    val scale = minOf(
+        plan.outputWidth / (bounds.right - bounds.left),
+        plan.outputHeight / (bounds.bottom - bounds.top),
+        SUPER_RESOLUTION_MAX_OUTPUT_EDGE.toFloat() / space.width,
+        SUPER_RESOLUTION_MAX_OUTPUT_EDGE.toFloat() / space.height,
+    )
+    val units = floor(divisor * scale).toInt()
+    require(units > 0) { "当前预览宽高比无法在整帧超分内存上限内合成" }
+    return space.width / divisor * units to space.height / divisor * units
 }

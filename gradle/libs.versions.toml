@@ -10,6 +10,7 @@ materialKolor = "5.0.1"
 litert = "2.3.2"
 qnnRuntime = "2.50.0"
 junit = "4.13.2"
+testRunner = "1.7.0"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -33,6 +34,7 @@ litert-npu-runtime-qualcomm = { module = "com.google.ai.edge.litert:litert-npu-r
 qnn-runtime = { module = "com.qualcomm.qti:qnn-runtime", version.ref = "qnnRuntime" }
 
 junit = { module = "junit:junit", version.ref = "junit" }
+androidx-test-runner = { module = "androidx.test:runner", version.ref = "testRunner" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

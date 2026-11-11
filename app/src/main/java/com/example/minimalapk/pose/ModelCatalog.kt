@@ -1,5 +1,6 @@
 package com.example.minimalapk.pose
 
+import com.example.minimalapk.examples.ExampleCatalog
 import com.example.minimalapk.models.sha256
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -25,6 +26,9 @@ data class RemoteModel(
  * validate the bytes that arrive from either route.
  */
 object ModelCatalog {
+    /** One download menu also covers the models used by the built-in scene plugins. */
+    val configurableModels = ExampleCatalog.configurable + listOf(ExampleCatalog.superResolution, ExampleCatalog.personalization)
+
     val models = listOf(
         RemoteModel(
             name = "YOLO11n-pose 640",
@@ -35,7 +39,20 @@ object ModelCatalog {
             sizeBytes = 11_835_168,
             sha256 = "01b0d8c7e28369977c69d5c66a60c63301468a5a8ae24bafce942b61bab289c0",
         ),
-    )
+    ) + configurableModels.map { example ->
+        RemoteModel(
+            name = example.name,
+            url = example.url,
+            sizeBytes = example.sizeBytes,
+            sha256 = example.sha256,
+            note = when (example) {
+                ExampleCatalog.audio -> "音频文件推理；实时麦克风识别请使用声音识别插件"
+                ExampleCatalog.personalization -> "保留训练/推理签名；训练与检查点在设备端学习插件中管理"
+                ExampleCatalog.superResolution -> "图片超分；整帧相机增强请使用超分辨率插件"
+                else -> "下载后点击模型卡片配置，开启后参与相机逐帧推理"
+            },
+        )
+    }
 }
 
 internal object ModelDownload {
