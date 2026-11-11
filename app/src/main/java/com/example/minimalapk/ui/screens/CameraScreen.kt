@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -31,7 +32,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -46,7 +46,6 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -57,22 +56,19 @@ import com.example.minimalapk.plugins.CameraModelSettingsStore
 import com.example.minimalapk.plugins.CameraSession
 import com.example.minimalapk.plugins.ConfiguredModelPlugin
 import com.example.minimalapk.plugins.MessageKind
+import com.example.minimalapk.plugins.PluginContribution
 import com.example.minimalapk.plugins.PluginHost
 import com.example.minimalapk.plugins.PluginIds
 import com.example.minimalapk.plugins.PluginSettingsStore
 import com.example.minimalapk.plugins.PoseEnhancementPlugin
 import com.example.minimalapk.plugins.PoseModelsPlugin
+import com.example.minimalapk.plugins.SystemMonitorPlugin
+import com.example.minimalapk.plugins.cameraFrameRate
 import com.example.minimalapk.plugins.cameraPluginSettings
-import com.example.minimalapk.pose.DeviceUsage
-import com.example.minimalapk.pose.DeviceUsageSampler
-import com.example.minimalapk.pose.PoseTimings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
-import java.util.Locale
 
 @Composable
 internal fun CameraScreen(store: PluginSettingsStore) {
@@ -153,15 +149,14 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
     val models = remember(context, lifecycleOwner) { CameraModelSettingsStore(context) }
     val poses = remember(context, lifecycleOwner) { PoseModelsPlugin(context.applicationContext) }
     val host = remember(context, lifecycleOwner) {
-        PluginHost(listOf(poses, PoseEnhancementPlugin(), ConfiguredModelPlugin(context.applicationContext)))
+        PluginHost(listOf(
+            poses, PoseEnhancementPlugin(), ConfiguredModelPlugin(context.applicationContext),
+            SystemMonitorPlugin(),
+        ))
     }
     val camera = remember(host, lifecycleOwner) { CameraSession(context, lifecycleOwner, host, poses) }
     val snapshot by host.snapshot.collectAsStateWithLifecycle()
     val error by camera.error.collectAsStateWithLifecycle()
-    var fps by remember { mutableFloatStateOf(0f) }
-    var usage by remember { mutableStateOf(DeviceUsage()) }
-    val frameTimes = remember { ArrayDeque<Long>() }
-    val usageSampler = remember { DeviceUsageSampler() }
 
     DisposableEffect(camera) {
         camera.start()
@@ -171,34 +166,6 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
         combine(store.settings, models.settings, ConfiguredModelStore.revision) { plugins, base, revision ->
             cameraPluginSettings(plugins, base, revision)
         }.collect { host.configure(it) }
-    }
-    LaunchedEffect(host) {
-        var lastFrame = -1L
-        host.snapshot.collect { state ->
-            val frame = state.frame
-            if (frame == null) {
-                frameTimes.clear()
-                fps = 0f
-                lastFrame = -1
-            } else if (frame.source.frameNumber != lastFrame) {
-                lastFrame = frame.source.frameNumber
-                frameTimes.addLast(frame.timestampNanos)
-                fps = frameRate(frameTimes, System.nanoTime())
-            }
-        }
-    }
-    LaunchedEffect(lifecycleOwner) {
-        while (isActive) {
-            if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                usage = withContext(Dispatchers.IO) { usageSampler.sample() }
-                fps = frameRate(frameTimes, System.nanoTime())
-            } else {
-                usageSampler.reset()
-                frameTimes.clear()
-                fps = 0f
-            }
-            delay(1_000)
-        }
     }
 
     Box(modifier.onSizeChanged { camera.viewport(it.width, it.height) }.pluginPressInput(host)) {
@@ -218,32 +185,44 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
                     PluginLineOverlay(layer, Modifier.fillMaxSize())
                 }
             }
-            MetricsPanel(
-                fps, frame.poses.firstOrNull()?.timings, usage, frame.executionProvider,
-                Modifier.align(Alignment.TopEnd).padding(8.dp),
-            )
+            MonitorPanel(snapshot.monitors, Modifier.align(Alignment.TopEnd).padding(8.dp))
         } else if (error == null) {
             Text("正在启动相机…", Modifier.align(Alignment.Center), style = MaterialTheme.typography.bodyMedium)
         }
         error?.let {
             Text(it, Modifier.align(Alignment.Center).padding(16.dp), color = MaterialTheme.colorScheme.error)
         }
-        if (snapshot.reports.isNotEmpty()) {
-            Column(
-                Modifier.align(Alignment.BottomStart).fillMaxWidth().heightIn(max = 200.dp)
-                    .background(Color.Black.copy(alpha = 0.55f)).verticalScroll(rememberScrollState()).padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+        // Monitor metric lines stay in the top-right panel; its STATUS/ERROR lines (for example the
+        // "测试全部" NPU diagnosis) and every other plugin's text share the copyable bottom area.
+        val monitorIds = snapshot.monitors.mapTo(mutableSetOf()) { it.pluginId }
+        val reports = snapshot.reports.mapNotNull { report ->
+            val messages = if (report.pluginId in monitorIds) {
+                report.output.messages.filter { it.kind != MessageKind.TEXT }
+            } else {
+                report.output.messages
+            }
+            messages.takeIf { it.isNotEmpty() }?.let { report to it }
+        }
+        if (reports.isNotEmpty()) {
+            SelectionContainer(
+                Modifier.align(Alignment.BottomStart).fillMaxWidth(),
             ) {
-                snapshot.reports.forEach { report ->
-                    report.output.messages.forEach { message ->
-                        Text(
-                            "${report.name}：${message.text}", style = MaterialTheme.typography.bodySmall,
-                            color = when (message.kind) {
-                                MessageKind.ERROR -> Color(0xFFFF8A80)
-                                MessageKind.STATUS -> Color(0xFFBDBDBD)
-                                MessageKind.TEXT -> Color.White
-                            },
-                        )
+                Column(
+                    Modifier.fillMaxWidth().heightIn(max = 200.dp)
+                        .background(Color.Black.copy(alpha = 0.55f)).verticalScroll(rememberScrollState()).padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    reports.forEach { (report, messages) ->
+                        messages.forEach { message ->
+                            Text(
+                                "${report.name}：${message.text}", style = MaterialTheme.typography.bodySmall,
+                                color = when (message.kind) {
+                                    MessageKind.ERROR -> Color(0xFFFF8A80)
+                                    MessageKind.STATUS -> Color(0xFFBDBDBD)
+                                    MessageKind.TEXT -> Color.White
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -252,37 +231,21 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
 }
 
 @Composable
-private fun MetricsPanel(fps: Float, timings: PoseTimings?, usage: DeviceUsage, executionProvider: String?, modifier: Modifier = Modifier) {
-    Column(
-        modifier.background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        MetricLine("帧率", if (fps > 0f) "${format(fps)} FPS" else "—")
-        MetricLine("推理", timings?.let { "${format(it.inferenceMs)} ms" } ?: "—")
-        MetricLine("预处理", timings?.let { "${format(it.preprocessMs)} ms" } ?: "—")
-        MetricLine("后处理", timings?.let { "${format(it.postprocessMs)} ms" } ?: "—")
-        MetricLine("分析耗时", timings?.let { "${format(it.totalMs)} ms" } ?: "—")
-        MetricLine("加速器", executionProvider ?: "—")
-        MetricLine("CPU(应用)", formatPercent(usage.cpuPercent))
-        MetricLine("GPU", formatPercent(usage.gpuPercent))
-        MetricLine("NPU", formatPercent(usage.npuPercent))
+private fun MonitorPanel(monitors: List<PluginContribution>, modifier: Modifier = Modifier) {
+    val lines = monitors.flatMap { it.output.messages }.filter { it.kind == MessageKind.TEXT }
+    if (lines.isNotEmpty()) {
+        Column(
+            modifier.background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            lines.forEach { Text(it.text, style = MaterialTheme.typography.labelSmall, color = Color.White) }
+        }
     }
 }
 
-@Composable
-private fun MetricLine(label: String, value: String) {
-    Text("$label $value", style = MaterialTheme.typography.labelSmall, color = Color.White)
-}
-
-private fun format(value: Float): String = String.format(Locale.US, "%.1f", value)
-
-internal fun frameRate(timestamps: ArrayDeque<Long>, nowNanos: Long): Float {
-    while (timestamps.size > 2 && nowNanos - timestamps.first() > FPS_WINDOW_NANOS) timestamps.removeFirst()
-    if (timestamps.size < 2) return 0f
-    val spanNanos = (nowNanos - timestamps.first()).toFloat()
-    if (spanNanos <= 0f) return 0f
-    return (timestamps.size - 1) * 1_000_000_000f / spanNanos
-}
+internal fun frameRate(timestamps: ArrayDeque<Long>, nowNanos: Long): Float =
+    cameraFrameRate(timestamps, nowNanos, FPS_WINDOW_NANOS)
 
 private const val FPS_WINDOW_NANOS = 2_000_000_000L
 

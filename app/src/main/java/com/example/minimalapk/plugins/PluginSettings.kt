@@ -12,6 +12,7 @@ internal object PluginIds {
     const val POSE_ENHANCEMENT = "pose_enhancement"
     const val CONFIGURED_MODEL = "configured_model"
     const val POSE_MODELS = "pose_models"
+    const val SYSTEM_MONITOR = "system_monitor"
 }
 
 internal data class PluginSettings(
@@ -43,9 +44,10 @@ internal data class PoseEnhancementSettings(
 }
 
 internal val pluginDefaults = mapOf(
-    // Preserve the previously visible enhancement. New model consumers remain opt-in.
+    // Preserve the previously visible enhancement and metrics. New model consumers remain opt-in.
     PluginIds.POSE_ENHANCEMENT to PluginSettings(true, PoseEnhancementSettings().toConfig()),
     PluginIds.CONFIGURED_MODEL to PluginSettings(config = mapOf("model_id" to "")),
+    PluginIds.SYSTEM_MONITOR to PluginSettings(true, SystemMonitorSettings().toConfig()),
 )
 
 /** Small storage seam: tests exercise the same restore/update code without an Android runtime. */
