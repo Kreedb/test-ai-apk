@@ -6,19 +6,10 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Paint
-import android.graphics.Typeface
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -27,13 +18,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -44,219 +39,154 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.models.ConfiguredModel
 import com.example.minimalapk.models.ConfiguredModelStore
-import com.example.minimalapk.models.LiveConfiguredModel
-import com.example.minimalapk.models.ModelConfig
-import com.example.minimalapk.models.overlay
-import com.example.minimalapk.pose.BodyMeasurement
+import com.example.minimalapk.plugins.CameraModelSettingsStore
+import com.example.minimalapk.plugins.CameraSession
+import com.example.minimalapk.plugins.ConfiguredModelPlugin
+import com.example.minimalapk.plugins.MessageKind
+import com.example.minimalapk.plugins.PluginHost
+import com.example.minimalapk.plugins.PluginIds
+import com.example.minimalapk.plugins.PluginSettingsStore
+import com.example.minimalapk.plugins.PoseEnhancementPlugin
+import com.example.minimalapk.plugins.PoseModelsPlugin
+import com.example.minimalapk.plugins.cameraPluginSettings
 import com.example.minimalapk.pose.DeviceUsage
 import com.example.minimalapk.pose.DeviceUsageSampler
-import com.example.minimalapk.pose.ModelSpec
-import com.example.minimalapk.pose.ModelStore
-import com.example.minimalapk.pose.PoseAnalyzer
-import com.example.minimalapk.pose.PoseBackendPreference
-import com.example.minimalapk.pose.PoseDetection
-import com.example.minimalapk.pose.PoseFrame
-import com.example.minimalapk.pose.PoseMeasurement
-import com.example.minimalapk.pose.PoseNet
 import com.example.minimalapk.pose.PoseTimings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.util.Locale
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import kotlin.math.max
 
 @Composable
-fun CameraScreen(
-    heightCm: Float?,
-    showHeightLine: Boolean,
-    showArmSpan: Boolean,
-) {
+internal fun CameraScreen(store: PluginSettingsStore) {
     val context = LocalContext.current
     var granted by remember { mutableStateOf(context.hasCameraPermission()) }
     var permanentlyDenied by remember { mutableStateOf(false) }
     var requested by remember { mutableStateOf(false) }
     var exampleModels by remember { mutableStateOf(emptyList<ConfiguredModel>()) }
-    var exampleModelsLoaded by remember { mutableStateOf(false) }
-    var selectedExampleId by rememberSaveable { mutableStateOf<String?>(null) }
     var showExamplePicker by rememberSaveable { mutableStateOf(false) }
-    val launcher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-        onResult = { result ->
-            requested = true
-            granted = result
-            permanentlyDenied = context.cameraPermanentlyDenied(result, requested = true)
-        },
-    )
-
+    val settings by store.settings.collectAsStateWithLifecycle()
+    val configured = settings.getValue(PluginIds.CONFIGURED_MODEL)
+    val selected = exampleModels.firstOrNull { it.id == configured.config["model_id"] }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { result ->
+        requested = true
+        granted = result
+        permanentlyDenied = context.cameraPermanentlyDenied(result, requested = true)
+    }
     LifecycleResumeEffect(Unit) {
         granted = context.hasCameraPermission()
         permanentlyDenied = context.cameraPermanentlyDenied(granted, requested)
         onPauseOrDispose { }
     }
-
+    LaunchedEffect(Unit) { if (!granted) launcher.launch(Manifest.permission.CAMERA) }
     LaunchedEffect(Unit) {
-        if (!granted) {
-            launcher.launch(Manifest.permission.CAMERA)
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        // Re-read on every tab entry so models added in 示例 → 模型工作台 show up here.
-        exampleModels = try {
-            withContext(Dispatchers.IO) {
-                ConfiguredModelStore.list(ConfiguredModelStore.directory(context))
+        ConfiguredModelStore.revision.collect {
+            try {
+                exampleModels = withContext(Dispatchers.IO) { ConfiguredModelStore.list(ConfiguredModelStore.directory(context)) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                AppLog.w("Camera", "示例模型列表读取失败", error)
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLog.w(TAG, "示例模型列表读取失败", e)
-            emptyList()
         }
-        exampleModelsLoaded = true
     }
 
-    val selectedExample = exampleModels.firstOrNull { it.id == selectedExampleId }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        ScreenHeader(
-            title = "相机",
-            subtitle = "YOLO-pose 离线姿态测量",
-        )
-
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        ScreenHeader("相机", "离线姿态与插件预览")
         if (granted) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = if (exampleModels.isEmpty()) {
-                        "示例模型叠加：关闭 · 可在 示例 → 模型工作台 添加"
-                    } else {
-                        "示例模型叠加：${selectedExample?.name ?: "关闭"}"
-                    },
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.bodySmall,
+                    "示例模型叠加：${if (configured.enabled) selected?.name ?: "待选择" else "关闭"}",
+                    modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 TextButton(onClick = { showExamplePicker = true }) { Text("选择") }
             }
-            if (exampleModelsLoaded) {
-                PoseCamera(
-                    heightCm = heightCm,
-                    showHeightLine = showHeightLine,
-                    showArmSpan = showArmSpan,
-                    exampleModel = selectedExample,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .clip(RoundedCornerShape(16.dp)),
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("正在读取示例模型…", style = MaterialTheme.typography.bodyMedium)
-                }
-            }
+            PoseCamera(store, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(16.dp)))
         } else {
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                horizontalAlignment = Alignment.CenterHorizontally,
+                Modifier.fillMaxWidth().weight(1f), horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
-                Text(
-                    text = if (permanentlyDenied) {
-                        "相机权限已被拒绝，请在系统设置中开启"
-                    } else {
-                        "需要相机权限才能预览"
-                    },
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-                Button(
-                    modifier = Modifier.padding(top = 12.dp),
-                    onClick = {
-                        if (permanentlyDenied) {
-                            context.openAppSettings()
-                        } else {
-                            launcher.launch(Manifest.permission.CAMERA)
-                        }
-                    },
-                ) {
-                    Text(if (permanentlyDenied) "打开设置" else "授予权限")
-                }
+                Text(if (permanentlyDenied) "相机权限已被拒绝，请在系统设置中开启" else "需要相机权限才能预览")
+                Button(modifier = Modifier.padding(top = 12.dp), onClick = {
+                    if (permanentlyDenied) context.openAppSettings() else launcher.launch(Manifest.permission.CAMERA)
+                }) { Text(if (permanentlyDenied) "打开设置" else "授予权限") }
             }
         }
     }
-
     if (showExamplePicker) {
         OptionDialog(
-            title = "示例模型叠加",
-            options = listOf<ConfiguredModel?>(null) + exampleModels,
-            selected = selectedExample,
-            label = { it?.name ?: "关闭（只显示姿态）" },
-            onSelect = {
-                selectedExampleId = it?.id
+            title = "示例模型叠加", options = listOf<ConfiguredModel?>(null) + exampleModels,
+            selected = selected.takeIf { configured.enabled }, label = { it?.name ?: "关闭（保留基础姿态）" },
+            onSelect = { model ->
+                store.update(PluginIds.CONFIGURED_MODEL) {
+                    it.copy(enabled = model != null, config = it.config + ("model_id" to (model?.id ?: "")))
+                }
                 showExamplePicker = false
-            },
-            onDismiss = { showExamplePicker = false },
+            }, onDismiss = { showExamplePicker = false },
         )
     }
 }
 
 @Composable
-private fun PoseCamera(
-    heightCm: Float?,
-    showHeightLine: Boolean,
-    showArmSpan: Boolean,
-    exampleModel: ConfiguredModel?,
-    modifier: Modifier = Modifier,
-) {
+private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var frame by remember { mutableStateOf<PoseFrame?>(null) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    var exampleOverlay by remember { mutableStateOf<Bitmap?>(null) }
-    var exampleText by remember { mutableStateOf<String?>(null) }
-    var exampleError by remember { mutableStateOf<String?>(null) }
+    val models = remember(context, lifecycleOwner) { CameraModelSettingsStore(context) }
+    val poses = remember(context, lifecycleOwner) { PoseModelsPlugin(context.applicationContext) }
+    val host = remember(context, lifecycleOwner) {
+        PluginHost(listOf(poses, PoseEnhancementPlugin(), ConfiguredModelPlugin(context.applicationContext)))
+    }
+    val camera = remember(host, lifecycleOwner) { CameraSession(context, lifecycleOwner, host, poses) }
+    val snapshot by host.snapshot.collectAsStateWithLifecycle()
+    val error by camera.error.collectAsStateWithLifecycle()
     var fps by remember { mutableFloatStateOf(0f) }
     var usage by remember { mutableStateOf(DeviceUsage()) }
-    var executionProvider by remember { mutableStateOf<String?>(null) }
     val frameTimes = remember { ArrayDeque<Long>() }
     val usageSampler = remember { DeviceUsageSampler() }
 
+    DisposableEffect(camera) {
+        camera.start()
+        onDispose { camera.close(); models.close() }
+    }
+    LaunchedEffect(host, store, models) {
+        combine(store.settings, models.settings, ConfiguredModelStore.revision) { plugins, base, revision ->
+            cameraPluginSettings(plugins, base, revision)
+        }.collect { host.configure(it) }
+    }
+    LaunchedEffect(host) {
+        var lastFrame = -1L
+        host.snapshot.collect { state ->
+            val frame = state.frame
+            if (frame == null) {
+                frameTimes.clear()
+                fps = 0f
+                lastFrame = -1
+            } else if (frame.source.frameNumber != lastFrame) {
+                lastFrame = frame.source.frameNumber
+                frameTimes.addLast(frame.timestampNanos)
+                fps = frameRate(frameTimes, System.nanoTime())
+            }
+        }
+    }
     LaunchedEffect(lifecycleOwner) {
         while (isActive) {
             if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
@@ -267,322 +197,64 @@ private fun PoseCamera(
                 frameTimes.clear()
                 fps = 0f
             }
-            delay(1_000L)
+            delay(1_000)
         }
     }
 
-    LaunchedEffect(lifecycleOwner, exampleModel?.id) {
-        // Owned by this effect so a lifecycle re-run never binds CameraX to a shut-down executor.
-        val analysisExecutor = Executors.newSingleThreadExecutor()
-        var analyzer: PoseAnalyzer? = null
-        var liveModel: LiveConfiguredModel? = null
-        var analysis: ImageAnalysis? = null
-        var cameraProvider: ProcessCameraProvider? = null
-        exampleOverlay = null
-        exampleText = null
-        exampleError = null
-        try {
-            val provider = try {
-                context.awaitCameraProvider()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLog.e(TAG, "相机初始化失败", e)
-                errorMessage = e.message ?: "相机初始化失败"
-                return@LaunchedEffect
+    Box(modifier.onSizeChanged { camera.viewport(it.width, it.height) }.pluginPressInput(host)) {
+        val frame = snapshot.frame
+        val image = snapshot.displayedImage
+        if (image != null && frame != null) {
+            Image(image.bitmap.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            // Never draw current-frame bones on an older replacement snapshot.
+            if (snapshot.displayedSource == frame.source) {
+                BasePoseOverlay(frame.poses.firstOrNull(), frame.source, Modifier.fillMaxSize())
             }
-            cameraProvider = provider
-            // Assign inside the worker so a cancellation that discards the withContext result
-            // cannot leak the opened analyzer; the finally below still closes it.
-            val opened = try {
-                withContext(Dispatchers.IO) {
-                    PoseAnalyzer.open(
-                        context,
-                        PoseBackendPreference.load(context),
-                        ModelStore.load(context),
-                    )
-                        .also { analyzer = it }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                AppLog.e(TAG, "模型加载失败", e)
-                errorMessage = e.message ?: "模型加载失败"
-                return@LaunchedEffect
-            }
-            analyzer = opened
-            executionProvider = opened.executionProvider
-            if (exampleModel != null) {
-                liveModel = try {
-                    withContext(Dispatchers.IO) {
-                        val description = ConfiguredModelStore.describe(exampleModel)
-                        val config = ModelConfig.decode(exampleModel.configFile.readText(), description)
-                        val graph = description.signatures.single { it.key == config.signature }
-                        LiveConfiguredModel(exampleModel, config, graph).also { liveModel = it }
+            (snapshot.layers + snapshot.monitors).forEach { contribution ->
+                contribution.output.layers.forEach { layer ->
+                    layer.image?.let {
+                        Image(it.bitmap.asImageBitmap(), "${contribution.name} 输出", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                     }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    AppLog.w(TAG, "示例模型加载失败", e)
-                    exampleError = e.message ?: "示例模型加载失败"
-                    null
+                    PluginLineOverlay(layer, Modifier.fillMaxSize())
                 }
             }
-            val mainExecutor = ContextCompat.getMainExecutor(context)
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setResolutionSelector(
-                    ResolutionSelector.Builder()
-                        .setResolutionStrategy(
-                            ResolutionStrategy(
-                                android.util.Size(640, 480),
-                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
-                            ),
-                        )
-                        .build(),
-                )
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .build()
-            analysis = imageAnalysis
-            imageAnalysis.setAnalyzer(analysisExecutor) { proxy ->
-                val rotationDegrees = proxy.imageInfo.rotationDegrees
-                try {
-                    val bitmap = proxy.toBitmap()
-                    val result = try {
-                        opened.analyze(bitmap, rotationDegrees)
-                    } catch (e: CancellationException) {
-                        // Teardown interrupted the wait, but the backend worker may still be reading
-                        // the source. Leave it to GC and do not report a normal exit as an error.
-                        mainExecutor.execute { proxy.close() }
-                        return@setAnalyzer
-                    } catch (e: Exception) {
-                        bitmap.recycle()
-                        throw e
-                    }
-                    bitmap.recycle()
-                    var overlay: Bitmap? = null
-                    var text: String? = null
-                    var liveError: String? = null
-                    val live = liveModel
-                    if (live != null) {
-                        try {
-                            val output = live.run(result.bitmap)
-                            overlay = output.overlay(result.bitmap.width)
-                            text = output.text
-                        } catch (e: Exception) {
-                            liveError = e.message ?: "示例模型推理失败"
-                        }
-                    }
-                    val completedNanos = System.nanoTime()
-                    // Keep the frame open until the main thread consumes it so CameraX's
-                    // latest-frame limit also bounds pending display work.
-                    mainExecutor.execute {
-                        try {
-                            errorMessage = null
-                            frame = result
-                            exampleOverlay = overlay
-                            exampleText = text
-                            // Keep a load failure visible: a null runner publishes frames but no error.
-                            if (live != null) exampleError = liveError
-                            frameTimes.addLast(completedNanos)
-                            fps = frameRate(frameTimes, completedNanos)
-                        } finally {
-                            proxy.close()
-                        }
-                    }
-                } catch (e: CancellationException) {
-                    mainExecutor.execute { proxy.close() }
-                } catch (e: Exception) {
-                    mainExecutor.execute {
-                        val message = e.message ?: "姿态推理失败"
-                        try {
-                            if (errorMessage != message) AppLog.e(TAG, message, e)
-                            errorMessage = message
-                            frame = null
-                        } finally {
-                            proxy.close()
-                        }
-                    }
-                }
-            }
-            provider.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                imageAnalysis,
-            )
-            AppLog.i(TAG, "相机预览已启动：${opened.executionProvider}")
-            awaitCancellation()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            AppLog.e(TAG, "相机初始化失败", e)
-            errorMessage = e.message ?: "相机初始化失败"
-        } finally {
-            analysis?.clearAnalyzer()
-            // Let the running frame finish before the analyzer closes and the source is freed;
-            // shutdownNow() interrupted the wait while the backend worker kept reading the bitmap.
-            analysisExecutor.shutdown()
-            // Unbind only this screen's use case; unbindAll() here would tear down a newer
-            // CameraScreen that finished binding while this delayed cleanup was still pending.
-            cameraProvider?.let { provider -> analysis?.let { provider.unbind(it) } }
-            if (analyzer != null || liveModel != null) {
-                withContext(NonCancellable + Dispatchers.IO) {
-                    // Wait for the in-flight frame callback before closing: otherwise it can submit
-                    // analyze() after the backend worker is shut down and log a false error.
-                    analysisExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS)
-                    analyzer?.close()
-                    liveModel?.close()
-                }
-            }
-        }
-    }
-
-    val primary = frame?.primary
-    val detection = primary?.detection
-    val photoBounds = frame?.photoBounds
-    val keypointThreshold = primary?.spec?.keypointThreshold
-        ?: ModelSpec.DEFAULT_KEYPOINT_THRESHOLD
-    val measurement = remember(detection, heightCm, photoBounds, keypointThreshold) {
-        if (detection != null && heightCm != null && photoBounds != null) {
-            PoseMeasurement.measure(detection, heightCm, photoBounds, keypointThreshold)
-        } else {
-            null
-        }
-    }
-
-    Box(modifier = modifier) {
-        val current = frame
-        if (current != null) {
-            Image(
-                bitmap = current.bitmap.asImageBitmap(),
-                contentDescription = null,
-                // Crop fills the preview window; the square input's letterbox edges are clipped.
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-            exampleOverlay?.let { overlay ->
-                // Both images are square or squared, so Crop maps them into the same rect.
-                Image(
-                    bitmap = overlay.asImageBitmap(),
-                    contentDescription = "示例模型输出",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-            PoseOverlay(
-                detection = detection,
-                measurement = measurement,
-                heightCm = heightCm,
-                spec = primary?.spec,
-                showHeightLine = showHeightLine,
-                showArmSpan = showArmSpan,
-                modifier = Modifier.fillMaxSize(),
-            )
             MetricsPanel(
-                fps = fps,
-                timings = primary?.timings,
-                usage = usage,
-                executionProvider = executionProvider,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp),
+                fps, frame.poses.firstOrNull()?.timings, usage, frame.executionProvider,
+                Modifier.align(Alignment.TopEnd).padding(8.dp),
             )
-        } else if (errorMessage == null) {
-            Text(
-                text = "正在加载模型…",
-                modifier = Modifier.align(Alignment.Center),
-                style = MaterialTheme.typography.bodyMedium,
-            )
+        } else if (error == null) {
+            Text("正在启动相机…", Modifier.align(Alignment.Center), style = MaterialTheme.typography.bodyMedium)
         }
-
-        errorMessage?.let { message ->
-            Text(
-                text = message,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .padding(16.dp),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
+        error?.let {
+            Text(it, Modifier.align(Alignment.Center).padding(16.dp), color = MaterialTheme.colorScheme.error)
         }
-
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.55f))
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            frame?.let { current ->
-                if (current.results.isEmpty()) {
-                    MeasurementLine(
-                        if (exampleOverlay != null || exampleText != null) {
-                            "姿态模型未启用，正在运行示例模型叠加"
-                        } else {
-                            "未启用推理模型，请在 设置 → 模型 中开启"
-                        },
-                    )
-                } else if (heightCm == null || heightCm <= 0f) {
-                    MeasurementLine("请在 插件 → 姿态增强 填写身高后换算尺寸")
-                } else if (detection == null) {
-                    MeasurementLine("未检测到人体")
-                } else if (!PoseMeasurement.isFullBodyVisible(
-                        detection,
-                        current.photoBounds,
-                        keypointThreshold,
-                    )
-                ) {
-                    MeasurementLine("请后退，确保全身入镜")
-                } else if (measurement != null) {
-                    measurement.armSpanCm?.let { MeasurementLine("腕距约 ${format(it)} cm（双臂平举，近似臂展）") }
-                    measurement.eyeDistanceCm?.let { MeasurementLine("双眼间距约 ${format(it)} cm") }
-                    measurement.shoulderTiltDeg?.let { MeasurementLine("肩线倾斜 ${format(it)}°") }
-                    measurement.hipTiltDeg?.let { MeasurementLine("髋线倾斜 ${format(it)}°") }
-                    measurement.torsoOffsetCm?.let { MeasurementLine("肩髋横向偏移约 ${format(it)} cm") }
-                } else {
-                    MeasurementLine("请在 插件 → 姿态增强 填写有效身高（50–250 cm）")
-                }
-                // Models beyond the first only report their top detection; drawing stays single-layer.
-                current.results.drop(1).forEach { result ->
-                    MeasurementLine(
-                        text = "${result.spec.name}：" +
-                            (result.detection?.let { "置信度 ${format(it.score)}" } ?: "未检测到"),
-                        color = Color(0xFFBDBDBD),
-                    )
+        if (snapshot.reports.isNotEmpty()) {
+            Column(
+                Modifier.align(Alignment.BottomStart).fillMaxWidth().heightIn(max = 200.dp)
+                    .background(Color.Black.copy(alpha = 0.55f)).verticalScroll(rememberScrollState()).padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                snapshot.reports.forEach { report ->
+                    report.output.messages.forEach { message ->
+                        Text(
+                            "${report.name}：${message.text}", style = MaterialTheme.typography.bodySmall,
+                            color = when (message.kind) {
+                                MessageKind.ERROR -> Color(0xFFFF8A80)
+                                MessageKind.STATUS -> Color(0xFFBDBDBD)
+                                MessageKind.TEXT -> Color.White
+                            },
+                        )
+                    }
                 }
             }
-            exampleError?.let { MeasurementLine("示例模型：$it", color = Color(0xFFFF8A80)) }
-            exampleText?.let { MeasurementLine(it.take(200), color = Color(0xFFBDBDBD)) }
-            MeasurementLine(
-                text = "结果仅供筛查参考，不能用于医学诊断",
-                color = Color(0xFFBDBDBD),
-            )
         }
     }
 }
 
 @Composable
-private fun MeasurementLine(text: String, color: Color = Color.White) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.bodySmall,
-        color = color,
-    )
-}
-
-@Composable
-private fun MetricsPanel(
-    fps: Float,
-    timings: PoseTimings?,
-    usage: DeviceUsage,
-    executionProvider: String?,
-    modifier: Modifier = Modifier,
-) {
+private fun MetricsPanel(fps: Float, timings: PoseTimings?, usage: DeviceUsage, executionProvider: String?, modifier: Modifier = Modifier) {
     Column(
-        modifier = modifier
-            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+        modifier.background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         MetricLine("帧率", if (fps > 0f) "${format(fps)} FPS" else "—")
@@ -599,96 +271,13 @@ private fun MetricsPanel(
 
 @Composable
 private fun MetricLine(label: String, value: String) {
-    Text(
-        text = "$label $value",
-        style = MaterialTheme.typography.labelSmall,
-        color = Color.White,
-    )
-}
-
-@Composable
-private fun PoseOverlay(
-    detection: PoseDetection?,
-    measurement: BodyMeasurement?,
-    heightCm: Float?,
-    spec: ModelSpec?,
-    showHeightLine: Boolean,
-    showArmSpan: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val labelPaint = remember {
-        Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD }
-    }
-    Canvas(modifier) {
-        if (detection == null || spec == null) return@Canvas
-        // ContentScale.Crop uses the larger axis to scale the square model input.
-        val scale = max(size.width, size.height) / spec.inputSize
-        val left = (size.width - spec.inputSize * scale) / 2f
-        val top = (size.height - spec.inputSize * scale) / 2f
-        fun point(index: Int): Offset? {
-            val keypoint = detection.keypoints.getOrNull(index) ?: return null
-            if (keypoint.confidence < spec.keypointThreshold) return null
-            return Offset(left + keypoint.x * scale, top + keypoint.y * scale)
-        }
-
-        fun label(text: String, x: Float, y: Float) {
-            labelPaint.color = android.graphics.Color.WHITE
-            labelPaint.textSize = 12.sp.toPx()
-            labelPaint.setShadowLayer(3f, 0f, 0f, android.graphics.Color.BLACK)
-            drawContext.canvas.nativeCanvas.drawText(text, x, y, labelPaint)
-        }
-
-        // Pose recognition is the camera's base layer; the 姿态增强 plugin only adds measurements.
-        val skeletonColor = Color(0xFF00E5FF)
-        PoseNet.skeletonEdges.forEach { (first, second) ->
-            val start = point(first) ?: return@forEach
-            val end = point(second) ?: return@forEach
-            drawLine(skeletonColor, start, end, strokeWidth = 3f)
-        }
-        detection.keypoints.indices.forEach { index ->
-            val keypoint = point(index) ?: return@forEach
-            drawCircle(Color(0xFFFFC107), radius = 5f, center = keypoint)
-        }
-        drawRect(
-            color = Color(0x9900E5FF),
-            topLeft = Offset(left + detection.left * scale, top + detection.top * scale),
-            size = Size(detection.width * scale, detection.height * scale),
-            style = Stroke(width = 3f),
-        )
-
-        if (showHeightLine && measurement != null && heightCm != null) {
-            val centerX = left + (detection.left + detection.right) / 2f * scale
-            val start = Offset(centerX, top + detection.top * scale)
-            val end = Offset(centerX, top + detection.bottom * scale)
-            val lineColor = Color(0xFF76FF03)
-            drawLine(lineColor, start, end, strokeWidth = 4f)
-            drawCircle(lineColor, radius = 7f, center = start)
-            drawCircle(lineColor, radius = 7f, center = end)
-            label("${format(heightCm)} cm", centerX + 12f, (start.y + end.y) / 2f)
-        }
-
-        val armSpan = measurement?.armSpanCm
-        if (showArmSpan && armSpan != null) {
-            val start = point(PoseNet.LEFT_WRIST)
-            val end = point(PoseNet.RIGHT_WRIST)
-            if (start != null && end != null) {
-                val lineColor = Color(0xFFFF4081)
-                drawLine(lineColor, start, end, strokeWidth = 4f)
-                drawCircle(lineColor, radius = 7f, center = start)
-                drawCircle(lineColor, radius = 7f, center = end)
-                label("${format(armSpan)} cm", (start.x + end.x) / 2f + 12f, (start.y + end.y) / 2f)
-            }
-        }
-    }
+    Text("$label $value", style = MaterialTheme.typography.labelSmall, color = Color.White)
 }
 
 private fun format(value: Float): String = String.format(Locale.US, "%.1f", value)
 
 internal fun frameRate(timestamps: ArrayDeque<Long>, nowNanos: Long): Float {
-    // Keep two samples so a stream slower than the window still has a measurable interval.
-    while (timestamps.size > 2 && nowNanos - timestamps.first() > FPS_WINDOW_NANOS) {
-        timestamps.removeFirst()
-    }
+    while (timestamps.size > 2 && nowNanos - timestamps.first() > FPS_WINDOW_NANOS) timestamps.removeFirst()
     if (timestamps.size < 2) return 0f
     val spanNanos = (nowNanos - timestamps.first()).toFloat()
     if (spanNanos <= 0f) return 0f
@@ -696,46 +285,20 @@ internal fun frameRate(timestamps: ArrayDeque<Long>, nowNanos: Long): Float {
 }
 
 private const val FPS_WINDOW_NANOS = 2_000_000_000L
-private const val TAG = "Camera"
 
 private fun Context.hasCameraPermission(): Boolean =
-    ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
-        PackageManager.PERMISSION_GRANTED
+    ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
-private fun Context.cameraPermanentlyDenied(granted: Boolean, requested: Boolean): Boolean =
-    isCameraPermanentlyDenied(
-        granted = granted,
-        requested = requested,
-        shouldShowRationale = findActivity()
-            ?.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA),
-    )
+private fun Context.cameraPermanentlyDenied(granted: Boolean, requested: Boolean): Boolean = isCameraPermanentlyDenied(
+    granted, requested, findActivity()?.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA),
+)
 
-internal fun isCameraPermanentlyDenied(
-    granted: Boolean,
-    requested: Boolean,
-    shouldShowRationale: Boolean?,
-): Boolean = !granted && requested && shouldShowRationale == false
-
-private suspend fun Context.awaitCameraProvider(): ProcessCameraProvider =
-    suspendCancellableCoroutine { continuation ->
-        val future = ProcessCameraProvider.getInstance(this)
-        future.addListener(
-            {
-                runCatching { future.get() }
-                    .onSuccess { continuation.resume(it) }
-                    .onFailure { continuation.resumeWithException(it) }
-            },
-            ContextCompat.getMainExecutor(this),
-        )
-    }
+internal fun isCameraPermanentlyDenied(granted: Boolean, requested: Boolean, shouldShowRationale: Boolean?): Boolean =
+    !granted && requested && shouldShowRationale == false
 
 private fun Context.openAppSettings() {
-    startActivity(
-        Intent(
-            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-            Uri.fromParts("package", packageName, null),
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-    )
+    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 }
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {

@@ -143,7 +143,7 @@ internal fun ModelsScreen(
             item {
                 Text(
                     text = "同帧串行：每帧按顺序运行启用的模型，最多同时启用 " +
-                        "${ModelStore.MAX_ENABLED} 个。修改后重新进入相机生效。",
+                        "${ModelStore.MAX_ENABLED} 个。保存后相机自动更新，加载期间保留基础预览。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -119,6 +119,7 @@ class PoseAnalyzer internal constructor(
                 // The primary bitmap is published to the display, so Compose may still draw an
                 // older frame; it must never be reused. Others are consumed within this loop.
                 reuse = if (index == 0) null else runner.scratch,
+                paint = paint,
             )
             val rendered = System.nanoTime()
             input.getPixels(runner.pixels, 0, spec.inputSize, 0, 0, spec.inputSize, spec.inputSize)
@@ -150,7 +151,7 @@ class PoseAnalyzer internal constructor(
                 rotationDegrees,
                 previewSpec.inputSize,
             )
-            preview = renderInput(source, layout, previewSpec.inputSize, reuse = null)
+            preview = renderInput(source, layout, previewSpec.inputSize, reuse = null, paint = paint)
             photoBounds = layout.photoBounds
         }
         val frameBitmap = checkNotNull(preview)
@@ -187,29 +188,41 @@ class PoseAnalyzer internal constructor(
         executor.shutdown()
     }
 
-    private fun renderInput(
-        source: Bitmap,
-        layout: PoseInputLayout,
-        size: Int,
-        reuse: Bitmap?,
-    ): Bitmap {
-        val input = reuse ?: createBitmap(size, size)
-        val canvas = Canvas(input)
-        val padding = PoseNet.LETTERBOX_COLOR
-        canvas.drawColor(Color.rgb(padding, padding, padding))
-        // Rotate around the source center and scale straight into the letterbox rect, so 90/180/270
-        // no longer need an intermediate full-frame copy.
-        canvas.save()
-        canvas.translate(layout.centerX, layout.centerY)
-        canvas.rotate(layout.rotationDegrees.toFloat())
-        canvas.scale(layout.scale, layout.scale)
-        canvas.translate(-source.width / 2f, -source.height / 2f)
-        canvas.drawBitmap(source, 0f, 0f, paint)
-        canvas.restore()
-        return input
-    }
-
     companion object {
+        /** Native-runtime-free fallback, also used while a model is opening or has failed.
+         * Never takes openLock: a stuck accelerator compile cannot block the basic preview.
+         */
+        fun preview(source: Bitmap, rotationDegrees: Int): PoseFrame {
+            val size = ModelStore.builtIn.first().inputSize
+            val layout = poseInputLayout(source.width, source.height, rotationDegrees, size)
+            return PoseFrame(
+                renderInput(source, layout, size, null, Paint(Paint.FILTER_BITMAP_FLAG)),
+                emptyList(), layout.photoBounds,
+            )
+        }
+
+        private fun renderInput(
+            source: Bitmap,
+            layout: PoseInputLayout,
+            size: Int,
+            reuse: Bitmap?,
+            paint: Paint,
+        ): Bitmap {
+            val input = reuse ?: createBitmap(size, size)
+            val canvas = Canvas(input)
+            val padding = PoseNet.LETTERBOX_COLOR
+            canvas.drawColor(Color.rgb(padding, padding, padding))
+            // Rotate directly into the letterbox; no intermediate full-frame copy is needed.
+            canvas.save()
+            canvas.translate(layout.centerX, layout.centerY)
+            canvas.rotate(layout.rotationDegrees.toFloat())
+            canvas.scale(layout.scale, layout.scale)
+            canvas.translate(-source.width / 2f, -source.height / 2f)
+            canvas.drawBitmap(source, 0f, 0f, paint)
+            canvas.restore()
+            return input
+        }
+
         private const val TAG = "PoseAnalyzer"
         internal const val NO_MODEL_PROVIDER = "未启用推理"
 
@@ -290,7 +303,11 @@ class PoseAnalyzer internal constructor(
             context: Context,
             preference: PoseBackendPreference = PoseBackendPreference.AUTO,
             specs: List<ModelSpec> = ModelStore.load(context),
+            stillNeeded: () -> Boolean = { true },
         ): PoseAnalyzer = synchronized(openLock) {
+            // A previous session may still be compiling under openLock. Once it drains, do not
+            // compile every obsolete request from rapid tab/config changes before the latest one.
+            if (!stillNeeded()) throw CancellationException("Pose model request superseded")
             val previewSpec = specs.firstOrNull() ?: ModelStore.builtIn.first()
             val enabled = specs.filter { it.enabled }.take(ModelStore.MAX_ENABLED)
             val worker = Executors.newSingleThreadExecutor { runnable ->
@@ -302,7 +319,10 @@ class PoseAnalyzer internal constructor(
                 AppLog.i(TAG, "没有启用的模型，仅显示预览画面")
                 return PoseAnalyzer(emptyList(), previewSpec, worker)
             }
-            if (nativeCompileTimedOut) error(MODEL_STUCK_MESSAGE)
+            if (nativeCompileTimedOut) {
+                worker.shutdown()
+                error(MODEL_STUCK_MESSAGE)
+            }
             val manualName = preference.backendName
             val sdkInt = Build.VERSION.SDK_INT
             val manufacturer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

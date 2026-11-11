@@ -4,6 +4,9 @@ import android.content.Context
 import com.example.minimalapk.pose.GraphDescription
 import com.example.minimalapk.pose.ModelDownload
 import com.example.minimalapk.pose.TfliteGraph
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import java.io.File
 
 internal data class ConfiguredModel(val id: String, val name: String, val file: File) {
@@ -12,6 +15,10 @@ internal data class ConfiguredModel(val id: String, val name: String, val file: 
 }
 
 internal object ConfiguredModelStore {
+    private val mutableRevision = MutableStateFlow(0L)
+    /** Successful atomic changes invalidate camera consumers even when the model ID is unchanged. */
+    val revision = mutableRevision.asStateFlow()
+
     fun directory(context: Context): File = File(context.filesDir, "configured_models")
 
     fun list(directory: File): List<ConfiguredModel> = directory.listFiles().orEmpty()
@@ -32,6 +39,7 @@ internal object ConfiguredModelStore {
         }
         model.nameFile.writeAtomically(model.name.toByteArray())
         if (!model.file.exists()) model.file.writeAtomically(bytes)
+        mutableRevision.update { it + 1 }
         return model
     }
 
@@ -40,11 +48,13 @@ internal object ConfiguredModelStore {
     fun saveConfig(model: ConfiguredModel, text: String, description: GraphDescription) {
         ModelConfig.decode(text, description)
         model.configFile.writeAtomically(text.toByteArray())
+        mutableRevision.update { it + 1 }
     }
 
     fun delete(model: ConfiguredModel) {
         check(!model.file.exists() || model.file.delete()) { "无法删除模型" }
         model.configFile.delete()
         model.nameFile.delete()
+        mutableRevision.update { it + 1 }
     }
 }

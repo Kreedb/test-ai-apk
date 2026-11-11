@@ -1,146 +1,139 @@
 package com.example.minimalapk.ui.screens
 
-import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Build
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.minimalapk.plugins.PluginIds
+import com.example.minimalapk.plugins.PluginSettingsStore
+import com.example.minimalapk.plugins.PoseEnhancementSettings
 
 @Composable
-fun PluginsScreen(
-    heightText: String,
-    onHeightTextChange: (String) -> Unit,
-    showHeightLine: Boolean,
-    onShowHeightLineChange: (Boolean) -> Unit,
-    showArmSpan: Boolean,
-    onShowArmSpanChange: (Boolean) -> Unit,
-) {
+internal fun PluginsScreen(store: PluginSettingsStore) {
+    val settings by store.settings.collectAsStateWithLifecycle()
+    val pose = settings.getValue(PluginIds.POSE_ENHANCEMENT)
+    var configure by rememberSaveable { mutableStateOf(false) }
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+        modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        item { ScreenHeader("插件", "点击卡片配置，使用开关独立启停") }
         item {
-            ScreenHeader(
-                title = "插件",
-                subtitle = "姿态增强：身高与测量叠加",
+            PluginCard(
+                name = "姿态增强", status = if (pose.enabled) "已启用 · 身高与人体测量" else "已停用 · 可继续配置",
+                enabled = pose.enabled,
+                onEnabledChange = { store.setEnabled(PluginIds.POSE_ENHANCEMENT, it) },
+                onConfigure = { configure = true },
             )
         }
+    }
+    if (configure) {
+        PoseEnhancementDialog(PoseEnhancementSettings.from(pose), onSave = {
+            store.configure(PluginIds.POSE_ENHANCEMENT, it.toConfig())
+            configure = false
+        }, onDismiss = { configure = false })
+    }
+}
 
-        item {
-            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .background(
-                                    color = MaterialTheme.colorScheme.primaryContainer,
-                                    shape = CircleShape,
-                                ),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Build,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                            )
-                        }
-                        Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(horizontal = 12.dp),
-                        ) {
-                            Text(
-                                text = "姿态增强",
-                                style = MaterialTheme.typography.titleMedium,
-                            )
-                            Text(
-                                text = "全身入镜并填写身高后，标注身高与臂展",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-
-                    OutlinedTextField(
-                        value = heightText,
-                        onValueChange = { onHeightTextChange(it.filter(Char::isDigit).take(3)) },
-                        label = { Text("身高 (cm)") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-
-                    PluginSwitchRow(
-                        name = "身高线",
-                        description = "标注身高计算点与长度",
-                        checked = showHeightLine,
-                        onCheckedChange = onShowHeightLineChange,
-                    )
-                    PluginSwitchRow(
-                        name = "臂长线",
-                        description = "标注左右腕点与臂展长度",
-                        checked = showArmSpan,
-                        onCheckedChange = onShowArmSpanChange,
-                    )
-                }
+/** Shared card for the downstream built-ins. The switch and configuration click are siblings,
+ * never nested click targets: toggling cannot also open the dialog, including with TalkBack.
+ */
+@Composable
+internal fun PluginCard(
+    name: String,
+    status: String,
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    onConfigure: () -> Unit,
+) {
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(
+                Modifier.weight(1f)
+                    .clickable(role = Role.Button, onClickLabel = "配置$name", onClick = onConfigure)
+                    .padding(16.dp),
+            ) {
+                Text(name, style = MaterialTheme.typography.titleMedium)
+                Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            Switch(
+                checked = enabled, onCheckedChange = onEnabledChange,
+                modifier = Modifier.padding(end = 16.dp).semantics {
+                    contentDescription = "$name 总开关"
+                    stateDescription = if (enabled) "已启用" else "已停用"
+                },
+            )
         }
     }
 }
 
 @Composable
-private fun PluginSwitchRow(
-    name: String,
-    description: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
+private fun PoseEnhancementDialog(
+    initial: PoseEnhancementSettings,
+    onSave: (PoseEnhancementSettings) -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = name, style = MaterialTheme.typography.titleSmall)
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    var height by rememberSaveable { mutableStateOf(initial.heightText) }
+    var heightLine by rememberSaveable { mutableStateOf(initial.showHeightLine) }
+    var armSpan by rememberSaveable { mutableStateOf(initial.showArmSpan) }
+    val valid = height.toFloatOrNull()?.let { it in 50f..250f } == true
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("姿态增强") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = height, onValueChange = { height = it.filter(Char::isDigit).take(3) },
+                    label = { Text("身高 (cm)") }, singleLine = true, isError = !valid,
+                    supportingText = { Text("有效范围 50–250 cm；清空后相机提示填写身高") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth(),
+                )
+                PluginSwitchRow("身高线", "标注身高计算点与长度", heightLine) { heightLine = it }
+                PluginSwitchRow("臂长线", "标注左右腕点与臂展长度", armSpan) { armSpan = it }
+                Text("总开关仅控制增强测量线与人体文字；基础姿态骨架由已启用的姿态模型提供。", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(PoseEnhancementSettings(height, heightLine, armSpan)) }) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+internal fun PluginSwitchRow(name: String, description: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(name, style = MaterialTheme.typography.titleSmall)
+            Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            modifier = Modifier.semantics { contentDescription = name },
-        )
+        Switch(checked, onCheckedChange, modifier = Modifier.semantics { contentDescription = name })
     }
 }

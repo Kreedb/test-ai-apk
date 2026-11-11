@@ -53,6 +53,21 @@ class ConfiguredModelStoreTest {
     }
 
     @Test
+    fun successfulConfigWritesNotifyLiveConsumersEvenForTheSameModelId() {
+        val model = ConfiguredModelStore.install(folder.newFolder(), "observable", fixture())
+        val description = ConfiguredModelStore.describe(model)
+        val before = ConfiguredModelStore.revision.value
+        ConfiguredModelStore.saveConfig(model, model.configFile.readText(), description)
+        assertEquals(before + 1, ConfiguredModelStore.revision.value)
+        assertThrows(IllegalArgumentException::class.java) {
+            ConfiguredModelStore.saveConfig(model, "version=invalid", description)
+        }
+        assertEquals(before + 1, ConfiguredModelStore.revision.value)
+        ConfiguredModelStore.delete(model)
+        assertEquals(before + 2, ConfiguredModelStore.revision.value)
+    }
+
+    @Test
     fun failedAtomicReplacementKeepsTheOldTargetAndCleansTemporaryFile() {
         val target = folder.newFolder("model")
         File(target, "previous").writeText("keep")

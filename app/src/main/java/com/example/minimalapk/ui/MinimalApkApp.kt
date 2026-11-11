@@ -14,15 +14,18 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import com.example.minimalapk.R
+import com.example.minimalapk.plugins.PluginSettingsStore
 import com.example.minimalapk.ui.screens.CameraScreen
 import com.example.minimalapk.ui.screens.ConfigScreen
 import com.example.minimalapk.ui.screens.ExamplesScreen
@@ -49,9 +52,9 @@ fun MinimalApkApp(
     onThemeSettingsChange: (ThemeSettings) -> Unit,
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    var heightText by rememberSaveable { mutableStateOf("170") }
-    var showHeightLine by rememberSaveable { mutableStateOf(true) }
-    var showArmSpan by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    val plugins = remember(context) { PluginSettingsStore(context) }
+    DisposableEffect(plugins) { onDispose { plugins.close() } }
     val stateHolder = rememberSaveableStateHolder()
 
     Scaffold(
@@ -76,20 +79,9 @@ fun MinimalApkApp(
             stateHolder.SaveableStateProvider(selectedTab) {
                 when (selectedTab) {
                     0 -> StatusScreen()
-                    1 -> CameraScreen(
-                        heightCm = heightText.toFloatOrNull(),
-                        showHeightLine = showHeightLine,
-                        showArmSpan = showArmSpan,
-                    )
+                    1 -> CameraScreen(plugins)
                     2 -> ExamplesScreen()
-                    3 -> PluginsScreen(
-                        heightText = heightText,
-                        onHeightTextChange = { heightText = it },
-                        showHeightLine = showHeightLine,
-                        onShowHeightLineChange = { showHeightLine = it },
-                        showArmSpan = showArmSpan,
-                        onShowArmSpanChange = { showArmSpan = it },
-                    )
+                    3 -> PluginsScreen(plugins)
                     4 -> ConfigScreen(
                         themeSettings = themeSettings,
                         onThemeSettingsChange = onThemeSettingsChange,

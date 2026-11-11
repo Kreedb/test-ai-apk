@@ -34,16 +34,21 @@ internal class LiveConfiguredModel(
 
     fun run(source: Bitmap): ModelRunResult {
         val images = mutableMapOf<Int, Bitmap>()
-        val inputs = Array<Any>(graph.inputs.size) { index ->
-            val input = config.inputs[index]
-            val (width, height, channels) = imageDimensions(input)
-            val resized = source.scale(width, height)
-            images[index] = resized
-            val pixels = IntArray(width * height)
-            resized.getPixels(pixels, 0, width, 0, 0, width, height)
-            encodeTensor(imageValues(pixels, channels, input), graph.inputs[index], input.source)
+        try {
+            val inputs = Array<Any>(graph.inputs.size) { index ->
+                val input = config.inputs[index]
+                val (width, height, channels) = imageDimensions(input)
+                val resized = source.scale(width, height)
+                images[index] = resized
+                val pixels = IntArray(width * height)
+                resized.getPixels(pixels, 0, width, 0, 0, width, height)
+                encodeTensor(imageValues(pixels, channels, input), graph.inputs[index], input.source)
+            }
+            // Transparent renderers allocate independent outputs; the input resizes never escape.
+            return execute(interpreter, config, graph, inputs, images, transparent = true)
+        } finally {
+            images.values.filter { it !== source }.distinct().forEach { it.recycle() }
         }
-        return execute(interpreter, config, graph, inputs, images, transparent = true)
     }
 
     override fun close() = interpreter.close()
