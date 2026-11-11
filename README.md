@@ -147,6 +147,26 @@ app/src/main/java/com/example/minimalapk/
 
 **兼容性边界**：保存合法模型不等于任意模型都能执行。配置可修正布局、动态输入、输入来源、归一化、签名与结果显示，但不能新增缺失的 Flex/自定义算子、改写固定网络结构或代替专用分词器。`bert_qa`、OCR、风格迁移、多阶段检索、视频分类、生成式 AI、强化学习等完整交互流程尚未逐个移植；可以导入其 TFLite 文件并配置支持的张量/签名，但不宣称具备全部上游应用功能。官方仓库没有 TTS 示例，系统 TTS 是否离线取决于已安装的语音包。
 
+## LiteRT 模型库资产目录与运行时基线
+
+`app/src/main/assets/models/litert-models.tsv` 是从 [google-ai-edge/litert-samples](https://github.com/google-ai-edge/litert-samples) 固定提交 `f9f0e000630e9cdd6d263c4cd80495e4231a2dc8` 的 `samples/litert_model_zoo/android/app/src/main/assets/models.json` 生成的制表符目录，共 34 个任务、76 个文件，其中 16 个文件超过 64 MB。目录记录 taskId、模型名、分组、声明后端、许可证名称/URL、上游与模型卡 URL、文件名、下载 URL、精确字节数和 SHA-256；生成脚本为 `tools/generate-litert-catalog.py`，来源与许可证说明见 `app/src/main/assets/models/NOTICE-LiteRT-Model-Zoo.txt`。应用不引入 JSON 依赖，按行解析并校验 HTTPS、文件名、字节数和 64 位十六进制哈希。
+
+- 下载器按集合（taskId）流式写入 `filesDir/model_assets/<taskId>/`，全程使用 `Long` 计数和私有临时文件，不把大文件读成 `ByteArray`。因此这里的下载不受工作台手工导入的 64 MB 上限影响；**手工导入的 64 MB 上限保持不变。**
+- 断点续传使用 `.part` 文件、HTTP `Range` 与已保存的 `ETag`：206 追加、200 重新开始、416 显式重启、ETag 变化重启；重定向次数有界且只允许 HTTPS，不允许降级。只有受支持的 GitHub URL 会经过镜像改写，Hugging Face / Google Storage 保持直连；URL 和日志不写入凭据或 token。
+- 开始前检查 `usableSpace` 并保留 64 MB 余量；下载中校验声明的字节数和 SHA-256，任一文件大小/哈希不符、响应截断或返回 HTML 都会失败。只有全部文件进入 staging 并验证通过后才整体替换目录；失败时删除 staging、保留旧集合，并留下 `.part` 以便下次续传。`isReady` 只做“所有文件存在且长度精确相等”的低成本检查，`delete(setId)` 同时清理 installed、partial、staging、backup 目录。
+
+| 兼容性项目 | 本仓库基线 | 下载 / 运行门槛 |
+| --- | --- | --- |
+| Android API | `minSdk 24`，`compileSdk`/`targetSdk 37` | API < 24 拒绝；QNN NPU 需要 API 31+ |
+| ABI | 仅打包 `arm64-v8a`、`x86_64` | 其他 ABI 的 APK 不含对应 LiteRT/QNN 原生库 |
+| LiteRT | `2.3.2`（`litert`、`litert-gpu`、`litert-npu-runtime-qualcomm`） | `.tflite` 由打包的 Interpreter / CompiledModel 加载 |
+| QNN | `2.50.0`（`qnn-runtime`） | 仅 `arm64-v8a` + Qualcomm HTP，API 31+，需 JIT 编译成功 |
+| 后端 | CPU 始终可用；GPU/NPU 为探测后可用 | 目录 `backend=gpu` 需要可用 GPU delegate；`npu` 需要 Qualcomm HTP；`mixed` 可回落 CPU |
+| `.litertlm` | 未集成 | 需要额外依赖 `com.google.ai.edge.litertlm:litertlm-android`；本固定目录没有 `.litertlm` 条目，因此未添加 |
+| 下载成功 | **不是执行证明** | 只证明字节数、SHA-256 与服务器响应匹配；算子、动态形状或设备后端仍可能编译/执行失败 |
+
+`RuntimeReadiness` 会在尝试加载前报告无法运行的原因（API 级别、打包 ABI、目录声明的 CPU/GPU/NPU 后端是否可用、需要未打包的 `.litertlm` 运行时），但不会代替真实推理验证。基础相机预览、拍照与现有姿态/示例能力不依赖该模型库目录，下载或运行失败不得影响基础相机。
+
 ## 自动构建
 
 推送到 `main`、发起 Pull Request 或在 Actions 页面手动触发 `Build APK` 工作流，即可得到构建产物（工作流会同时运行 `lintDebug` 和单元测试）。APK 按 ABI 拆分为 `arm64-v8a` 与 `x86_64` 两个包，LiteRT 以预编译运行时库打包（QNN NPU 库仅 `arm64-v8a`）：

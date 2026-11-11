@@ -1,0 +1,37 @@
+LiteRT Model Zoo asset catalog
+==============================
+
+`app/src/main/assets/models/litert-models.tsv` is generated from the upstream LiteRT model zoo
+catalog at:
+
+  Repository: https://github.com/google-ai-edge/litert-samples
+  Pinned commit: f9f0e000630e9cdd6d263c4cd80495e4231a2dc8
+  Source file: samples/litert_model_zoo/android/app/src/main/assets/models.json
+  Source URL: https://github.com/google-ai-edge/litert-samples/blob/f9f0e000630e9cdd6d263c4cd80495e4231a2dc8/samples/litert_model_zoo/android/app/src/main/assets/models.json
+
+The checked-in catalog contains 34 task sets and 76 files. It stores each upstream task id, model
+display name, group, declared backend, license name and URL, upstream project URL, model card URL,
+file name, download URL, exact byte count and SHA-256. Download URLs point at the upstream Hugging
+Face repositories pinned by that JSON revision.
+
+Regenerate with:
+
+  python3 tools/generate-litert-catalog.py <models.json> \
+      app/src/main/assets/models/litert-models.tsv
+
+Licenses
+--------
+
+The catalog is metadata only; it does not relicense the models. Each row carries the license that
+the upstream catalog declares for that task (for example Apache-2.0, MIT or a model-specific
+license). Some tasks also list component licenses upstream; consult the upstream model card and
+license URL recorded on the row before redistributing or using a model commercially. The app does
+not bundle these model files; they are downloaded on demand by the user.
+
+Runtime notes
+-------------
+
+LiteRT model download success is not proof that the model can execute on a device. The app checks
+the Android API level, packaged ABI, the declared backend (CPU/GPU/NPU) and, for NPU, Qualcomm HTP
+availability. No `.litertlm` entry exists in this revision. Running `.litertlm` files would require
+adding `com.google.ai.edge.litertlm:litertlm-android`; that dependency is intentionally not added.
