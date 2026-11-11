@@ -100,6 +100,17 @@ class TfliteGraphTest {
     }
 
     @Test
+    fun knownSummaryListsOnlyFileBackedTensorFacts() {
+        val summary = TfliteGraph(asset("yolo26n_pose.tflite")).describe().knownSummary()
+
+        assertTrue(summary.contains("FLOAT32"))
+        assertTrue(summary.contains("形状"))
+        assertTrue(summary.contains("签名"))
+        assertFalse(summary.contains("mean"))
+        assertFalse(summary.contains("labels"))
+    }
+
+    @Test
     fun recognizesOnlyTfliteFiles() {
         assertTrue(PoseModelImport.isTflite(asset("yolo26n_pose.tflite")))
         assertFalse(PoseModelImport.isTflite("plain text".toByteArray()))

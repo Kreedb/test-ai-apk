@@ -15,7 +15,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -27,14 +26,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,8 +46,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.minimalapk.log.AppLog
-import com.example.minimalapk.models.ConfiguredModel
 import com.example.minimalapk.models.ConfiguredModelStore
 import com.example.minimalapk.plugins.CameraModelSettingsStore
 import com.example.minimalapk.plugins.CameraSession
@@ -58,17 +53,13 @@ import com.example.minimalapk.plugins.ConfiguredModelPlugin
 import com.example.minimalapk.plugins.MessageKind
 import com.example.minimalapk.plugins.PluginContribution
 import com.example.minimalapk.plugins.PluginHost
-import com.example.minimalapk.plugins.PluginIds
 import com.example.minimalapk.plugins.PluginSettingsStore
 import com.example.minimalapk.plugins.PoseEnhancementPlugin
 import com.example.minimalapk.plugins.PoseModelsPlugin
 import com.example.minimalapk.plugins.SystemMonitorPlugin
 import com.example.minimalapk.plugins.cameraFrameRate
 import com.example.minimalapk.plugins.cameraPluginSettings
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.withContext
 
 @Composable
 internal fun CameraScreen(store: PluginSettingsStore) {
@@ -76,11 +67,6 @@ internal fun CameraScreen(store: PluginSettingsStore) {
     var granted by remember { mutableStateOf(context.hasCameraPermission()) }
     var permanentlyDenied by remember { mutableStateOf(false) }
     var requested by remember { mutableStateOf(false) }
-    var exampleModels by remember { mutableStateOf(emptyList<ConfiguredModel>()) }
-    var showExamplePicker by rememberSaveable { mutableStateOf(false) }
-    val settings by store.settings.collectAsStateWithLifecycle()
-    val configured = settings.getValue(PluginIds.CONFIGURED_MODEL)
-    val selected = exampleModels.firstOrNull { it.id == configured.config["model_id"] }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { result ->
         requested = true
         granted = result
@@ -92,29 +78,10 @@ internal fun CameraScreen(store: PluginSettingsStore) {
         onPauseOrDispose { }
     }
     LaunchedEffect(Unit) { if (!granted) launcher.launch(Manifest.permission.CAMERA) }
-    LaunchedEffect(Unit) {
-        ConfiguredModelStore.revision.collect {
-            try {
-                exampleModels = withContext(Dispatchers.IO) { ConfiguredModelStore.list(ConfiguredModelStore.directory(context)) }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                AppLog.w("Camera", "示例模型列表读取失败", error)
-            }
-        }
-    }
 
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         ScreenHeader("相机", "离线姿态与插件预览")
         if (granted) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "示例模型叠加：${if (configured.enabled) selected?.name ?: "待选择" else "关闭"}",
-                    modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = { showExamplePicker = true }) { Text("选择") }
-            }
             PoseCamera(store, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(16.dp)))
         } else {
             Column(
@@ -127,18 +94,6 @@ internal fun CameraScreen(store: PluginSettingsStore) {
                 }) { Text(if (permanentlyDenied) "打开设置" else "授予权限") }
             }
         }
-    }
-    if (showExamplePicker) {
-        OptionDialog(
-            title = "示例模型叠加", options = listOf<ConfiguredModel?>(null) + exampleModels,
-            selected = selected.takeIf { configured.enabled }, label = { it?.name ?: "关闭（保留基础姿态）" },
-            onSelect = { model ->
-                store.update(PluginIds.CONFIGURED_MODEL) {
-                    it.copy(enabled = model != null, config = it.config + ("model_id" to (model?.id ?: "")))
-                }
-                showExamplePicker = false
-            }, onDismiss = { showExamplePicker = false },
-        )
     }
 }
 

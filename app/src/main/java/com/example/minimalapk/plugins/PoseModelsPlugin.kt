@@ -9,7 +9,7 @@ import com.example.minimalapk.pose.preferenceFromStorage
 
 internal data class AnalyzedPose(val frame: PoseFrame, val token: PluginToken, val provider: String)
 
-/** Compatibility adapter for 设置 → 模型. The skeleton remains the camera's base layer.
+/** Compatibility adapter for the pose model list in 插件 → 自定义模型. The skeleton remains the camera's base layer.
  * Exactly one shared PoseAnalyzer supplies both the skeleton and enhancement measurements.
  */
 internal class PoseModelsPlugin(private val application: Context) : CameraPlugin {
@@ -48,7 +48,7 @@ internal class PoseModelsPlugin(private val application: Context) : CameraPlugin
                 current = context
                 val enabled = ModelStore.decode(context.settings.config.getValue("models")).any { it.enabled }
                 status = PluginMessage(
-                    if (enabled) "正在加载姿态模型，基础预览仍可用" else "未启用姿态模型，可在 设置 → 模型 中开启",
+                    if (enabled) "正在加载姿态模型，基础预览仍可用" else "未启用姿态模型，可在 插件 → 自定义模型 中开启",
                     MessageKind.STATUS,
                 )
                 model.set(if (enabled) Request(context) else null)

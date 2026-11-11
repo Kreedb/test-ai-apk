@@ -1,5 +1,6 @@
 package com.example.minimalapk.ui.screens
 
+import android.content.Context
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -16,36 +17,66 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.minimalapk.models.ConfiguredModel
+import com.example.minimalapk.models.ConfiguredModelStore
+import com.example.minimalapk.models.ModelConfig
+import com.example.minimalapk.models.cameraModelProblem
+import com.example.minimalapk.plugins.CONFIGURED_MODEL_ID_KEY
 import com.example.minimalapk.plugins.PluginIds
+import com.example.minimalapk.plugins.PluginSettings
 import com.example.minimalapk.plugins.PluginSettingsStore
 import com.example.minimalapk.plugins.PoseEnhancementSettings
 import com.example.minimalapk.plugins.SystemMonitorSettings
+import com.example.minimalapk.pose.ModelSpec
+import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.NpuSource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 internal fun PluginsScreen(store: PluginSettingsStore) {
+    val context = LocalContext.current
     val settings by store.settings.collectAsStateWithLifecycle()
     val pose = settings.getValue(PluginIds.POSE_ENHANCEMENT)
     val monitor = settings.getValue(PluginIds.SYSTEM_MONITOR)
+    val configured = settings.getValue(PluginIds.CONFIGURED_MODEL)
     var configure by rememberSaveable { mutableStateOf(false) }
     var configureMonitor by rememberSaveable { mutableStateOf(false) }
+    var configureModels by rememberSaveable { mutableStateOf(false) }
+    var configuredModels by remember { mutableStateOf(emptyList<InstalledConfiguredModel>()) }
+    var configuredModelsLoaded by remember { mutableStateOf(false) }
+    LaunchedEffect(context) {
+        ConfiguredModelStore.revision.collect {
+            configuredModels = loadConfiguredModels(context)
+            configuredModelsLoaded = true
+        }
+    }
+    val selectedConfigured = configuredModels.firstOrNull {
+        it.model.id == configured.config[CONFIGURED_MODEL_ID_KEY].orEmpty()
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -57,6 +88,15 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
                 enabled = pose.enabled,
                 onEnabledChange = { store.setEnabled(PluginIds.POSE_ENHANCEMENT, it) },
                 onConfigure = { configure = true },
+            )
+        }
+        item {
+            PluginCard(
+                name = "自定义模型",
+                status = configuredModelStatus(configured, selectedConfigured, configuredModelsLoaded),
+                enabled = configured.enabled,
+                onEnabledChange = { store.setEnabled(PluginIds.CONFIGURED_MODEL, it) },
+                onConfigure = { configureModels = true },
             )
         }
         item {
@@ -79,6 +119,112 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
             store.configure(PluginIds.SYSTEM_MONITOR, it.toConfig())
             configureMonitor = false
         }, onDismiss = { configureMonitor = false })
+    }
+    if (configureModels) {
+        ConfiguredModelDialog(
+            configured = configured,
+            installed = configuredModels,
+            onSelectionChange = { id ->
+                store.configure(
+                    PluginIds.CONFIGURED_MODEL,
+                    configured.config + (CONFIGURED_MODEL_ID_KEY to id),
+                )
+            },
+            onDismiss = { configureModels = false },
+        )
+    }
+}
+
+private data class InstalledConfiguredModel(val model: ConfiguredModel, val problem: String?)
+
+private suspend fun loadConfiguredModels(context: Context): List<InstalledConfiguredModel> =
+    withContext(Dispatchers.IO) {
+        ConfiguredModelStore.list(ConfiguredModelStore.directory(context)).map { model ->
+            val problem = try {
+                val description = ConfiguredModelStore.describe(model)
+                val config = ModelConfig.decode(model.configFile.readText(), description)
+                cameraModelProblem(config)
+            } catch (error: Exception) {
+                error.message ?: "配置无法读取"
+            }
+            InstalledConfiguredModel(model, problem)
+        }
+    }
+
+private fun configuredModelStatus(
+    settings: PluginSettings,
+    selected: InstalledConfiguredModel?,
+    loaded: Boolean,
+): String {
+    if (!settings.enabled) return "已停用 · 可继续配置"
+    if (settings.config[CONFIGURED_MODEL_ID_KEY].orEmpty().isBlank()) return "已启用 · 未就绪：未选择模型"
+    if (!loaded) return "已启用 · 正在读取模型列表"
+    if (selected == null) return "已启用 · 未就绪：所选模型已删除"
+    selected.problem?.let { return "已启用 · 未就绪：$it" }
+    return "已启用 · ${selected.model.name}"
+}
+
+@Composable
+private fun ConfiguredModelDialog(
+    configured: PluginSettings,
+    installed: List<InstalledConfiguredModel>,
+    onSelectionChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    var specs by remember { mutableStateOf(ModelStore.load(context)) }
+    var showPicker by rememberSaveable { mutableStateOf(false) }
+    val selected = installed.firstOrNull {
+        it.model.id == configured.config[CONFIGURED_MODEL_ID_KEY].orEmpty()
+    }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize()) {
+            ModelsScreen(
+                specs = specs,
+                onSpecsChange = { updated ->
+                    specs = updated
+                    ModelStore.save(context, updated)
+                },
+                onBack = onDismiss,
+                title = "自定义模型",
+                header = {
+                    ElevatedCard(Modifier.fillMaxWidth()) {
+                        SettingRow(
+                            title = "相机使用的模型",
+                            subtitle = when {
+                                !configured.enabled -> "插件已停用；开启后使用${
+                                    selected?.model?.name?.let { " $it" } ?: "所选模型"
+                                }"
+                                selected == null && configured.config[CONFIGURED_MODEL_ID_KEY].orEmpty().isBlank() ->
+                                    "未选择 · 插件未就绪"
+                                selected == null -> "所选模型已删除 · 插件未就绪"
+                                selected.problem != null -> "${selected.model.name} · 相机不可用：${selected.problem}"
+                                else -> selected.model.name
+                            },
+                            onClick = { showPicker = true },
+                        )
+                    }
+                },
+            )
+        }
+    }
+    if (showPicker) {
+        OptionDialog(
+            title = "相机使用的模型",
+            options = listOf<InstalledConfiguredModel?>(null) + installed,
+            selected = selected,
+            label = { entry ->
+                entry?.let { item ->
+                    if (item.problem == null) item.model.name
+                    else "${item.model.name}（相机不可用：${item.problem}）"
+                } ?: "未选择（插件未就绪）"
+            },
+            onSelect = { entry ->
+                onSelectionChange(entry?.model?.id ?: "")
+                showPicker = false
+            },
+            onDismiss = { showPicker = false },
+        )
     }
 }
 

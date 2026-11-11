@@ -57,4 +57,4 @@ internal class LiveConfiguredModel(
 /** Returns a user-facing reason when a model cannot take a camera frame, else null. */
 internal fun cameraModelProblem(config: ModelConfig): String? =
     if (config.inputs.all { it.source == InputSource.IMAGE }) null
-    else "示例模型叠加只支持 IMAGE 输入的模型；音频、文本或数值模型请在 示例 → 模型工作台 中运行"
+    else "相机叠加只支持 IMAGE 输入；音频、文本或数值模型请在 插件 → 自定义模型 → 模型工作台 中运行"

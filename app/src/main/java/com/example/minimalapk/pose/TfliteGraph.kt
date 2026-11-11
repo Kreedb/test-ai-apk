@@ -232,3 +232,23 @@ internal data class GraphSignature(
 )
 
 internal data class GraphDescription(val signatures: List<GraphSignature>, val customOps: List<String>)
+
+/** Compact file-backed facts only: tensor names, shapes/signatures, dtype and quantization.
+ * Normalization, box meaning, labels, tokenizer and sample rate are deliberately not inferred here.
+ */
+internal fun GraphDescription.knownSummary(): String = buildString {
+    append("签名 ")
+    append(signatures.joinToString { it.key.ifEmpty { "主子图" } })
+    signatures.forEach { signature ->
+        append("；${signature.key.ifEmpty { "主子图" }} 输入 ")
+        append(signature.inputs.joinToString { tensor ->
+            "${tensor.name} ${tensor.typeName} 形状${tensor.shape} 签名${tensor.signature} " +
+                "量化${tensor.scale}/${tensor.zeroPoint}"
+        }.ifEmpty { "无" })
+        append(" 输出 ")
+        append(signature.outputs.joinToString { tensor ->
+            "${tensor.name} ${tensor.typeName} 形状${tensor.shape} 签名${tensor.signature}"
+        }.ifEmpty { "无" })
+    }
+    if (customOps.isNotEmpty()) append("；自定义算子 ${customOps.joinToString()}")
+}

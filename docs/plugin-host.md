@@ -10,7 +10,7 @@
 4. 在 `Started` / `ConfigurationChanged` 更新消费者，在 `Stopped` 停止排队并释放资源。每次回调带 `PluginContext(token, settings)`：异步任务保留它，工作前调用 `isCurrent()`，完成后只用该 context 的 `publish()`。不能用任务结束时取到的新 context 包装旧结果。
 5. 模型复用现有 `ModelConfig` / `ConfiguredModelStore` / `LiveConfiguredModel`，不要重建张量解析器。`AsyncModelSlot` 在同一个专用线程创建/运行/关闭，一个在用模型、一个合并的待加载配置；`runIfReady()` 在加载中立即返回 null。慢的图片/音频消费者可用 `BoundedFrameWorker`（一项执行中 + 一项最新待处理）；禁用、换配置、取消按压时 `clear()`，宿主最终 `CameraPlugin.close()` 时关闭 worker，前后台 `Stopped` 后仍可再次 `Started`。工作函数需处理失败并报告带 ID 的错误。
 
-现有 `PoseModelsPlugin` 持有唯一 `PoseAnalyzer`，同时供基础骨架与 `PoseEnhancementPlugin` 使用；增强开关不加载/关闭它、不改写启用模型列表。`ConfiguredModelPlugin` 是旧相机模型选择器的兼容适配器；下游迁移该入口时保留 `configured_model` 的选择与用户文件。`SystemMonitorPlugin` 只消费相机帧事件，输出右上角指标和底部 NPU 诊断；不依赖姿态增强或任何模型是否启用。示例、设置模型页仍保留，后续迁移导航时须处理旧数字 tab 与 `SettingsPage.MODELS` 恢复。
+现有 `PoseModelsPlugin` 持有唯一 `PoseAnalyzer`，同时供基础骨架与 `PoseEnhancementPlugin` 使用；增强开关不加载/关闭它、不改写启用模型列表。`ConfiguredModelPlugin` 已承接“自定义模型”插件：稳定 ID 仍为 `configured_model`，配置页复用 `ModelsScreen`/`ModelWorkbenchScreen`，相机模型选择保存在 `plugin.configured_model.config.model_id`；停用只停止该消费者并清空输出。`SystemMonitorPlugin` 只消费相机帧事件，输出右上角指标和底部 NPU 诊断；不依赖姿态增强或任何模型是否启用。设置中的旧“模型”页已删除，恢复旧 `SettingsPage.MODELS` 状态时回落到根页；示例页及其工作台入口暂留，待后续任务迁移。
 
 ## 事件与线程
 

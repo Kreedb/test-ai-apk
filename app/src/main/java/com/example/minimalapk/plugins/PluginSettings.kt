@@ -15,6 +15,9 @@ internal object PluginIds {
     const val SYSTEM_MONITOR = "system_monitor"
 }
 
+/** Stable key inside `plugin.configured_model.config`; shared by the runner and its configuration UI. */
+internal const val CONFIGURED_MODEL_ID_KEY = "model_id"
+
 internal data class PluginSettings(
     val enabled: Boolean = false,
     val config: Map<String, String> = emptyMap(),
@@ -46,7 +49,7 @@ internal data class PoseEnhancementSettings(
 internal val pluginDefaults = mapOf(
     // Preserve the previously visible enhancement and metrics. New model consumers remain opt-in.
     PluginIds.POSE_ENHANCEMENT to PluginSettings(true, PoseEnhancementSettings().toConfig()),
-    PluginIds.CONFIGURED_MODEL to PluginSettings(config = mapOf("model_id" to "")),
+    PluginIds.CONFIGURED_MODEL to PluginSettings(config = mapOf(CONFIGURED_MODEL_ID_KEY to "")),
     PluginIds.SYSTEM_MONITOR to PluginSettings(true, SystemMonitorSettings().toConfig()),
 )
 
