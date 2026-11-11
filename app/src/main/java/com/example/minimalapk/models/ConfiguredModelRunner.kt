@@ -40,7 +40,7 @@ internal object ConfiguredModelRunner {
                     files[index] ?: error("请为输入 $index（${tensor.name}）选择文件"),
                 )?.use { it.readCapped(ModelDownload.MAX_BYTES) } ?: error("无法读取输入 $index")
                 when (input.source) {
-                    InputSource.TEXT -> stringArray(input.values, input.shape)
+                    InputSource.TEXT -> configuredTextInput(input.values, input.shape)
                     InputSource.BINARY -> {
                         val bytes = readFile()
                         require(bytes.size == count * tensorByteWidth(tensor.type)) { "输入 $index 二进制长度应为 ${count * tensorByteWidth(tensor.type)} 字节" }
@@ -206,11 +206,19 @@ internal fun shapedArray(buffer: ByteBuffer, type: Int, shape: List<Int>): Any {
     return array
 }
 
-private fun stringArray(text: String, shape: List<Int>): Any {
-    if (shape.isEmpty()) return text
-    val values = text.split('\n')
+/** Use the STRING tensor's byte[]-per-element API, including a byte[] for a scalar.
+ * LiteRT 2.3.2's Java String JNI path writes modified UTF-8 plus a terminating NUL into the
+ * tensor. Raw UTF-8 bytes avoid changing both model input semantics and length-delimited output;
+ * never trim NULs or reinterpret the model's output as modified UTF-8 to compensate.
+ */
+internal fun configuredTextInput(text: String, shape: List<Int>): Any {
+    val values = (if (shape.isEmpty()) listOf(text) else text.split('\n')).map { it.toByteArray(Charsets.UTF_8) }
     require(values.size == 1 || values.size == tensorElements(shape)) { "TEXT 按行填写，每个张量元素一行，或一行填充全部" }
-    val array = ReflectArray.newInstance(String::class.java, *shape.toIntArray())
+    // TensorImpl.computeNumDimensions descends into the first byte[] before removing its byte
+    // dimension; an empty first element is rejected by this runtime (later empty values are OK).
+    require(values.first().isNotEmpty()) { "当前 LiteRT Java API 不支持首个 TEXT 元素为空；请提供非空首项或使用支持空字符串的运行时" }
+    if (shape.isEmpty()) return values.single()
+    val array = ReflectArray.newInstance(ByteArray::class.java, *shape.toIntArray())
     var position = 0
     fun fill(target: Any, depth: Int) {
         repeat(shape[depth]) { index ->

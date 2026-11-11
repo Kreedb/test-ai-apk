@@ -140,7 +140,7 @@ app/src/main/java/com/example/minimalapk/
 | `input.0.source=IMAGE` | `IMAGE` 图片，`NUMBERS` 数值，`TEXT` 字符串，`AUDIO` WAV，`BINARY` 原始张量 |
 | `input.0.layout=NHWC` | 图片支持 `NHWC`/`NCHW`、非正方形及 1/3 通道；按形状拉伸，不做 letterbox |
 | `input.0.mean=0` / `input.0.std=1` | 图片实数值 `(pixel−mean)/std`；uint8/int8 等按模型的 scale/zero-point 量化 |
-| `input.0.values=0` | 数值用空格/逗号分隔，单个值填充整个张量；TEXT 用 `\n` 分隔每个字符串 |
+| `input.0.values=0` | 数值用空格/逗号分隔，单个值填充整个张量；TEXT 用 `\n` 分隔每个字符串，按标准 UTF-8 字节传入，保留 Unicode/NUL；当前 Java API 要求首项非空 |
 | `input.0.sampleRate=16000` | AUDIO 的目标采样率；需要 PCM16 单/双声道 WAV |
 | `output.0.render=VALUES` | `VALUES`、`CLASSIFICATION`、`IMAGE`、`MOVENET`、`SEGMENTATION`、`BOXES` |
 | `output.0.scale=1` / `output.0.offset=0` | 图片输出实数值 → 0–255 像素，例如 0–1 输出使用 scale=255 |

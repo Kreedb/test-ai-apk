@@ -50,10 +50,27 @@ class ConfiguredModelInputSmokeTest {
     @Test
     fun stringTensorPassesUnicodeWithoutInventingATokenizer() = withModel(STRING_MODEL) { model, _ ->
         ConfiguredModelStore.describe(model).signatures.forEach { graph ->
-            val config = ModelConfig.infer(graph).copy(inputs = listOf(TensorInputConfig(listOf(2), InputSource.TEXT, values = "hello\n世界")))
-            val output = ConfiguredModelRunner.run(context, model, config, emptyMap())
-            assertTrue(output.text.contains("hello\n世界"))
-            assertTrue(output.images.isEmpty())
+            // Exact equality catches JNI-added NULs even for ASCII; emoji catches modified UTF-8.
+            // Explicit NULs and an empty second element must survive rather than be trimmed away.
+            for (text in listOf("hello\n世界", "café\n🙂e\u0301", "a\u0000b\n世界\u0000", "hello\n")) {
+                val config = ModelConfig.infer(graph).copy(inputs = listOf(TensorInputConfig(listOf(2), InputSource.TEXT, values = text)))
+                val output = ConfiguredModelRunner.run(context, model, config, emptyMap())
+                val expected = "输出 0 · ${graph.outputs.single().name} [2]\n$text"
+                val visible = output.text.replace("\u0000", "\\u0000").replace("\n", "\\n")
+                assertEquals("signature=${graph.key.ifEmpty { "indexed" }} actual=$visible\n" +
+                    "actual codepoints=${codePoints(output.text)}\nexpected codepoints=${codePoints(expected)}", expected, output.text)
+                assertTrue(output.images.isEmpty())
+            }
+        }
+    }
+
+    private fun codePoints(text: String): String = buildString {
+        var index = 0
+        while (index < text.length) {
+            val point = Character.codePointAt(text, index)
+            if (isNotEmpty()) append(' ')
+            append("U+").append(point.toString(16).uppercase().padStart(4, '0'))
+            index += Character.charCount(point)
         }
     }
 

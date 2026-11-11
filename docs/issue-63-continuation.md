@@ -87,6 +87,20 @@ NPU 单位修复的实际 Kotlin/JUnit 独立检查通过 25 tests：[结果](ht
 
 软件模拟没有硬件加速，单个检查可耗时数分钟；这些时间不能代表手机性能。
 
+MODNet 实际 Android golden 比较在软件模拟器持续计算但未完成，停止该次测试以运行小输入协议回归；不计为通过。物理设备上的图像处理/内存结果仍待验。
+
+API24 上最终 shrunk Release 覆盖安装后 `am start -W` 返回 `Status: ok`；实际界面保留旧 YOLO 阈值 `0.61/0.67`、防抖3帧和已导入模型名称/开关，完整资源菜单能打开 Qwen 的固定源、许可、大小及 SAF 整集导入按钮。[模型列表](https://uploads.pullfrog.com/agent-uploads/e5098b4e-2b98-42e0-92cc-321a1f74bbf7/final-release-models.xml)、[资源入口](https://uploads.pullfrog.com/agent-uploads/49fa9ee4-4ffd-4fa7-892b-2a97fc7c108b/final-release-qwen-import.xml)。这证明 release 启动/入口，尚不证明 LM 原生生成。
+
+![最终 Release 完整模型资源入口](https://uploads.pullfrog.com/agent-uploads/e188c883-0249-446d-b6cb-55d196d87562/final-release-resource.png)
+
+### 自定义输入原生复测发现
+
+四项 NUMBERS/BINARY、STRING、WAV/PCM、IMAGE 原生测试中，首次 STRING 失败，其余三项通过。根因不是模型或输出解码：LiteRT2.3.2 的 Java `String` JNI 写入 modified UTF-8 并把末尾 NUL 计入长度。改用该运行时正式支持的逐元素 UTF-8 `byte[]` 输入，保留真实 NUL 和非 BMP 字符；不裁掉输出中的 NUL 来掩盖模型输入变化。首个空元素受当前 Java 维度检查限制，明确报原因。修复增加精确字节与 scalar/多维/空后项回归，native 断言覆盖中英文、emoji、组合字符、嵌入/尾随 NUL，并包含失败时实际 codepoints。[实际 AAR/JNI/反汇编证据](https://uploads.pullfrog.com/agent-uploads/5f9f30ed-63aa-48ff-a22e-607db2bb8ff3/handoff.md)。
+
+修复后 API24 的 [四项原生输入回归全部通过](https://uploads.pullfrog.com/agent-uploads/1a961fd6-d059-44c2-89ce-2a63623c9e05/bg-092932ba.log)，整合单测为 [580 tests / 0 failures / 0 errors / 1 skipped](https://uploads.pullfrog.com/agent-uploads/f67bef15-4103-4a05-8d0f-74c982502a03/unicode-final-unit-counts.json)。独立复审核对实际 Java/JNI API，未发现该修复的未解决问题。
+
+该补丁的 [Debug/单测/测试APK重建](https://uploads.pullfrog.com/agent-uploads/fcaac58c-364b-42b4-a005-8bb6d586e465/bg-7b936bac.log) 及 [Release/lint重建](https://uploads.pullfrog.com/agent-uploads/bf8181c3-06c2-44c4-8313-ea2d4d5e5fbd/bg-026bbf2f.log) 均成功，lint仍0错误；最终Release签名有效，arm64 100,856,784字节、x86_64 31,208,667字节，仍只内置YOLO26n。
+
 ## 整合检查与复审
 
 稳定源码上执行 `assembleDebug assembleRelease lintDebug testDebugUnitTest assembleDebugAndroidTest --build-cache --parallel --console=plain --no-daemon`，另用仓库外临时 init script 为测试传入已准备的真实图像/tokenizer/输出 fixtures，**全部成功**。[完整日志](https://uploads.pullfrog.com/agent-uploads/d15d9306-6e88-4cce-8631-80604412aa5c/bg-b19a2404.log)、[577 tests / 0 failures / 0 errors / 1 skipped](https://uploads.pullfrog.com/agent-uploads/ec58ba4d-f969-41fd-8ca0-a61a74f170c3/final-unit-counts.json)。唯一默认跳过项是可选网络大文件冒烟，[已独立通过](https://uploads.pullfrog.com/agent-uploads/0271c6ce-89e3-48e3-851a-93fcee494599/network-smoke-results.txt)。生产安装器在 192 MiB JVM 堆下完成 OCR 整套与 1.04 GiB LM 流式导入/哈希/租约/删除，[证据](https://uploads.pullfrog.com/agent-uploads/2a66b6c2-1ee0-46dc-b843-0b44d1b4d0c4/real-smoke-results.txt)。
