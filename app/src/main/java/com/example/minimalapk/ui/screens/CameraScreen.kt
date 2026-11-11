@@ -59,6 +59,7 @@ import com.example.minimalapk.plugins.MessageKind
 import com.example.minimalapk.plugins.PluginContribution
 import com.example.minimalapk.plugins.PluginHost
 import com.example.minimalapk.plugins.PluginSettingsStore
+import com.example.minimalapk.plugins.PersonalizationPlugin
 import com.example.minimalapk.plugins.PoseEnhancementPlugin
 import com.example.minimalapk.plugins.PoseModelsPlugin
 import com.example.minimalapk.plugins.SuperResolutionPlugin
@@ -117,6 +118,7 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
             SystemMonitorPlugin(), SuperResolutionPlugin(context.applicationContext),
             *ExampleScenes.all.map { ExampleScenePlugin(context.applicationContext, it) }.toTypedArray(),
             AudioClassificationPlugin(context.applicationContext), TtsPlugin(),
+            PersonalizationPlugin(context.applicationContext),
         ))
     }
     val audio = remember(context, host, lifecycleOwner) {

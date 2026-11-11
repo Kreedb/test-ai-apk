@@ -13,7 +13,7 @@ class ExamplePluginSettingsTest {
         listOf(
             PluginIds.MOVENET_SCENE, PluginIds.IMAGE_CLASSIFICATION_SCENE,
             PluginIds.OBJECT_DETECTION_SCENE, PluginIds.IMAGE_SEGMENTATION_SCENE,
-            PluginIds.AUDIO_CLASSIFICATION, PluginIds.TTS,
+            PluginIds.AUDIO_CLASSIFICATION, PluginIds.TTS, PluginIds.PERSONALIZATION,
         ).forEach { id ->
             assertFalse("$id must be opt-in", defaults.getValue(id).enabled)
         }

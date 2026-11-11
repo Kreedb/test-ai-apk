@@ -52,6 +52,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.minimalapk.examples.ExampleCatalog
 import com.example.minimalapk.examples.ExampleDownload
 import com.example.minimalapk.examples.ExampleModel
+import com.example.minimalapk.examples.personalizationCheckpoint
 import com.example.minimalapk.models.ConfiguredModel
 import com.example.minimalapk.models.ConfiguredModelStore
 import com.example.minimalapk.models.ModelConfig
@@ -88,12 +89,14 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
     val superResolution = settings.getValue(PluginIds.SUPER_RESOLUTION)
     val audioClassification = settings.getValue(PluginIds.AUDIO_CLASSIFICATION)
     val tts = settings.getValue(PluginIds.TTS)
+    val personalization = settings.getValue(PluginIds.PERSONALIZATION)
     var configure by rememberSaveable { mutableStateOf(false) }
     var configureMonitor by rememberSaveable { mutableStateOf(false) }
     var configureModels by rememberSaveable { mutableStateOf(false) }
     var configureSuperResolution by rememberSaveable { mutableStateOf(false) }
     var configureAudio by rememberSaveable { mutableStateOf(false) }
     var configureTts by rememberSaveable { mutableStateOf(false) }
+    var configurePersonalization by rememberSaveable { mutableStateOf(false) }
     var configureScene by rememberSaveable { mutableStateOf<String?>(null) }
     var configuredModels by remember { mutableStateOf(emptyList<InstalledConfiguredModel>()) }
     var configuredModelsLoaded by remember { mutableStateOf(false) }
@@ -174,6 +177,15 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
                 onConfigure = { configureTts = true },
             )
         }
+        item {
+            PluginCard(
+                name = "设备端学习",
+                status = personalizationStatus(context, personalization),
+                enabled = personalization.enabled,
+                onEnabledChange = { store.setEnabled(PluginIds.PERSONALIZATION, it) },
+                onConfigure = { configurePersonalization = true },
+            )
+        }
     }
     if (configure) {
         PoseEnhancementDialog(PoseEnhancementSettings.from(pose), onSave = {
@@ -240,6 +252,16 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
             onDismiss = { configureTts = false },
         )
     }
+    if (configurePersonalization) {
+        Dialog(
+            onDismissRequest = { configurePersonalization = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Surface(Modifier.fillMaxSize()) {
+                PersonalizationScreen(onBack = { configurePersonalization = false })
+            }
+        }
+    }
 }
 
 private data class InstalledConfiguredModel(val model: ConfiguredModel, val problem: String?)
@@ -280,6 +302,15 @@ private fun sceneStatus(context: Context, settings: PluginSettings, spec: Exampl
     if (!settings.enabled) return "已停用 · 可继续配置"
     return if (exampleCached(context, spec.example)) "已启用 · 模型已缓存，在相机帧上运行"
     else "已启用 · 首次启用时下载约 ${spec.example.sizeBytes / 1024 / 1024} MB"
+}
+
+private fun personalizationStatus(context: Context, settings: PluginSettings): String {
+    if (!settings.enabled) return "已停用 · 4 类本机训练与相机识别"
+    return if (personalizationCheckpoint(context).isFile) {
+        "已启用 · 使用本机训练的 4 类分类头"
+    } else {
+        "已启用 · 未就绪：请先在插件中训练"
+    }
 }
 
 @Composable

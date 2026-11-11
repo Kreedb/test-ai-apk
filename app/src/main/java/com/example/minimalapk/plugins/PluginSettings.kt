@@ -20,6 +20,7 @@ internal object PluginIds {
     const val IMAGE_SEGMENTATION_SCENE = "image_segmentation_scene"
     const val AUDIO_CLASSIFICATION = "audio_classification"
     const val TTS = "tts"
+    const val PERSONALIZATION = "model_personalization"
 }
 
 /** Stable key inside `plugin.configured_model.config`; shared by the runner and its configuration UI. */
@@ -101,6 +102,7 @@ internal val pluginDefaults = mapOf(
     PluginIds.IMAGE_SEGMENTATION_SCENE to PluginSettings(config = SceneThresholdSettings().toConfig()),
     PluginIds.AUDIO_CLASSIFICATION to PluginSettings(config = AudioClassificationSettings().toConfig()),
     PluginIds.TTS to PluginSettings(config = mapOf(TTS_TEXT_KEY to "你好，这是插件语音朗读。")),
+    PluginIds.PERSONALIZATION to PluginSettings(),
 )
 
 /** Small storage seam: tests exercise the same restore/update code without an Android runtime. */
