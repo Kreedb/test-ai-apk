@@ -28,10 +28,139 @@ license). Some tasks also list component licenses upstream; consult the upstream
 license URL recorded on the row before redistributing or using a model commercially. The app does
 not bundle these model files; they are downloaded on demand by the user.
 
+Adapted model host code
+-----------------------
+
+Kotlin preprocessing, inference orchestration and decoding under
+com/example/minimalapk/litert/{vision,imaging,audio,text} are adapted from
+samples/litert_model_zoo/android at the pinned commit above.
+Copyright 2026 The Google AI Edge Authors. Apache License 2.0.
+License text: LICENSE-LiteRT.txt in this directory.
+Changes include package relocation, integration with the existing plugin lifecycle,
+resource ownership/cancellation, input validation and source-frame result presentation.
+Individual files retain their original attribution and model-host provenance.
+The upstream text-host NOTICE is preserved in NOTICE-LiteRT-Text-Hosts.txt.
+
+PANNs and AudioSet attribution
+-----------------------------
+
+PANNs: Large-Scale Pretrained Audio Neural Networks for Audio Pattern Recognition —
+Qiuqiang Kong, Yin Cao, Turab Iqbal, Yuxuan Wang, Wenwu Wang and Mark D. Plumbley.
+Pretrained CNN14 weights: Creative Commons Attribution 4.0 International (CC-BY-4.0).
+Source: https://zenodo.org/records/3987831
+Conversion: https://huggingface.co/litert-community/PANNs-CNN14-AudioSet-LiteRT
+The app downloads the unchanged FP16 CNN graph and uses a host log-mel frontend.
+AudioSet labels and ontology: © Google, CC-BY-4.0.
+Source: https://research.google.com/audioset/ontology/index.html
+License: https://creativecommons.org/licenses/by/4.0/
+No endorsement is implied.
+
+Additional component licenses from the pinned catalog
+----------------------------------------------------
+
+The task-level TSV license does not replace these component licenses:
+
+Matcha-TTS:
+- Matcha-TTS and HiFi-GAN — MIT
+  https://github.com/shivammehta25/Matcha-TTS/blob/main/LICENSE
+- DeepPhonemizer — MIT
+  https://github.com/as-ideas/DeepPhonemizer/blob/master/LICENSE
+- OpenPhonemizer dictionary — BSD-3-Clause-Clear
+  https://github.com/NeuralVox/OpenPhonemizer/blob/main/LICENSE
+
+Laya multilingual:
+- mmBERT-base encoder — MIT
+  https://huggingface.co/litert-community/Laya-Multilingual-LiteRT/blob/32f1b84d55f42a323464fad22594cfc2059e7467/licenses/mmBERT-MIT.txt
+- ModernBERT — Apache-2.0
+  https://huggingface.co/litert-community/Laya-Multilingual-LiteRT/blob/32f1b84d55f42a323464fad22594cfc2059e7467/licenses/ModernBERT-APACHE-2.0.txt
+
+Julia-1:
+- mmBERT-small encoder — MIT
+  https://huggingface.co/litert-community/Julia-1-LiteRT/blob/8f36857c56e891c023060586759c6cdc8baf6b3e/android/licenses/mmBERT-MIT.txt
+
+GLiClass-Edge v3.0:
+- Ettin encoder — MIT
+  https://huggingface.co/litert-community/GLiClass-Edge-v3.0-LiteRT/blob/88c90950587eb951974c094eef91afa0fe3552c0/licenses/Ettin-Encoder-MIT.txt
+- GLiClass — Apache-2.0
+  https://huggingface.co/litert-community/GLiClass-Edge-v3.0-LiteRT/blob/88c90950587eb951974c094eef91afa0fe3552c0/licenses/GLiClass-APACHE-2.0.txt
+
+Open-Decision DeBERTa-v3-large:
+- DeBERTa-v3-large encoder — MIT
+  https://huggingface.co/litert-community/Open-Decision-DeBERTa-v3-Large-LiteRT/blob/7a276235b795e8ad3ae7ac6a9f237daa2098863a/android/sample/licenses/DeBERTa-MIT.txt
+
+GLiNER2.5-Decide:
+- DeBERTa-v3 encoder — MIT
+  https://huggingface.co/litert-community/GLiNER2.5-Decide-LiteRT/blob/db80197282d11373df084c0ceed67a54544cfa84/licenses/DeBERTa-MIT.txt
+- GLiNER2 — Apache-2.0
+  https://huggingface.co/litert-community/GLiNER2.5-Decide-LiteRT/blob/db80197282d11373df084c0ceed67a54544cfa84/licenses/GLiNER2-APACHE-2.0.txt
+
+Matcha / DeepPhonemizer MIT notices
+----------------------------------
+
+Matcha-TTS: Copyright (c) 2023 Shivam Mehta
+DeepPhonemizer: Copyright (c) 2021 Axel Springer News Media & Tech GmbH & Co. KG - Ideas Engineering
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+OpenPhonemizer dictionary notice
+--------------------------------
+
+The Clear BSD License
+
+Copyright (c) 2024 mrfakename, NeuralVox, OpenPhonemizer Contributors
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted (subject to the limitations in the disclaimer
+below) provided that the following conditions are met:
+
+  * Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+
+  * Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+  * Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from this
+software without specific prior written permission.
+
+NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE GRANTED BY
+THIS LICENSE. THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
 Runtime notes
 -------------
 
 LiteRT model download success is not proof that the model can execute on a device. The app checks
 the Android API level, packaged ABI, the declared backend (CPU/GPU/NPU) and, for NPU, Qualcomm HTP
-availability. No `.litertlm` entry exists in this revision. Running `.litertlm` files would require
-adding `com.google.ai.edge.litertlm:litertlm-android`; that dependency is intentionally not added.
+availability. No `.litertlm` entry exists in this original 34-task catalog. The separately audited
+local-text-models.tsv contains the Qwen text recipe using litertlm-android 0.19.0; see
+NOTICE-Local-Text.txt. This does not imply support for arbitrary .litertlm bundles.

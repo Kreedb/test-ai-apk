@@ -2,6 +2,7 @@ package com.example.minimalapk.diagnostics
 
 import com.example.minimalapk.examples.ExampleCatalog
 import com.example.minimalapk.models.AssetCatalog
+import com.example.minimalapk.litert.lm.LocalTextModels
 import com.example.minimalapk.pose.ModelCatalog
 import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.TfliteGraph
@@ -25,13 +26,19 @@ class SelfCheckInventoryTest {
     @Test
     fun emptyInstallationStillEnumeratesAllKnownModelsAndEveryCatalogFileWithoutWriting() {
         val filesDir = File(folder.root, "does-not-exist")
-        val sets = AssetCatalog.parse(File("src/main/assets/models/litert-models.tsv").readText())
+        val sets = AssetCatalog.parse(File("src/main/assets/models/litert-models.tsv").readText()) +
+            AssetCatalog.parse(File("src/main/assets/${LocalTextModels.ASSET_PATH}").readText())
         val targets = selfCheckInventory(filesDir, emptyList(), sets)
         assertEquals(ModelStore.builtIn.size, targets.count { it.kind == CheckKind.POSE })
         assertEquals(ModelCatalog.models.size, targets.count { it.kind == CheckKind.REFERENCE })
         assertEquals(7, targets.count { it.kind == CheckKind.EXAMPLE })
-        assertEquals(76, targets.count { it.kind == CheckKind.CATALOG })
-        assertEquals(34, targets.mapNotNull { it.set?.id }.toSet().size)
+        assertEquals(77, targets.count { it.kind == CheckKind.CATALOG })
+        assertEquals(35, targets.mapNotNull { it.set?.id }.toSet().size)
+        val lm = targets.single { it.set?.id == LocalTextModels.QWEN_ID }
+        assertEquals(LocalTextModels.SHA256, lm.expectedHash)
+        assertEquals(LocalTextModels.MODEL_BYTES, lm.expectedBytes)
+        assertTrue(LocalTextModels.selfCheckNote(lm.set).contains("需要专用本地文本场景验证"))
+        assertFalse(LocalTextModels.selfCheckNote(lm.set).contains("未集成"))
         assertEquals(targets.size, targets.map { it.id }.toSet().size)
         assertEquals(sets.sumOf { it.files.size }, targets.count { it.set != null })
         assertFalse("Enumeration must not create download/install directories", filesDir.exists())

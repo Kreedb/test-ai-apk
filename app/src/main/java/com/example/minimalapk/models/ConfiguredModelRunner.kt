@@ -20,47 +20,66 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.roundToInt
 
-internal data class ModelRunResult(val text: String, val images: List<Pair<String, Bitmap>>)
+internal data class ModelRunResult(
+    val text: String,
+    val images: List<Pair<String, Bitmap>>,
+    val inputImage: Bitmap? = null,
+    val sourceLabel: String = "单次运行",
+)
 
 internal object ConfiguredModelRunner {
     fun run(context: Context, model: ConfiguredModel, config: ModelConfig, files: Map<Int, Uri>): ModelRunResult {
         val description = ConfiguredModelStore.describe(model)
         val graph = description.signatures.single { it.key == config.signature }
         val images = mutableMapOf<Int, Bitmap>()
-        val inputBuffers = graph.inputs.mapIndexed { index, tensor ->
-            val input = config.inputs[index]
-            val count = tensorElements(input.shape)
-            fun readFile(): ByteArray = context.contentResolver.openInputStream(
-                files[index] ?: error("请为输入 $index（${tensor.name}）选择文件"),
-            )?.use { it.readCapped(ModelDownload.MAX_BYTES) } ?: error("无法读取输入 $index")
-            when (input.source) {
-                InputSource.TEXT -> stringArray(input.values, input.shape)
-                InputSource.BINARY -> {
-                    val bytes = readFile()
-                    require(bytes.size == count * tensorByteWidth(tensor.type)) { "输入 $index 二进制长度应为 ${count * tensorByteWidth(tensor.type)} 字节" }
-                    ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).apply { put(bytes); rewind() }
-                }
-                else -> {
-                    val values = when (input.source) {
-                        InputSource.IMAGE -> {
-                            val (width, height, channels) = imageDimensions(input)
-                            val bitmap = decodeImage(context, files[index] ?: error("请为输入 $index 选择图片")) ?: error("无法读取图片")
-                            val resized = bitmap.scale(width, height)
-                            images[index] = resized
-                            val pixels = IntArray(width * height)
-                            resized.getPixels(pixels, 0, width, 0, 0, width, height)
-                            imageValues(pixels, channels, input)
-                        }
-                        InputSource.AUDIO -> wavSamples(readFile(), input.sampleRate, count)
-                        else -> numericValues(input.values, count)
+        try {
+            val inputBuffers = graph.inputs.mapIndexed { index, tensor ->
+                val input = config.inputs[index]
+                val count = tensorElements(input.shape)
+                fun readFile(): ByteArray = context.contentResolver.openInputStream(
+                    files[index] ?: error("请为输入 $index（${tensor.name}）选择文件"),
+                )?.use { it.readCapped(ModelDownload.MAX_BYTES) } ?: error("无法读取输入 $index")
+                when (input.source) {
+                    InputSource.TEXT -> stringArray(input.values, input.shape)
+                    InputSource.BINARY -> {
+                        val bytes = readFile()
+                        require(bytes.size == count * tensorByteWidth(tensor.type)) { "输入 $index 二进制长度应为 ${count * tensorByteWidth(tensor.type)} 字节" }
+                        ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).apply { put(bytes); rewind() }
                     }
-                    encodeTensor(values, tensor, input.source)
+                    else -> {
+                        val values = when (input.source) {
+                            InputSource.IMAGE -> {
+                                val (width, height, channels) = imageDimensions(input)
+                                val bitmap = decodeImage(context, files[index] ?: error("请为输入 $index 选择图片")) ?: error("无法读取图片")
+                                val resized = try { bitmap.scale(width, height) } catch (error: Throwable) { bitmap.recycle(); throw error }
+                                if (resized !== bitmap) bitmap.recycle()
+                                images[index] = resized
+                                val pixels = IntArray(width * height)
+                                resized.getPixels(pixels, 0, width, 0, 0, width, height)
+                                imageValues(pixels, channels, input)
+                            }
+                            InputSource.AUDIO -> {
+                                configuredWaveformProblem(input, tensor)?.let { error(it) }
+                                wavSamples(readFile(), input.sampleRate, count)
+                            }
+                            else -> numericValues(input.values, count)
+                        }
+                        encodeTensor(values, tensor, input.source)
+                    }
                 }
             }
-        }
-        Interpreter(model.file, Interpreter.Options().setNumThreads(2)).use { interpreter ->
-            configureInputs(interpreter, config)
-            return execute(interpreter, config, graph, inputBuffers.toTypedArray(), images)
+            Interpreter(model.file, Interpreter.Options().setNumThreads(2)).use { interpreter ->
+                configureInputs(interpreter, config)
+                val output = execute(interpreter, config, graph, inputBuffers.toTypedArray(), images)
+                val source = images.entries.firstOrNull()
+                return output.copy(
+                    inputImage = source?.value?.let { checkNotNull(it.copy(Bitmap.Config.ARGB_8888, false)) },
+                    sourceLabel = if (source != null) "所选文件图片 · 输入 ${source.key}" else
+                        "单次输入：${config.inputs.map { it.source.name }.distinct().joinToString(" / ")}",
+                )
+            }
+        } finally {
+            images.values.distinct().forEach { it.recycle() }
         }
     }
 }

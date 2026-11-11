@@ -26,14 +26,62 @@ class NpuProbesTest {
     }
 
     @Test
-    fun strictPercentAcceptsWholeFileOnly() {
-        assertEquals(42f, parseStrictPercent("42 %")!!, 0.01f)
-        assertEquals(37.5f, parseStrictPercent("37.5")!!, 0.01f)
-        assertEquals(100f, parseStrictPercent("100%\n")!!, 0.01f)
-        assertNull(parseStrictPercent("load 42%"))
-        assertNull(parseStrictPercent("128"))
-        assertNull(parseStrictPercent("-4"))
-        assertNull(parseStrictPercent("n/a"))
+    fun genericLoadAttributesKeepRawEvidenceWithoutInferringUnitsOrScope() {
+        val device = "/sys/class/devfreq/npu0"
+        val sources = listOf(
+            NpuSource.VENDOR_PERCENT to "/sys/class/misc/npu/device/load",
+            NpuSource.VENDOR_PERCENT to "/sys/devices/platform/npu/load",
+            NpuSource.DEVFREQ to "$device/load",
+            NpuSource.DEVFREQ to "$device/npu_load",
+        )
+        for ((source, path) in sources) {
+            // Even 0, a 0..100 scalar, or an explicit % cannot establish what this driver measures.
+            listOf("0", "50", "37.5", "100", "2500", "0.01", "42 %", "load 42%", "50 ticks", "n/a").forEach { raw ->
+                val files = FakeFiles(
+                    mutableMapOf(path to raw), mutableMapOf("/sys/class/devfreq" to listOf(device)),
+                )
+                val result = NpuProbeReader(files).probe(source, 7).single()
+                assertEquals("$path=$raw", NpuProbeState.UNSUPPORTED, result.state)
+                assertNull(result.value)
+                assertEquals("raw", result.unit)
+                assertEquals(path, result.sourcePath)
+                assertEquals(raw, result.rawExcerpt)
+                assertEquals(7L, result.timestampNanos)
+                assertTrue(result.detail!!.contains("单位/作用域未确认"))
+                assertTrue(result.detail!!.contains("驱动契约"))
+                assertTrue(result.readings.isEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun invalidRawContentsAndReadFailuresAreDistinctFromUnknownUnits() {
+        val device = "/sys/class/devfreq/npu0"
+        val sources = listOf(
+            NpuSource.VENDOR_PERCENT to "/sys/class/misc/npu/device/load",
+            NpuSource.DEVFREQ to "$device/npu_load",
+        )
+        for ((source, path) in sources) {
+            listOf("", " \n", "NaN", "Infinity", "-Infinity").forEach { raw ->
+                val files = FakeFiles(
+                    mutableMapOf(path to raw), mutableMapOf("/sys/class/devfreq" to listOf(device)),
+                )
+                val result = NpuProbeReader(files).probe(source, 1).single()
+                assertEquals("$path=$raw", NpuProbeState.PARSE_ERROR, result.state)
+                assertNull(result.value)
+                assertEquals("raw", result.unit)
+                assertNotNull(result.detail)
+            }
+            val files = FakeFiles(
+                mutableMapOf(path to ProbeRead.Failure("读取失败 EIO")),
+                mutableMapOf("/sys/class/devfreq" to listOf(device)),
+            )
+            val failure = NpuProbeReader(files).probe(source, 2).single()
+            assertEquals(NpuProbeState.PARSE_ERROR, failure.state)
+            assertEquals("读取失败 EIO", failure.detail)
+            assertEquals(path, failure.sourcePath)
+            assertNull(failure.value)
+        }
     }
 
     @Test
@@ -49,6 +97,10 @@ class NpuProbesTest {
 
         // The core number itself must never be read as the load value.
         assertEquals(listOf(0f), checkNotNull(parseRockchipLoad("NPU load: Core0:   %")).perCore)
+        assertEquals(37.5f, checkNotNull(parseRockchipLoad("NPU load: Core0: 37.5%\n")).average, 0.01f)
+        assertEquals(100f, checkNotNull(parseRockchipLoad("NPU load: Core0: 100%")).average, 0.01f)
+        assertNull(parseRockchipLoad("NPU load: Core0: 128%"))
+        assertNull(parseRockchipLoad("NPU load: Core0: -4%"))
         assertNull(parseRockchipLoad("NPU load: Core0"))
         assertNull(parseRockchipLoad("Core0: 12%"))
     }
@@ -64,25 +116,52 @@ class NpuProbesTest {
     }
 
     @Test
-    fun vendorSchemeReportsMissingPermissionAndParseStates() {
-        val path = "/sys/class/misc/npu/device/load"
-        val missing = NpuProbeReader(FakeFiles()).probe(NpuSource.VENDOR_PERCENT, 1).single()
-        assertEquals(NpuProbeState.MISSING, missing.state)
-        assertNull(missing.value)
-
-        val denied = NpuProbeReader(FakeFiles(mutableMapOf(path to ProbeRead.PermissionDenied)))
-            .probe(NpuSource.VENDOR_PERCENT, 1).single()
-        assertEquals(NpuProbeState.PERMISSION_DENIED, denied.state)
-
-        val parsed = NpuProbeReader(FakeFiles(mutableMapOf(path to "load 42%")))
-            .probe(NpuSource.VENDOR_PERCENT, 1).single()
-        assertEquals(NpuProbeState.PARSE_ERROR, parsed.state)
-        assertNull(parsed.value)
-        assertNotNull(parsed.rawExcerpt)
+    fun genericSchemesReportMissingAndDeniedWithoutInventingZero() {
+        val device = "/sys/class/devfreq/npu0"
+        val sources = listOf(
+            NpuSource.VENDOR_PERCENT to "/sys/class/misc/npu/device/load",
+            NpuSource.DEVFREQ to "$device/load",
+        )
+        for ((source, path) in sources) {
+            val files = FakeFiles(directories = mutableMapOf("/sys/class/devfreq" to listOf(device)))
+            val reader = NpuProbeReader(files)
+            val missing = reader.probe(source, 1).single()
+            assertEquals(NpuProbeState.MISSING, missing.state)
+            assertEquals(path, missing.sourcePath)
+            assertEquals("raw", missing.unit)
+            assertNull(missing.value)
+            files.files[path] = ProbeRead.PermissionDenied
+            val denied = reader.probe(source, 2).single()
+            assertEquals(NpuProbeState.PERMISSION_DENIED, denied.state)
+            assertEquals(path, denied.sourcePath)
+            assertNull(denied.value)
+            assertNull(denied.rawExcerpt)
+        }
     }
 
     @Test
-    fun devfreqDiscoveryReadsOnlyKnownLoadAttributes() {
+    fun unsupportedAttributeDoesNotHideOtherRawAttributesOrPermissionFailures() {
+        val root = "/sys/class/devfreq"
+        val first = "$root/npu0"
+        val second = "$root/npu1"
+        val files = FakeFiles(
+            mutableMapOf(
+                "$first/load" to "50",
+                "$first/npu_load" to "2500",
+                "$second/load" to ProbeRead.PermissionDenied,
+            ),
+            mutableMapOf(root to listOf(first, second)),
+        )
+        val results = NpuProbeReader(files).probe(NpuSource.DEVFREQ, 1)
+        assertEquals(listOf("$first/load", "$first/npu_load", "$second/load"), results.map { it.sourcePath })
+        assertEquals(listOf(NpuProbeState.UNSUPPORTED, NpuProbeState.UNSUPPORTED, NpuProbeState.PERMISSION_DENIED),
+            results.map { it.state })
+        assertEquals(listOf("50", "2500", null), results.map { it.rawExcerpt })
+        assertTrue(results.all { it.value == null && it.unit == "raw" })
+    }
+
+    @Test
+    fun devfreqDiscoveryDoesNotTurnScalarLoadOrFrequencyCountersIntoPercentages() {
         val root = "/sys/class/devfreq"
         val device = "$root/ff9f0000.npu"
         val files = FakeFiles(
@@ -96,8 +175,9 @@ class NpuProbesTest {
             directories = mutableMapOf(root to listOf(device)),
         )
         val result = NpuProbeReader(files).probe(NpuSource.DEVFREQ, 1).single()
-        assertEquals(NpuProbeState.OK, result.state)
-        assertEquals(42f, result.value!!, 0.01f)
+        assertEquals(NpuProbeState.UNSUPPORTED, result.state)
+        assertNull(result.value)
+        assertEquals("42", result.rawExcerpt)
         assertEquals("$device/load", result.sourcePath)
         assertTrue(files.reads.none { it.endsWith("/trans_stat") || it.endsWith("/cur_freq") ||
             it.endsWith("/busy") || it.endsWith("/address") })
@@ -124,8 +204,8 @@ class NpuProbesTest {
         val files = FakeFiles(
             files = mutableMapOf(
                 "$device/name" to "exynos-npu",
-                "$device/rq_load" to "2500",
-                "$device/load" to "80",
+                "$device/rq_load" to "50",
+                "$device/load" to "50",
                 "$device/fps_load" to "42",
                 "$device/load_policy" to "3",
             ),
@@ -133,7 +213,7 @@ class NpuProbesTest {
         )
         val result = NpuProbeReader(files).probe(NpuSource.SAMSUNG_RQ_LOAD, 3).single()
         assertEquals(NpuProbeState.OK, result.state)
-        assertEquals(25f, result.value!!, 0.01f)
+        assertEquals(0.5f, result.value!!, 0.01f)
         assertEquals("NPU 请求队列忙碌率", result.scope)
         assertEquals(
             listOf("rq_load", "load（受 load_policy 影响）", "fps_load（执行时间/目标帧时间）"),
@@ -141,6 +221,53 @@ class NpuProbesTest {
         )
         assertTrue(result.detail!!.contains("load_policy=3"))
         assertTrue(result.detail!!.contains("不并入 rq_load"))
+        val policyLoad = result.readings.single { it.label.startsWith("load（") }
+        assertEquals(50f, policyLoad.value, 0.01f)
+        assertEquals("raw", policyLoad.unit)
+        val generic = NpuProbeReader(files).probe(NpuSource.DEVFREQ, 3).single()
+        assertEquals(NpuProbeState.UNSUPPORTED, generic.state)
+        assertEquals("50", generic.rawExcerpt)
+        assertNull(generic.value)
+    }
+
+    @Test
+    fun autoFindsKnownSamsungQueueLoadWithoutMistakingPolicyLoadForPercent() {
+        val device = "/sys/class/misc/npu"
+        val files = FakeFiles(
+            mutableMapOf(
+                "$device/device/load" to "50",
+                "$device/device/rq_load" to "50",
+                "$device/device/load_policy" to "3",
+            ),
+            mutableMapOf("/sys/class/misc" to listOf(device)),
+        )
+        val reader = NpuProbeReader(files)
+        assertEquals(NpuProbeState.UNSUPPORTED, reader.probe(NpuSource.VENDOR_PERCENT, 1).single().state)
+        val known = reader.probe(NpuSource.AUTO, 1).single { it.state == NpuProbeState.OK }
+        assertEquals(NpuProbeScheme.SAMSUNG_RQ_LOAD, known.scheme)
+        assertEquals("$device/device/rq_load", known.sourcePath)
+        assertEquals(0.5f, known.value!!, 0.01f)
+        assertEquals("NPU 请求队列忙碌率", known.scope)
+    }
+
+    @Test
+    fun autoContinuesPastUnsupportedSchemesAndKeepsUnknownValuesDiagnosticOnly() {
+        val files = FakeFiles(mutableMapOf("/sys/class/misc/npu/device/load" to "50"))
+        val reader = NpuProbeReader(files)
+        val results = reader.probe(NpuSource.AUTO, 1)
+        assertEquals(
+            listOf(NpuProbeScheme.ROCKCHIP, NpuProbeScheme.SAMSUNG_RQ_LOAD,
+                NpuProbeScheme.VENDOR_PERCENT, NpuProbeScheme.DEVFREQ),
+            results.map { it.scheme },
+        )
+        assertTrue(results.none { it.state == NpuProbeState.OK || it.value != null })
+        assertEquals("50", results.single { it.scheme == NpuProbeScheme.VENDOR_PERCENT }.rawExcerpt)
+
+        // A subsequent documented Rockchip source is selected normally, including a real idle 0%.
+        files.files["/proc/rknpu/load"] = "NPU load: Core0:  %"
+        val known = reader.probe(NpuSource.AUTO, 2).single { it.state == NpuProbeState.OK }
+        assertEquals(NpuProbeScheme.ROCKCHIP, known.scheme)
+        assertEquals(0f, known.value!!, 0.01f)
     }
 
     @Test
@@ -169,24 +296,5 @@ class NpuProbesTest {
         assertEquals(NpuProbeState.UNSUPPORTED, result.state)
         assertNull(result.value)
         assertTrue(result.detail!!.contains("1/1"))
-    }
-
-    @Test
-    fun samplerMarksLastGoodValueStaleThenLetsItExpire() {
-        val path = "/sys/class/misc/npu/device/load"
-        val files = FakeFiles(mutableMapOf(path to "42%"))
-        val sampler = DeviceUsageSampler(files)
-        val fresh = sampler.sample(NpuSource.VENDOR_PERCENT, 1_000_000_000L)
-        assertEquals(42f, fresh.npuPercent!!, 0.01f)
-        assertEquals(NpuProbeState.OK, fresh.npuResults.single().state)
-
-        files.files[path] = ProbeRead.Missing
-        val stale = sampler.sample(NpuSource.VENDOR_PERCENT, 2_000_000_000L)
-        assertEquals(NpuProbeState.STALE, stale.npuResults.single().state)
-        assertEquals(42f, stale.npuPercent!!, 0.01f)
-
-        val expired = sampler.sample(NpuSource.VENDOR_PERCENT, 10_000_000_000L)
-        assertEquals(NpuProbeState.MISSING, expired.npuResults.single().state)
-        assertNull(expired.npuPercent)
     }
 }

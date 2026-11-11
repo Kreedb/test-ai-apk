@@ -62,7 +62,7 @@ class SystemMonitorPluginTest {
     )
 
     @Test
-    fun cameraFpsInferenceAndAllModelAnalysisStaySeparate() {
+    fun cameraFpsPrimaryPoseAndOverallSynchronousWallTimeStaySeparate() {
         val usage = FakeUsage()
         val engine = SystemMonitorEngine(usage) { 0L }
         engine.start(SystemMonitorSettings())
@@ -70,15 +70,69 @@ class SystemMonitorPluginTest {
             ModelResult(ModelStore.builtIn.first(), null, PoseTimings(2f, 50f, 3f)),
             ModelResult(ModelStore.builtIn.last(), null, PoseTimings(1f, 3f, 1f)),
         )
-        val output = engine.onFrame(frame(poses = poses, provider = "LiteRT (GPU)"))
+        val output = engine.onFrame(frame(poses = poses, provider = "LiteRT (GPU)"),
+            FrameProcessingTiming(dispatchMs = 7.0, totalMs = 90.0))
         assertNotNull(output)
         assertEquals(1, usage.samples)
         assertTrue(checkNotNull(output).metricLines.contains("帧率 —"))
-        assertTrue(output.metricLines.contains("推理 50.0 ms"))
-        // 55 ms + 5 ms, not 1000 / inferenceMs.
-        assertTrue(output.metricLines.contains("分析耗时(全部) 60.0 ms"))
-        assertTrue(output.metricLines.contains("加速器 LiteRT (GPU)"))
+        assertTrue(output.metricLines.any { it.startsWith("主姿态") && "推理链路(含读回) 50.0 ms" in it })
+        assertTrue(output.metricLines.contains("同步帧处理 90.0 ms（含分发 7.0 ms；不含异步/显示）"))
+        assertTrue(output.metricLines.contains("主姿态后端 LiteRT (GPU) · 实际分区未知（可含 CPU）"))
+        assertFalse(output.metricLines.any { "全部" in it || "60.0 ms" in it })
         assertFalse(output.metricLines.any { it.contains("20.0 FPS") })
+    }
+
+    @Test
+    fun asynchronousCallsAreLatestSeparateSamplesWithAgeNotAddedToFrameWallTime() {
+        val engine = SystemMonitorEngine(FakeUsage()) { 2_000_000_000L }
+        engine.start(SystemMonitorSettings())
+        val output = checkNotNull(engine.onFrame(frame(), FrameProcessingTiming(3.0, 40.0), listOf(
+            PluginTimingContribution("speech", "语音", PluginExecution(600.0, "CPU"), 1_000_000_000L),
+            PluginTimingContribution("image", "图像", PluginExecution(800.0, "GPU+CPU"), 1_500_000_000L),
+        )))
+        assertTrue(output.metricLines.any { it.startsWith("同步帧处理 40.0 ms") })
+        val async = output.metricLines.single { it.startsWith("异步最近完成") }
+        assertTrue(async.contains("不相加"))
+        assertTrue(async.contains("语音 600.0 ms · 1.0s前"))
+        assertTrue(async.contains("图像 800.0 ms · 0.5s前"))
+        assertFalse(output.metricLines.any { "1440.0" in it || "1400.0" in it })
+        assertTrue(output.metricLines.size <= PluginHost.MAX_MESSAGES)
+    }
+
+    @Test
+    fun missingOverallDoesNotInventPoseSumAndNonFiniteTimingsAreNotDisplayedAsNumbers() {
+        val poses = listOf(ModelResult(ModelStore.builtIn.first(), null,
+            PoseTimings(Float.NaN, Float.POSITIVE_INFINITY, -1f)))
+        val engine = SystemMonitorEngine(FakeUsage()) { 0L }
+        engine.start(SystemMonitorSettings())
+        val output = checkNotNull(engine.onFrame(frame(poses = poses)))
+        assertTrue(output.metricLines.any { it.startsWith("同步帧处理 —") })
+        assertFalse(output.metricLines.any { "NaN" in it || "Infinity" in it || "-1.0 ms" in it })
+    }
+
+    @Test
+    fun completedFrameIsTheOnlySamplingEventAndStopPreventsFurtherSampling() {
+        val usage = FakeUsage()
+        val plugin = SystemMonitorPlugin(usage, { 0L }) {
+            MonitorDeviceInfo("Phone", "SoC", "Android", "test")
+        }
+        PluginHost(listOf(plugin)).use { host ->
+            host.configure(mapOf(PluginIds.SYSTEM_MONITOR to PluginSettings(true)))
+            host.lifecycle(CameraLifecycle.ENTER)
+            host.lifecycle(CameraLifecycle.FOREGROUND)
+            val context = host.contextFor(PluginIds.SYSTEM_MONITOR)!!
+            val frame = frame(session = host.sessionId()!!)
+            plugin.onEvent(PluginEvent.Frame(frame), context)
+            assertEquals(0, usage.samples)
+            plugin.onEvent(PluginEvent.FrameCompleted(frame, FrameProcessingTiming(5.0, 20.0), emptyList()), context)
+            assertEquals(1, usage.samples)
+            assertTrue(host.snapshot.value.monitors.single().output.messages.any {
+                it.text.startsWith("同步帧处理 20.0 ms")
+            })
+            host.lifecycle(CameraLifecycle.BACKGROUND)
+            plugin.onEvent(PluginEvent.FrameCompleted(frame, FrameProcessingTiming(5.0, 20.0), emptyList()), context)
+            assertEquals(1, usage.samples)
+        }
     }
 
     @Test

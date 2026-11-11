@@ -1,7 +1,10 @@
 package com.example.minimalapk.plugins
 
+import android.content.Context
 import android.os.Build
 import com.example.minimalapk.BuildConfig
+import com.example.minimalapk.diagnostics.BackendComparisonService
+import com.example.minimalapk.diagnostics.BackendComparisonState
 import com.example.minimalapk.pose.DeviceUsage
 import com.example.minimalapk.pose.DeviceUsageSampler
 import com.example.minimalapk.pose.DeviceUsageSource
@@ -103,7 +106,11 @@ internal class SystemMonitorEngine(
     }
 
     @Synchronized
-    fun onFrame(frame: CameraFrame): MonitorOutput? {
+    fun onFrame(
+        frame: CameraFrame,
+        timing: FrameProcessingTiming? = null,
+        asyncResults: List<PluginTimingContribution> = emptyList(),
+    ): MonitorOutput? {
         if (!started) return null
         val now = clock()
         if (frameTimes.isEmpty() || frame.timestampNanos > frameTimes.last()) {
@@ -121,16 +128,10 @@ internal class SystemMonitorEngine(
 
         val sample = usage.sample(settings.npuSource, now)
         val primaryTimings = frame.poses.firstOrNull()?.timings
-        // "分析耗时" is the sum of every model's pipeline. It is deliberately not derived from
-        // 1000 / inferenceMs, and it is separate from the camera frame-rate measurement.
-        val analysisTotalMs = frame.poses
-            .takeIf { it.isNotEmpty() }
-            ?.sumOf { it.timings.totalMs.toDouble() }
-            ?.toFloat()
         return MonitorOutput(
             timestampNanos = frame.timestampNanos,
             metricLines = monitorMetricLines(
-                settings, fps, primaryTimings, analysisTotalMs, frame.executionProvider, sample,
+                settings, fps, primaryTimings, timing, frame.executionProvider, sample, asyncResults, now,
             ),
             npuResults = sample.npuResults,
             npuSource = settings.npuSource,
@@ -142,25 +143,44 @@ internal fun monitorMetricLines(
     settings: SystemMonitorSettings,
     fps: Float,
     primaryTimings: PoseTimings?,
-    analysisTotalMs: Float?,
+    timing: FrameProcessingTiming?,
     executionProvider: String?,
     usage: DeviceUsage,
+    asyncResults: List<PluginTimingContribution> = emptyList(),
+    nowNanos: Long = 0,
 ): List<String> = buildList {
     if (settings.showFps) {
-        add("帧率 ${if (fps > 0f) "${formatNumber(fps)} FPS" else "—"}")
+        add("帧率 ${if (fps.isFinite() && fps > 0f) "${formatNumber(fps)} FPS" else "—"}")
     }
     if (settings.showTimings) {
-        add("预处理 ${timingsText(primaryTimings) { it.preprocessMs }} · 后处理 ${timingsText(primaryTimings) { it.postprocessMs }}")
-        add("推理 ${timingsText(primaryTimings) { it.inferenceMs }}")
-        add("分析耗时(全部) ${analysisTotalMs?.let { "${formatNumber(it)} ms" } ?: "—"}")
+        // PoseAnalyzer's inference interval includes RGB conversion, tensor write and readback.
+        // It is one component, never the total of every synchronous/asynchronous plugin.
+        add("主姿态 预处理 ${timingsText(primaryTimings) { it.preprocessMs }} · " +
+            "推理链路(含读回) ${timingsText(primaryTimings) { it.inferenceMs }} · " +
+            "后处理 ${timingsText(primaryTimings) { it.postprocessMs }}")
+        add("同步帧处理 ${durationText(timing?.totalMs)}（含分发 ${durationText(timing?.dispatchMs)}；不含异步/显示）")
     }
-    if (settings.showBackend) add("加速器 ${executionProvider ?: "—"}")
+    if (settings.showBackend) {
+        val mixed = executionProvider?.let { "GPU" in it || "NPU" in it } == true
+        add("主姿态后端 ${executionProvider ?: "—"}${if (mixed) " · 实际分区未知（可含 CPU）" else ""}")
+    }
     if (settings.showCpu) add("CPU(应用) ${percentText(usage.cpuPercent)}")
     if (settings.showGpu) {
         val source = usage.gpuSource?.let { " · ${shortProbePath(it)}" } ?: ""
         add("GPU ${percentText(usage.gpuPercent)}$source")
     }
     if (settings.showNpu) add(npuMetricLine(usage))
+    if (settings.showTimings && asyncResults.isNotEmpty()) {
+        val latest = asyncResults.sortedByDescending { it.completedNanos }
+        // The host's eight message slots are shared with usage metrics. Explicitly show omitted
+        // count rather than imply that these overlapping calls are an all-plugin frame total.
+        add(("异步最近完成（不相加）：" + latest.take(2).joinToString("；") {
+            val age = if (it.completedNanos > 0 && nowNanos >= it.completedNanos) {
+                "${formatNumber(((nowNanos - it.completedNanos) / 1e9).toFloat())}s前"
+            } else "时间未知"
+            "${it.name.take(18)} ${durationText(it.execution.elapsedMs)} · $age"
+        } + if (latest.size > 2) "；另${latest.size - 2}项" else "").take(PluginHost.MAX_MESSAGE_CHARS))
+    }
 }
 
 internal fun npuMetricLine(usage: DeviceUsage): String {
@@ -172,6 +192,9 @@ internal fun npuMetricLine(usage: DeviceUsage): String {
     }
     val value = result.value ?: return "NPU ${result.scope}：${result.state.label}"
     val suffix = if (stale) "（stale）" else ""
+    if (result.unit != "%") {
+        return "NPU ${result.scope} ${formatNumber(value)} ${result.unit}$suffix（非百分比）"
+    }
     return when (result.scheme) {
         NpuProbeScheme.SAMSUNG_RQ_LOAD ->
             "NPU 请求队列忙碌率 ${formatNumber(value)}%$suffix · ${shortProbePath(result.sourcePath)}"
@@ -228,7 +251,11 @@ private fun summarizeProbe(result: NpuProbeResult, limit: Int): String = buildSt
 }.take(limit)
 
 private fun timingsText(timings: PoseTimings?, select: (PoseTimings) -> Float): String =
-    timings?.let { "${formatNumber(select(it))} ms" } ?: "—"
+    durationText(timings?.let { select(it).toDouble() })
+
+private fun durationText(value: Double?): String =
+    value?.takeIf { it.isFinite() && it >= 0 && it <= Float.MAX_VALUE }
+        ?.let { "${formatNumber(it.toFloat())} ms" } ?: "—"
 
 private fun percentText(value: Float?): String =
     value?.let { "${formatNumber(it)}%" } ?: "—"
@@ -255,41 +282,126 @@ internal class SystemMonitorPlugin(
     private val clock: () -> Long = System::nanoTime,
     private val deviceInfo: () -> MonitorDeviceInfo = ::defaultMonitorDeviceInfo,
 ) : CameraPlugin {
+    constructor(context: Context) : this() { application = context.applicationContext }
+
+    private var application: Context? = null
     override val descriptor = PluginDescriptor(
         PluginIds.SYSTEM_MONITOR, "系统监控",
-        setOf(PluginCapability.CAMERA_FRAMES, PluginCapability.MONITOR, PluginCapability.TEXT),
+        setOf(PluginCapability.CAMERA_FRAMES, PluginCapability.MONITOR, PluginCapability.TEXT, PluginCapability.ACTIONS),
+        actions = setOf(COMPARE, CANCEL_COMPARISON, HIDE_COMPARISON),
     )
     private val engine = SystemMonitorEngine(usage, clock)
+    private val lock = Any()
+    private var owner: PluginToken? = null
+    private var lastOutput: MonitorOutput? = null
+    private var comparison = BackendComparisonState()
+    private var comparisonVisible = false
+    private var runId: Long? = null
+    private var lastPublishedNanos = Long.MIN_VALUE
 
     override fun onEvent(event: PluginEvent, context: PluginContext) {
         when (event) {
-            PluginEvent.Started -> engine.start(SystemMonitorSettings.from(context.settings))
-            PluginEvent.ConfigurationChanged ->
+            PluginEvent.Started -> synchronized(lock) {
+                owner = context.token
+                lastOutput = null
+                lastPublishedNanos = Long.MIN_VALUE
+                engine.start(SystemMonitorSettings.from(context.settings))
+                refreshComparison()
+                publish(context)
+            }
+            PluginEvent.ConfigurationChanged -> synchronized(lock) {
+                BackendComparisonService.cancel(runId, "监控配置已改变")
+                owner = context.token
+                lastOutput = null
                 engine.reconfigure(SystemMonitorSettings.from(context.settings))
-            is PluginEvent.Stopped -> engine.stop()
-            is PluginEvent.Frame -> {
-                val output = engine.onFrame(event.frame) ?: return
-                val messages = buildList {
-                    if (output.npuSource == NpuSource.ALL) {
-                        // Keep one camera FPS line; the remaining slots carry the copyable diagnosis.
-                        output.metricLines.firstOrNull { it.startsWith("帧率") }
-                            ?.let { add(PluginMessage(it)) }
-                        monitorDiagnosis(deviceInfo(), output.npuResults, output.timestampNanos)
-                            .forEach { add(PluginMessage(it, MessageKind.STATUS)) }
-                    } else {
-                        output.metricLines.forEach { add(PluginMessage(it)) }
+                refreshComparison()
+                publish(context)
+            }
+            is PluginEvent.Stopped -> synchronized(lock) {
+                if (owner == context.token) stop()
+            }
+            is PluginEvent.FrameCompleted -> synchronized(lock) {
+                if (owner != context.token || !context.isCurrent()) return
+                // Frame is also delivered by the host; only completion samples usage/FPS, once.
+                lastOutput = engine.onFrame(event.frame, event.timing, event.asyncResults) ?: return
+                refreshComparison()
+                publish(context)
+            }
+            is PluginEvent.Action -> synchronized(lock) {
+                if (owner != context.token || !context.isCurrent()) return
+                when (event.id) {
+                    COMPARE -> {
+                        val app = application ?: return
+                        comparisonVisible = true
+                        runId = BackendComparisonService.start(app, context::isCurrent) { next ->
+                            synchronized(lock) {
+                                if (owner == context.token && context.isCurrent() && next.version >= comparison.version) {
+                                    comparison = next
+                                    publish(context)
+                                }
+                            }
+                        } ?: runId
                     }
+                    CANCEL_COMPARISON -> BackendComparisonService.cancel(comparison.runId)
+                    HIDE_COMPARISON -> comparisonVisible = false
                 }
-                context.publish(PluginOutput(
-                    timestampNanos = output.timestampNanos,
-                    messages = messages.take(PluginHost.MAX_MESSAGES),
-                ))
+                refreshComparison()
+                publish(context)
             }
             else -> Unit
         }
     }
 
-    override fun close() = engine.stop()
+    private fun refreshComparison() {
+        if (application != null) comparison = BackendComparisonService.state
+    }
+
+    /** Caller holds lock, so delayed frame samples cannot erase a newly completed report/action. */
+    private fun publish(context: PluginContext) {
+        if (owner != context.token || !context.isCurrent()) return
+        val report = if (comparisonVisible) comparison.compactLines() else emptyList()
+        val output = lastOutput
+        val metrics = output?.metricLines.orEmpty()
+        val messages = if (report.isNotEmpty()) {
+            // Reserve backend rows while keeping frame/async time meanings visible under load.
+            val timingLines = metrics.filter {
+                it.startsWith("帧率") || it.startsWith("主姿态 ") ||
+                    it.startsWith("同步帧处理") || it.startsWith("异步最近完成")
+            }
+            (timingLines + metrics.filterNot { it in timingLines })
+                .take(PluginHost.MAX_MESSAGES - report.size).map { PluginMessage(it) } +
+                report.map { PluginMessage(it) }
+        } else if (output?.npuSource == NpuSource.ALL) {
+            listOfNotNull(metrics.firstOrNull { it.startsWith("帧率") }?.let { PluginMessage(it) }) +
+                monitorDiagnosis(deviceInfo(), output.npuResults, output.timestampNanos)
+                    .map { PluginMessage(it, MessageKind.STATUS) }
+        } else metrics.map { PluginMessage(it) }
+        // Async report completion uses a monotonic publication time, not an earlier frame capture
+        // timestamp (the host otherwise correctly drops it as out-of-order).
+        lastPublishedNanos = maxOf(lastPublishedNanos, clock())
+        context.publish(PluginOutput(lastPublishedNanos, messages.take(PluginHost.MAX_MESSAGES),
+            actions = if (application == null) emptyList() else buildList {
+                add(PluginAction(COMPARE, "比较 CPU / GPU / NPU", enabled = !comparison.running))
+                if (comparison.running) add(PluginAction(CANCEL_COMPARISON, "取消比较（等待释放）", !comparison.cancelling))
+                if (comparisonVisible && !comparison.running) add(PluginAction(HIDE_COMPARISON, "收起比较报告"))
+            }))
+    }
+
+    private fun stop() = synchronized(lock) {
+        owner = null
+        lastOutput = null
+        comparisonVisible = false
+        BackendComparisonService.cancel(runId, "监控已停止/相机离开前台")
+        engine.stop()
+    }
+
+    override fun close() = stop()
+
+    companion object {
+        const val COMPARE = "backend_compare"
+        const val CANCEL_COMPARISON = "backend_compare_cancel"
+        const val HIDE_COMPARISON = "backend_compare_hide"
+    }
 }
 
 /** Camera FPS only: sample timestamps come from the frame stream, never from inference timing. */

@@ -1,11 +1,15 @@
 package com.example.minimalapk.pose
 
 import com.example.minimalapk.examples.ExampleCatalog
+import com.example.minimalapk.models.AssetAccessRequiredException
+import com.example.minimalapk.models.AssetHttpRequest
+import com.example.minimalapk.models.AssetTransfer
+import com.example.minimalapk.models.AssetTransport
+import com.example.minimalapk.models.HttpAssetTransport
 import com.example.minimalapk.models.sha256
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
-import java.net.HttpURLConnection
-import java.net.URL
+import java.util.concurrent.CancellationException
 
 /** A model the app fetches on demand instead of bundling; installed through the normal import path. */
 data class RemoteModel(
@@ -59,30 +63,28 @@ internal object ModelDownload {
     /** The picker and the downloader share one cap before the bytes become a whole-file allocation. */
     const val MAX_BYTES = 64 * 1024 * 1024
 
-    fun fetch(sourceUrl: String, mirror: GitHubMirrorPreference): ByteArray {
-        // Only supported GitHub URLs are rewritten; every other source keeps its original address.
-        val url = rewriteGitHubUrl(sourceUrl.trim(), mirror.prefix)
-        val parsed = runCatching { URL(url) }.getOrElse {
-            throw IllegalArgumentException("下载地址无效")
-        }
-        require(parsed.protocol == "https") { "只支持 https 下载地址" }
-        val connection = parsed.openConnection() as HttpURLConnection
-        return try {
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 60_000
-            connection.instanceFollowRedirects = true
-            connection.useCaches = false
-            val code = connection.responseCode
-            if (code != HttpURLConnection.HTTP_OK) {
-                throw IllegalArgumentException("HTTP $code")
+    fun fetch(
+        sourceUrl: String,
+        mirror: GitHubMirrorPreference,
+        transfer: AssetTransfer = AssetTransfer(),
+        onProgress: (Long, Long?) -> Unit = { _, _ -> },
+        transport: AssetTransport = HttpAssetTransport(mirror.prefix),
+    ): ByteArray {
+        transfer.checkpoint()
+        return transfer.use(transport.open(AssetHttpRequest(sourceUrl.trim(), transfer = transfer))) { response ->
+            if (response.code == 401 || response.code == 403) throw AssetAccessRequiredException(response.code)
+            require(response.code == 200) { "HTTP ${response.code}" }
+            require(response.contentType?.lowercase()?.startsWith("text/html") != true) {
+                "服务器返回了网页而不是 TFLite 模型"
             }
-            val length = connection.contentLengthLong
-            if (length > MAX_BYTES) {
+            val length = response.contentLength.takeIf { it >= 0L }
+            if (length != null && length > MAX_BYTES) {
                 throw IllegalArgumentException("模型文件超过 ${MAX_BYTES / 1024 / 1024} MB 上限")
             }
-            connection.inputStream.use { it.readCapped(MAX_BYTES) }
-        } finally {
-            connection.disconnect()
+            val bytes = response.body.readCapped(MAX_BYTES, transfer::checkpoint) { onProgress(it, length) }
+            transfer.checkpoint()
+            require(length == null || bytes.size.toLong() == length) { "模型下载不完整，请重试" }
+            bytes
         }
     }
 
@@ -91,7 +93,8 @@ internal object ModelDownload {
      * also pin their size and SHA-256, and every download must at least look like TFLite so an HTML
      * error page is never saved as a model.
      */
-    fun validateDownloaded(bytes: ByteArray, expectedSize: Long?, expectedSha256: String?) {
+    fun validateDownloaded(bytes: ByteArray, expectedSize: Long?, expectedSha256: String?, checkpoint: () -> Unit = {}) {
+        checkpoint()
         if (expectedSize != null) {
             require(bytes.size.toLong() == expectedSize) {
                 "下载大小不符：期望 $expectedSize 字节，实际 ${bytes.size} 字节"
@@ -100,21 +103,39 @@ internal object ModelDownload {
         if (expectedSha256 != null) {
             require(bytes.sha256() == expectedSha256) { "模型 SHA-256 不符，请重新下载" }
         }
+        checkpoint()
         require(PoseModelImport.isTflite(bytes)) { "下载内容不是 TFLite 模型（可能是网页或错误页面）" }
     }
 }
 
 /** Bounds the read before it becomes a whole-file allocation. */
-internal fun InputStream.readCapped(limit: Int): ByteArray {
+internal fun InputStream.readCapped(
+    limit: Int,
+    checkpoint: () -> Unit = {},
+    onProgress: (Long) -> Unit = {},
+): ByteArray {
+    require(limit >= 0) { "读取上限无效" }
+    fun checkActive() {
+        if (Thread.currentThread().isInterrupted) throw CancellationException("已取消文件读取")
+        checkpoint()
+    }
+    checkActive()
     val output = ByteArrayOutputStream()
     val buffer = ByteArray(64 * 1024)
+    onProgress(0L)
     while (true) {
-        val read = read(buffer)
+        checkActive()
+        val remaining = limit.toLong() - output.size()
+        val read = read(buffer, 0, minOf(buffer.size.toLong(), remaining + 1L).toInt())
+        checkActive()
         if (read < 0) break
+        if (read == 0) continue
         if (read > limit - output.size()) {
             error("模型文件超过 ${limit / 1024 / 1024} MB 上限")
         }
         output.write(buffer, 0, read)
+        onProgress(output.size().toLong())
     }
+    checkActive()
     return output.toByteArray()
 }

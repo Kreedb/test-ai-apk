@@ -11,6 +11,7 @@ import com.example.minimalapk.examples.personalizationCheckpoint
 import com.example.minimalapk.examples.personalizationPercent
 import com.example.minimalapk.examples.personalizationResultText
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.models.AssetTransfer
 import java.io.Closeable
 import java.util.concurrent.CancellationException
 import kotlin.math.roundToInt
@@ -37,15 +38,19 @@ internal class PersonalizationPlugin(private val application: Context) : CameraP
     private val model = AsyncModelSlot<Request, Runner>(
         "PersonalizationModel",
         open = { request ->
-            if (!request.context.isCurrent()) throw CancellationException("设备端学习请求已失效")
+            val transfer = AssetTransfer {
+                if (!request.context.isCurrent()) throw CancellationException("设备端学习请求已失效")
+            }
+            transfer.checkpoint()
             val checkpoint = personalizationCheckpoint(application)
+            transfer.checkpoint()
             if (!checkpoint.isFile) {
                 throw IllegalStateException("未就绪：打开设备端学习，为 4 类命名、添加照片后训练并保存")
             }
             val head = SoftmaxHead(BOTTLENECK_SIZE)
             head.restore(checkpoint)
-            val modelFile = ExampleDownload.ensure(application, ExampleCatalog.personalization)
-            if (!request.context.isCurrent()) throw CancellationException("设备端学习请求已失效")
+            val modelFile = ExampleDownload.ensure(application, ExampleCatalog.personalization, transfer)
+            transfer.checkpoint()
             Runner(BottleneckExtractor(modelFile), head)
         },
         ready = { request, runner ->
@@ -70,7 +75,8 @@ internal class PersonalizationPlugin(private val application: Context) : CameraP
             }
         },
         failed = { request, error ->
-            if (error !is CancellationException) AppLog.e("Personalization", "分类器加载或识别失败", error)
+            if (error is CancellationException) return@AsyncModelSlot
+            AppLog.e("Personalization", "分类器加载或识别失败", error)
             val detail = error.message ?: "设备端学习模型加载失败"
             request.context.publish(
                 PluginOutput(

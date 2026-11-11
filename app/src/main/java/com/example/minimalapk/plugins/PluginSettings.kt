@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.core.content.edit
 import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.models.ConfiguredModelStore
+import com.example.minimalapk.litert.lm.LocalTextOptions
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,6 +24,12 @@ internal object PluginIds {
     const val AUDIO_CLASSIFICATION = "audio_classification"
     const val TTS = "tts"
     const val PERSONALIZATION = "model_personalization"
+    const val LITERT_VISION = "litert_vision"
+    const val LITERT_IMAGE = "litert_image"
+    const val LITERT_CAPTIONS = "litert_captions"
+    const val LITERT_SPEECH = "litert_speech"
+    const val LITERT_AUDIO = "litert_audio"
+    const val LITERT_TEXT = "litert_text"
 }
 
 /** Legacy single-model choice, migrated to each model's independent enabled sidecar. */
@@ -105,7 +112,8 @@ internal val pluginDefaults = mapOf(
     PluginIds.AUDIO_CLASSIFICATION to PluginSettings(config = AudioClassificationSettings().toConfig()),
     PluginIds.TTS to PluginSettings(config = mapOf(TTS_TEXT_KEY to "你好，这是插件语音朗读。")),
     PluginIds.PERSONALIZATION to PluginSettings(),
-)
+    LocalTextPlugin.ID to PluginSettings(config = LocalTextOptions().toConfig()),
+) + LiteRtScenes.all.associate { it.id to PluginSettings(config = mapOf("task_id" to it.tasks.first())) }
 
 /** Small storage seam: tests exercise the same restore/update code without an Android runtime. */
 internal interface PluginPreferences {
@@ -123,15 +131,37 @@ internal class PluginSettingsStore(
     private val mutableSettings = MutableStateFlow(restore())
     val settings: StateFlow<Map<String, PluginSettings>> = mutableSettings.asStateFlow()
     private val observer = preferences.observe { mutableSettings.value = restore() }
+    private val mutableRequests = MutableStateFlow<Map<String, PluginActionRequest>>(emptyMap())
+    /** Explicit UI requests survive a tab change, but never process death or a second execution. */
+    val requests = mutableRequests.asStateFlow()
+    private var requestSequence = 0L
 
     init {
         // Include a write that raced with listener registration.
         mutableSettings.value = restore()
     }
 
-    fun setEnabled(id: String, enabled: Boolean) = update(id) { it.copy(enabled = enabled) }
+    fun setEnabled(id: String, enabled: Boolean) {
+        if (!enabled) synchronized(this) { mutableRequests.value = mutableRequests.value - id }
+        update(id) { it.copy(enabled = enabled) }
+    }
 
-    fun configure(id: String, config: Map<String, String>) = update(id) { it.copy(config = config.toMap()) }
+    @Synchronized
+    fun requestAction(id: String, action: String) {
+        val current = settings.value[id]?.takeIf { it.enabled } ?: return
+        require(action.matches(Regex("[a-z][a-z0-9_]*")))
+        mutableRequests.value = mutableRequests.value + (id to PluginActionRequest(++requestSequence, action, current.revision))
+    }
+
+    @Synchronized
+    fun acknowledgeAction(id: String, request: PluginActionRequest) {
+        if (mutableRequests.value[id] == request) mutableRequests.value = mutableRequests.value - id
+    }
+
+    fun configure(id: String, config: Map<String, String>) {
+        synchronized(this) { mutableRequests.value = mutableRequests.value - id }
+        update(id) { it.copy(config = config.toMap()) }
+    }
 
     @Synchronized
     fun update(id: String, change: (PluginSettings) -> PluginSettings) {
@@ -156,6 +186,8 @@ internal class PluginSettingsStore(
 
     override fun close() = observer.close()
 }
+
+internal data class PluginActionRequest(val sequence: Long, val action: String, val revision: Long)
 
 internal fun restorePluginSettings(
     values: Map<String, *>,

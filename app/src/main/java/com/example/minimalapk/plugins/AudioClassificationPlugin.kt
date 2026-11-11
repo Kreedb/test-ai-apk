@@ -5,6 +5,7 @@ import com.example.minimalapk.examples.AudioClassificationRunner
 import com.example.minimalapk.examples.ExampleCatalog
 import com.example.minimalapk.examples.ExampleDownload
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.models.AssetTransfer
 import java.util.Locale
 import java.util.concurrent.CancellationException
 
@@ -29,15 +30,21 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
 
     private val lock = Any()
     private var permission = AudioPermission.NOT_REQUESTED
+    private var playbackPaused = false
     private var activeToken: PluginToken? = null
     private var window: AudioSampleWindow? = null
     private val gate = AudioResultGate()
     private val model = AsyncModelSlot<Request, AudioClassificationRunner>(
         "AudioClassificationOwner",
         open = { request ->
-            if (!request.context.isCurrent()) throw CancellationException("声音识别请求已失效")
-            val installed = ExampleDownload.install(application, ExampleCatalog.audio)
-            if (!request.context.isCurrent()) throw CancellationException("声音识别请求已失效")
+            val transfer = AssetTransfer {
+                if (!request.context.isCurrent() || synchronized(lock) { activeToken != request.context.token }) {
+                    throw CancellationException("声音识别请求已失效")
+                }
+            }
+            transfer.checkpoint()
+            val installed = ExampleDownload.install(application, ExampleCatalog.audio, transfer)
+            transfer.checkpoint()
             AudioClassificationRunner(installed)
         },
         ready = { request, runner ->
@@ -62,7 +69,8 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
             }
         },
         failed = { request, error ->
-            if (error !is CancellationException) AppLog.e("AudioClassification", "YAMNet 加载或推理失败", error)
+            if (error is CancellationException) return@AsyncModelSlot
+            AppLog.e("AudioClassification", "YAMNet 加载或推理失败", error)
             synchronized(lock) {
                 if (activeToken == request.context.token) {
                     window?.reset()
@@ -102,6 +110,11 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
                 permission = event.permission
                 updatePermission(context)
             }
+            is PluginEvent.AudioPlaybackChanged -> {
+                if (playbackPaused == event.playing) return
+                playbackPaused = event.playing
+                updatePermission(context)
+            }
             is PluginEvent.Stopped -> {
                 permission = AudioPermission.NOT_REQUESTED
                 stop()
@@ -112,13 +125,13 @@ internal class AudioClassificationPlugin(private val application: Context) : Cam
     }
 
     private fun updatePermission(context: PluginContext) {
-        if (permission == AudioPermission.GRANTED) {
+        if (permission == AudioPermission.GRANTED && !playbackPaused) {
             restart(context)
         } else {
             stop()
             context.publish(PluginOutput(System.nanoTime(), listOf(PluginMessage(
-                when (permission) {
-                    AudioPermission.MICROPHONE_BUSY -> "麦克风被占用，请释放后重新进入相机"
+                if (playbackPaused) "播放中，共享麦克风已暂停" else when (permission) {
+                    AudioPermission.MICROPHONE_BUSY -> "麦克风不可用（被占用、系统静音或采集失败），请检查系统麦克风开关或稍后重新进入相机"
                     AudioPermission.DENIED, AudioPermission.REVOKED -> "请授予麦克风权限以识别周围声音"
                     else -> "等待麦克风权限"
                 }, MessageKind.STATUS,

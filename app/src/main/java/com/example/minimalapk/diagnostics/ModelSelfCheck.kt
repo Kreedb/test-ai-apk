@@ -3,6 +3,7 @@ package com.example.minimalapk.diagnostics
 import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
+import com.example.minimalapk.litert.lm.LocalTextModels
 import com.example.minimalapk.examples.AudioClassificationRunner
 import com.example.minimalapk.examples.BOTTLENECK_SIZE
 import com.example.minimalapk.examples.BottleneckExtractor
@@ -130,7 +131,7 @@ internal class ModelSelfCheck(
         else if (target.pose?.imported == true) log("downloadablePoseHashMatch=false；导入静态化可能改变 hash，本地 I/O 单独验证")
         if (file != null && !file.extension.equals("tflite", true)) {
             throw CheckSkipped(if (file.extension.equals("litertlm", true)) {
-                "资源大小/hash 已核验，但 APK 未集成 .litertlm 运行时；未执行推理"
+                LocalTextModels.selfCheckNote(target.set)
             } else {
                 "辅助资源大小/hash 已读取${if (target.expectedHash == null) "（无参考 hash）" else "并核验"}" +
                     "（${file.extension}），不是独立可推理模型；未执行推理。${target.note}"

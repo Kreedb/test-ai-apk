@@ -36,16 +36,20 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.models.ConfiguredModel
+import com.example.minimalapk.models.ConfiguredModelResults
 import com.example.minimalapk.models.ConfiguredModelRunner
 import com.example.minimalapk.models.ConfiguredModelStore
 import com.example.minimalapk.models.InputSource
 import com.example.minimalapk.models.MAX_CONFIG_BYTES
 import com.example.minimalapk.models.ModelConfig
 import com.example.minimalapk.models.ModelRunResult
+import com.example.minimalapk.models.configuredInputContract
 import com.example.minimalapk.pose.GraphDescription
 import com.example.minimalapk.pose.readCapped
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -118,9 +122,12 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
         title = { Text(model.name) },
         text = {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("图片模型在列表中开启后会与其它启用模型一起运行。文件输入、配置导入/导出及单次测试均在此处完成。",
+                Text("开启的图片模型实时接收相机；明确配置的单输入 AUDIO 原始波形使用共享麦克风。其它输入在本页按需运行。保存配置并开启此模型及自定义模型总开关后，单次结果会同步到相机；未保存参数仍可在本页测试。",
                     style = MaterialTheme.typography.bodySmall)
                 parsed?.getOrNull()?.let { config ->
+                    signature?.let { graph ->
+                        Text(configuredInputContract(config, graph).description, style = MaterialTheme.typography.bodySmall)
+                    }
                     config.inputs.forEachIndexed { index, input ->
                         Text("输入 $index · ${input.source} · ${input.shape}", style = MaterialTheme.typography.bodySmall)
                     }
@@ -166,7 +173,7 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
                 TextButton(onClick = { showRawConfig = !showRawConfig }) { Text(if (showRawConfig) "收起配置文件" else "高级：编辑 properties 配置文件") }
                 if (showRawConfig) {
                     Text("UTF-8 properties：IMAGE 按配置尺寸缩放，mean/std 控制 (像素−mean)/std；NUMBERS 单值填充或逗号分隔；" +
-                        "TEXT 每行一个字符串；AUDIO 读取 PCM16 WAV；BINARY 为 little-endian 张量。",
+                        "TEXT 每行一个字符串（不含 tokenizer）；AUDIO 为单声道 [-1,1] 原始波形，读取 PCM16 WAV 或共享麦克风，sampleRate 按模型说明填写，mean/std=0/1，不生成 mel/频谱；BINARY 为 little-endian 张量。",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     OutlinedTextField(
                         value = text, onValueChange = { if (it.length <= MAX_CONFIG_BYTES) { text = it; result = null } },
@@ -196,9 +203,17 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
                     Button(enabled = !busy && parsed?.isSuccess == true, onClick = { action {
                         result = null
                         val config = parsed!!.getOrThrow()
+                        val configText = text
                         val selected = files.toMap()
-                        result = withContext(Dispatchers.IO) { ConfiguredModelRunner.run(context, model, config, selected) }
-                        message = "CPU 推理完成"
+                        val (output, published) = withContext(Dispatchers.IO) {
+                            val ticket = ConfiguredModelResults.begin(context, model, configText)
+                            val output = ConfiguredModelRunner.run(context, model, config, selected)
+                            currentCoroutineContext().ensureActive()
+                            output to (ticket?.let { ConfiguredModelResults.publish(it, output) } == true)
+                        }
+                        result = output
+                        message = if (published) "CPU 推理完成；已同步结果到相机（最多保留一份摘要及首个图像输出）"
+                            else "CPU 推理完成；仅在本页显示。请保存当前参数并开启模型及自定义模型总开关，再运行以同步到相机；开关/配置变化会使旧结果失效。"
                     } }) { Text(if (busy) "处理中…" else "运行当前参数") }
                 }
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())

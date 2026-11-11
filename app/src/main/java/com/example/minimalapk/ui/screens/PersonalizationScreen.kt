@@ -57,6 +57,7 @@ import com.example.minimalapk.examples.personalizationResultText
 import com.example.minimalapk.examples.trainingBatches
 import com.example.minimalapk.examples.validatePersonalizationSamples
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.models.runAssetTransfer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -118,7 +119,7 @@ internal fun PersonalizationScreen(onBack: () -> Unit) {
             }
             status = "正在准备识别模型（首次需下载约 ${ExampleCatalog.personalization.sizeBytes / 1024 / 1024} MB）…"
             runCatchingCancellable {
-                withContext(Dispatchers.IO) { ExampleDownload.ensure(context, ExampleCatalog.personalization) }
+                runAssetTransfer { transfer -> ExampleDownload.ensure(context, ExampleCatalog.personalization, transfer) }
             }.onSuccess {
                 modelFile = it
                 status = if (trained) "已恢复本机分类器，可直接测试照片" else "准备完成，请从第 1 步开始"

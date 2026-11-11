@@ -123,14 +123,47 @@ class ConfiguredModelStoreTest {
     }
 
     @Test
-    fun unsupportedCameraInputsStayAvailableForFileRunsWithoutAnEnabledToggle() {
+    fun mixedInputsCanEnableManualResultsWithoutClaimingCameraOrMicrophoneSupport() {
         val model = ConfiguredModelStore.install(folder.newFolder(), "multi-input", fixture())
+        val saved = model.configFile.readText()
+        val graph = ConfiguredModelStore.describe(model)
+        val config = ModelConfig.decode(saved, graph)
         val before = ConfiguredModelStore.revision.value
-        assertThrows(IllegalArgumentException::class.java) { ConfiguredModelStore.setEnabled(model, true) }
-        assertFalse(model.enabledFile.exists())
-        assertEquals(before, ConfiguredModelStore.revision.value)
+        ConfiguredModelStore.setEnabled(model, true)
+        assertTrue(ConfiguredModelStore.list(model.file.parentFile!!).single().enabled)
+        assertEquals(before + 1, ConfiguredModelStore.revision.value)
+        val contract = configuredInputContract(config, graph.signatures.single { it.key == config.signature })
+        assertEquals(ConfiguredInputMode.ON_DEMAND, contract.mode)
+        assertTrue(contract.description.contains("混合输入"))
+        assertEquals(null, contract.pcm)
         assertArrayEquals(fixture(), model.file.readBytes())
-        assertTrue(model.configFile.isFile)
+        assertEquals(saved, model.configFile.readText())
+    }
+
+    @Test
+    fun changedAndRestoredConfigOrToggleStillInvalidatesOldVersionWithoutRewritingEdits() {
+        val model = ConfiguredModelStore.install(folder.newFolder(), "versioned", fixture())
+        val description = ConfiguredModelStore.describe(model)
+        val original = model.configFile.readText()
+        ConfiguredModelStore.setEnabled(model, true)
+        val first = ConfiguredModelStore.version(model)!!
+        ConfiguredModelStore.setEnabled(model, false)
+        assertFalse(ConfiguredModelStore.version(model)!!.enabled)
+        ConfiguredModelStore.setEnabled(model, true)
+        val reenabled = ConfiguredModelStore.version(model)!!
+        assertEquals(first.fingerprint, reenabled.fingerprint)
+        assertTrue(reenabled.generation > first.generation)
+        val edited = original + "\n# user annotation preserved\n"
+        ConfiguredModelStore.saveConfig(model, edited, description)
+        assertFalse(reenabled.fingerprint == ConfiguredModelStore.version(model)!!.fingerprint)
+        assertThrows(IllegalArgumentException::class.java) { ConfiguredModelStore.saveConfig(model, "version=invalid", description) }
+        assertEquals(edited, model.configFile.readText())
+        ConfiguredModelStore.saveConfig(model, original, description)
+        val restored = ConfiguredModelStore.version(model)!!
+        assertEquals(first.fingerprint, restored.fingerprint)
+        assertTrue(restored.generation > reenabled.generation)
+        ConfiguredModelStore.delete(model)
+        assertEquals(null, ConfiguredModelStore.version(model))
     }
 
     // Schema-generated, no operators/weights: two inputs, an INT8 tensor and a named second subgraph.

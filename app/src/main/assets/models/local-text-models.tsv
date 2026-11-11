@@ -1,0 +1,5 @@
+# Separate pinned local-text catalog; concatenate LocalTextModels.assetSets(context) in the shared resource manager.
+# Source recipe: google-ai-edge/litert-samples@f9f0e000630e9cdd6d263c4cd80495e4231a2dc8.
+# The earlier HF revision deliberately matches that recipe's exact 1,117,385,648-byte bundle.
+# id	name	group	backend	license	licenseUrl	upstreamUrl	modelCardUrl	fileName	url	bytes	sha256
+local-text-qwen2-5-coder-1-5b	Qwen2.5-Coder-1.5B-Instruct · int4	本地文本 · 代码建议与短问答	cpu	Apache-2.0	https://www.apache.org/licenses/LICENSE-2.0	https://github.com/google-ai-edge/litert-samples/blob/f9f0e000630e9cdd6d263c4cd80495e4231a2dc8/models/qwen/qwen2_5_coder_1_5b_instruct/converted/README.md	https://huggingface.co/litert-community/Qwen2.5-Coder-1.5B-Instruct/blob/7840209bfd393408ef028cf55921d831baa1e4bf/README.md	Qwen2.5-Coder-1.5B-Instruct_int4.litertlm	https://huggingface.co/litert-community/Qwen2.5-Coder-1.5B-Instruct/resolve/7840209bfd393408ef028cf55921d831baa1e4bf/Qwen2.5-Coder-1.5B-Instruct_int4.litertlm	1117385648	273ecc7771ba2dd5fe1bb6d4d4726ad0353102f04ad094082ccf59bca9f21213

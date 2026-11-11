@@ -30,6 +30,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,15 +47,18 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.minimalapk.log.AppLog
-import com.example.minimalapk.examples.ExampleCatalog
 import com.example.minimalapk.examples.ExampleDownload
 import com.example.minimalapk.models.ConfiguredModel
+import com.example.minimalapk.models.AssetTransfer
 import com.example.minimalapk.models.ConfiguredModelStore
-import com.example.minimalapk.models.ModelConfig
-import com.example.minimalapk.models.OutputRender
 import com.example.minimalapk.models.sha256
-import com.example.minimalapk.models.writeAtomically
+import com.example.minimalapk.models.commitModelInstallation
+import com.example.minimalapk.models.runAssetTransfer
 import com.example.minimalapk.pose.BoxFormat
 import com.example.minimalapk.pose.GitHubMirrorMode
 import com.example.minimalapk.pose.GitHubMirrorPreference
@@ -70,9 +74,12 @@ import com.example.minimalapk.pose.TfliteGraph
 import com.example.minimalapk.pose.knownSummary
 import com.example.minimalapk.pose.readCapped
 import com.example.minimalapk.pose.modelFile
+import com.example.minimalapk.pose.rewriteGitHubUrl
 import com.example.minimalapk.pose.validatePoseModelConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -90,6 +97,10 @@ internal fun ModelsScreen(
     var status by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<ModelSpec?>(null) }
     var importing by remember { mutableStateOf(false) }
+    var committing by remember { mutableStateOf(false) }
+    var operation by remember { mutableStateOf<Job?>(null) }
+    val byteProgress = remember { MutableStateFlow<Pair<Long, Long?>?>(null) }
+    val progress by byteProgress.collectAsStateWithLifecycle()
     var showDownload by remember { mutableStateOf(false) }
     var downloadError by remember { mutableStateOf<String?>(null) }
     var lastAttempt by remember { mutableStateOf<RemoteModel?>(null) }
@@ -98,6 +109,14 @@ internal fun ModelsScreen(
     val directory = remember(context) { ConfiguredModelStore.directory(context) }
     // Imports run for seconds; use the latest list so a toggle made meanwhile is not discarded.
     val currentSpecs by rememberUpdatedState(specs)
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) operation?.cancel()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer); operation?.cancel() }
+    }
 
     LaunchedEffect(directory) {
         ConfiguredModelStore.revision.collect {
@@ -113,85 +132,81 @@ internal fun ModelsScreen(
 
     fun applyImport(spec: ModelSpec, message: String) {
         // Re-importing the same bytes keeps the existing toggles and corrected configuration.
-        onSpecsChange(ModelStore.withImported(currentSpecs, spec))
+        // The small accepted commit can outlive dismissal. Read the persisted latest list so an
+        // immediately reopened dialog's toggles/deletions cannot be replaced by this old UI list.
+        onSpecsChange(ModelStore.withImported(ModelStore.load(context), spec))
         status = message
+    }
+
+    fun startTransfer(download: Boolean, prepare: (AssetTransfer) -> PendingModelImport) {
+        if (importing) return
+        importing = true
+        committing = false
+        status = null
+        byteProgress.value = null
+        operation = scope.launch {
+            try {
+                val prepared = runAssetTransfer(prepare)
+                committing = true
+                commitModelInstallation(prepared.install) { (spec, message) ->
+                    if (spec != null) applyImport(spec, message) else status = message
+                    if (download) showDownload = false
+                }
+            } catch (error: CancellationException) {
+                status = "已取消，未完成的模型不会安装"
+                throw error
+            } catch (error: Exception) {
+                AppLog.w(TAG, if (download) "模型下载失败" else "模型导入失败", error)
+                if (download) downloadError = error.message ?: "未知错误"
+                else status = "导入失败：${error.message ?: "未知错误"}"
+            } finally {
+                importing = false
+                committing = false
+                operation = null
+                byteProgress.value = null
+            }
+        }
     }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        importing = true
-        status = null
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val bytes = context.contentResolver.openInputStream(uri)
-                        ?.use { it.readCapped(ModelDownload.MAX_BYTES) }
-                        ?: error("无法读取所选文件")
-                    installOrKeepModel(context, context.displayName(uri), bytes)
-                }
+        startTransfer(download = false) { transfer ->
+            val input = context.contentResolver.openInputStream(uri) ?: error("无法读取所选文件")
+            val bytes = transfer.use(input) {
+                it.readCapped(ModelDownload.MAX_BYTES, transfer::checkpoint) { count -> byteProgress.value = count to null }
             }
-            importing = false
-            result.onSuccess { (spec, message) -> if (spec != null) applyImport(spec, message) else status = message }
-                .onFailure { error ->
-                    AppLog.w(TAG, "模型导入失败", error)
-                    status = "导入失败：${error.message ?: "未知错误"}"
-                }
+            val pending = prepareModelImport(context, context.displayName(uri), bytes)
+            transfer.checkpoint()
+            pending
         }
     }
 
     fun download(model: RemoteModel, preference: GitHubMirrorPreference) {
-        importing = true
         downloadError = null
         lastAttempt = model
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val example = ModelCatalog.configurableModels.firstOrNull { it.url == model.url }
-                    if (example != null) {
-                        if (preference.isDirect && !mirrorPreference.isDirect) {
-                            val bytes = ModelDownload.fetch(example.url, preference)
-                            ModelDownload.validateDownloaded(bytes, example.sizeBytes, example.sha256)
-                            ExampleCatalog.file(context, example).writeAtomically(bytes)
-                        }
-                        // Keep the scene cache, embedded labels and preset normalization together.
-                        val installed = if (example in ExampleCatalog.configurable) {
-                            ExampleDownload.install(context, example)
-                        } else {
-                            val file = ExampleDownload.ensure(context, example)
-                            ConfiguredModelStore.install(directory, example.name, file.readBytes()) { graph ->
-                                val signature = if (example == ExampleCatalog.personalization) {
-                                    graph.signatures.first { it.key == "load" }
-                                } else graph.signatures.first()
-                                val inferred = ModelConfig.infer(signature)
-                                if (example == ExampleCatalog.superResolution) inferred.copy(
-                                    inputs = inferred.inputs.map { it.copy(mean = 0f, std = 1f) },
-                                    outputs = inferred.outputs.map { it.copy(render = OutputRender.IMAGE) },
-                                ) else inferred
-                            }
-                        }
-                        null to "已下载 ${installed.name}，点击模型卡片配置；图片模型开启后参与相机推理"
-                    } else {
-                        val bytes = ModelDownload.fetch(model.url, preference)
-                        ModelDownload.validateDownloaded(bytes, model.sizeBytes, model.sha256)
-                        val (spec, message) = installOrKeepModel(context, model.name, bytes)
-                        // The catalog knows the box channel order, which the tensor shape cannot reveal.
-                        spec?.copy(boxFormat = model.boxFormat ?: spec.boxFormat) to message
-                    }
+        startTransfer(download = true) { transfer ->
+            val example = ModelCatalog.configurableModels.firstOrNull { it.url == model.url }
+            val onProgress: (Long, Long?) -> Unit = { count, total -> byteProgress.value = count to total }
+            if (example != null) {
+                // This caches only a complete verified file. The following config/label commit
+                // is prepared without another download and cannot be lost on a cancelled return.
+                val prepared = ExampleDownload.prepareInstall(context, example, transfer, preference, onProgress)
+                PendingModelImport {
+                    val installed = prepared()
+                    null to "已下载 ${installed.name}，点击模型卡片配置；图片模型开启后参与相机推理"
                 }
-            }
-            importing = false
-            result.onSuccess { (spec, message) ->
-                if (spec != null) applyImport(spec, message) else status = message
-                showDownload = false
-            }.onFailure { error ->
-                AppLog.w(TAG, "模型下载失败", error)
-                downloadError = error.message ?: "未知错误"
+            } else {
+                val bytes = ModelDownload.fetch(model.url, preference, transfer, onProgress)
+                ModelDownload.validateDownloaded(bytes, model.sizeBytes, model.sha256, transfer::checkpoint)
+                val pending = prepareModelImport(context, model.name, bytes, model.boxFormat)
+                transfer.checkpoint()
+                pending
             }
         }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        DetailTopBar(title = title, onBack = onBack)
+        DetailTopBar(title = title, onBack = { operation?.cancel(); onBack() })
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(16.dp),
@@ -219,7 +234,7 @@ internal fun ModelsScreen(
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     SettingRow(
                         title = "从远程下载模型",
-                        subtitle = "官方模型目录，或粘贴任意 TFLite 的 https 地址（仅 YOLO26n 内置）",
+                        subtitle = "官方单模型与完整资源集下载/导入，或任意 TFLite HTTPS 地址",
                         onClick = {
                             if (!importing) {
                                 downloadError = null
@@ -231,7 +246,8 @@ internal fun ModelsScreen(
             }
             if (importing) {
                 item {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    ModelTransferProgress(progress, committing)
+                    TextButton(enabled = !committing, onClick = { operation?.cancel() }) { Text("取消传输") }
                 }
             }
             status?.let { message ->
@@ -288,11 +304,14 @@ internal fun ModelsScreen(
             error = downloadError,
             mirror = mirrorPreference,
             failedModel = lastAttempt.takeIf { downloadError != null },
+            progress = progress,
+            committing = committing,
             onDownload = { model -> download(model, mirrorPreference) },
             onRetryDirect = { model ->
                 download(model, GitHubMirrorPreference(mode = GitHubMirrorMode.DIRECT))
             },
-            onDismiss = { if (!importing) showDownload = false },
+            onCancel = { operation?.cancel() },
+            onDismiss = { operation?.cancel(); showDownload = false },
         )
     }
 
@@ -362,13 +381,16 @@ private fun ModelDownloadDialog(
     error: String?,
     mirror: GitHubMirrorPreference,
     failedModel: RemoteModel?,
+    progress: Pair<Long, Long?>?,
+    committing: Boolean,
     onDownload: (RemoteModel) -> Unit,
     onRetryDirect: (RemoteModel) -> Unit,
+    onCancel: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var url by remember { mutableStateOf("") }
     AlertDialog(
-        onDismissRequest = { if (!downloading) onDismiss() },
+        onDismissRequest = onDismiss,
         title = { Text("从远程下载模型") },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -402,6 +424,7 @@ private fun ModelDownloadDialog(
                         }
                     }
                 }
+                AssetCatalogSection(enabled = !downloading)
                 OutlinedTextField(
                     value = url,
                     onValueChange = { url = it.trim() },
@@ -428,7 +451,7 @@ private fun ModelDownloadDialog(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (failedModel != null && !mirror.isDirect) {
+                    if (failedModel != null && rewriteGitHubUrl(failedModel.url, mirror.prefix) != failedModel.url) {
                         TextButton(
                             enabled = !downloading,
                             onClick = { onRetryDirect(failedModel) },
@@ -436,7 +459,7 @@ private fun ModelDownloadDialog(
                     }
                 }
                 if (downloading) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    ModelTransferProgress(progress, committing)
                 }
                 Text(
                     text = "目录模型校验大小与 SHA-256，保留已有配置；下载完成后在模型卡片中设置。" +
@@ -460,7 +483,10 @@ private fun ModelDownloadDialog(
             ) { Text("下载") }
         },
         dismissButton = {
-            TextButton(enabled = !downloading, onClick = onDismiss) { Text("关闭") }
+            Row {
+                if (downloading) TextButton(enabled = !committing, onClick = onCancel) { Text("取消传输") }
+                TextButton(onClick = onDismiss) { Text("关闭") }
+            }
         },
     )
 }
@@ -620,49 +646,51 @@ private fun ModelChoiceRow(label: String, selected: Boolean, onSelect: () -> Uni
 }
 
 /**
- * Validates and staticizes [bytes], copies them into `filesDir/models`, and returns the installed
- * spec plus a status line that lists whatever the user should still confirm in the editor.
+ * Prepares immutable bytes/metadata without installing. The accepted commit writes the model;
+ * commitModelInstallation then registers the spec without a cancellable dispatcher hand-off.
  */
-private fun installModel(
+private class PendingModelImport(val install: () -> Pair<ModelSpec?, String>)
+
+private fun prepareModelImport(
     context: Context,
     displayName: String?,
     bytes: ByteArray,
-): Pair<ModelSpec, String> {
-    val prepared = PoseModelImport.prepare(bytes)
-    val spec = PoseModelImport.install(context, displayName, prepared)
+    boxFormat: BoxFormat? = null,
+): PendingModelImport {
+    val directory = ConfiguredModelStore.directory(context)
+    val id = bytes.sha256()
+    if (ConfiguredModelStore.list(directory).any { it.id == id }) {
+        return PendingModelImport {
+            val existing = ConfiguredModelStore.install(directory, displayName, bytes)
+            null to "${existing.name} 已在模型列表中，原有配置与开关已保留"
+        }
+    }
+    val prepared = try {
+        PoseModelImport.prepare(bytes)
+    } catch (error: IllegalArgumentException) {
+        // Inspect before any file is written; fallback is only for the pose contract, never
+        // for an exception after successful pose installation/registration.
+        val known = TfliteGraph(bytes).describe().knownSummary()
+        return PendingModelImport {
+            val model = ConfiguredModelStore.install(directory, displayName, bytes)
+            null to "已保存 ${model.name}，原始模型与可编辑配置均已保留。文件信息：$known。" +
+                "姿态管线不适配：${error.message}。点击模型卡片修改输入/输出配置并运行；" +
+                "归一化 mean/std、框含义、labels、tokenizer、采样率属推断或待配置，需按模型说明确认。"
+        }
+    }
     val patched = if (prepared.staticizedSignatures > 0) {
         "，已自动把 ${prepared.staticizedSignatures} 个张量的动态 shape signature 改为静态"
     } else {
         "，shape signature 已全部为静态（GPU delegate 可用）"
     }
     val known = TfliteGraph(prepared.bytes).describe().knownSummary()
-    val base = "已导入 ${spec.name}：输入 ${spec.inputSize}，" +
-        "${spec.anchors} anchors，${spec.keypoints} 关键点$patched。" +
-        "文件信息：$known。anchor/关键点/输出布局为推断，框格式无法从形状判断，请按模型说明确认。"
-    return if (prepared.warnings.isEmpty()) {
-        spec to base
-    } else {
-        spec to base + "注意：" + prepared.warnings.joinToString("；")
-    }
-}
-
-private fun installOrKeepModel(context: Context, name: String?, bytes: ByteArray): Pair<ModelSpec?, String> {
-    val directory = ConfiguredModelStore.directory(context)
-    val id = bytes.sha256()
-    if (ConfiguredModelStore.list(directory).any { it.id == id }) {
-        // A former generic import may also satisfy the pose contract. Reimporting it must not
-        // create a second entry in a different store and hide the user's existing configuration.
-        val existing = ConfiguredModelStore.install(directory, name, bytes)
-        return null to "${existing.name} 已在模型列表中，原有配置与开关已保留"
-    }
-    return try {
-        installModel(context, name, bytes)
-    } catch (error: IllegalArgumentException) {
-        val model = ConfiguredModelStore.install(directory, name, bytes)
-        val known = ConfiguredModelStore.describe(model).knownSummary()
-        null to "已保存 ${model.name}，原始模型与可编辑配置均已保留。文件信息：$known。" +
-            "姿态管线不适配：${error.message}。点击模型卡片修改输入/输出配置并运行；" +
-            "归一化 mean/std、框含义、labels、tokenizer、采样率属推断或待配置，需按模型说明确认。"
+    return PendingModelImport {
+        val installed = PoseModelImport.install(context, displayName, prepared)
+        val spec = installed.copy(boxFormat = boxFormat ?: installed.boxFormat)
+        val base = "已导入 ${spec.name}：输入 ${spec.inputSize}，" +
+            "${spec.anchors} anchors，${spec.keypoints} 关键点$patched。" +
+            "文件信息：$known。anchor/关键点/输出布局为推断，框格式无法从形状判断，请按模型说明确认。"
+        spec to if (prepared.warnings.isEmpty()) base else base + "注意：" + prepared.warnings.joinToString("；")
     }
 }
 

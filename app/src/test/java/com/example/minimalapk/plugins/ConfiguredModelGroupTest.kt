@@ -2,6 +2,7 @@ package com.example.minimalapk.plugins
 
 import android.graphics.Bitmap
 import com.example.minimalapk.models.ConfiguredModel
+import com.example.minimalapk.models.ConfiguredPcmContract
 import com.example.minimalapk.models.ModelRunResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -99,6 +100,71 @@ class ConfiguredModelGroupTest {
             assertTrue(group.status.isEmpty())
             group.run(image, { true }) { _, _ -> error("no models") }
         }
+    }
+
+    @Test
+    fun manualModelsOnlyReportReadinessAndAudioIsNotFedCameraPixels() {
+        val calls = mutableListOf<String>()
+        val closed = mutableListOf<String>()
+        ConfiguredModelGroup(listOf(model("image"), model("manual"), model("audio")), { true }) { selected ->
+            object : ConfiguredFrameRunner {
+                override val acceptsFrames = selected.id == "image"
+                override val pcm = if (selected.id == "audio") ConfiguredPcmContract(4, 8000) else null
+                override val status = if (selected.id == "manual") "按需运行：请填写值或选择文件" else "已就绪"
+                override fun run(image: PluginImage): ModelRunResult {
+                    assertEquals("image", selected.id)
+                    calls += "frame"
+                    return ModelRunResult("image", emptyList())
+                }
+                override fun runPcm(samples: FloatArray): ModelRunResult {
+                    assertEquals("audio", selected.id)
+                    assertEquals(4, samples.size)
+                    calls += "pcm"
+                    return ModelRunResult("audio", emptyList())
+                }
+                override fun close() { closed += selected.id }
+            }
+        }.use { group ->
+            assertTrue(group.modelStatus.getValue("manual").text.contains("按需运行"))
+            assertEquals(mapOf("audio" to ConfiguredPcmContract(4, 8000)), group.pcmContracts)
+            group.run(image, { true }) { selected, _ -> assertEquals("image", selected.id) }
+            group.runPcm(mapOf("audio" to FloatArray(4)), { true }) { selected, result ->
+                assertEquals("audio", selected.id)
+                assertTrue(result.isSuccess)
+            }
+        }
+        assertEquals(listOf("frame", "pcm"), calls)
+        assertEquals(listOf("image", "manual", "audio"), closed)
+    }
+
+    @Test
+    fun audioInferenceFailureIsLatchedAndHealthySiblingStillRuns() {
+        val calls = mutableListOf<String>()
+        val closes = mutableListOf<String>()
+        ConfiguredModelGroup(listOf(model("broken-audio"), model("healthy-audio")), { true }) { selected ->
+            object : ConfiguredFrameRunner {
+                override val acceptsFrames = false
+                override val pcm = ConfiguredPcmContract(2, 16000)
+                override fun run(image: PluginImage): ModelRunResult = error("not image")
+                override fun runPcm(samples: FloatArray): ModelRunResult {
+                    calls += selected.id
+                    if (selected.id == "broken-audio") error("unsupported operator")
+                    return ModelRunResult("ok", emptyList())
+                }
+                override fun close() { closes += selected.id }
+            }
+        }.use { group ->
+            repeat(2) {
+                val results = linkedMapOf<String, Boolean>()
+                group.runPcm(mapOf("broken-audio" to FloatArray(2), "healthy-audio" to FloatArray(2)), { true }) { selected, result ->
+                    results[selected.id] = result.isSuccess
+                }
+                assertEquals(mapOf("broken-audio" to false, "healthy-audio" to true), results)
+            }
+            assertEquals(setOf("healthy-audio"), group.pcmContracts.keys)
+        }
+        assertEquals(listOf("broken-audio", "healthy-audio", "healthy-audio"), calls)
+        assertEquals(listOf("broken-audio", "healthy-audio"), closes)
     }
 
     @Test

@@ -11,7 +11,7 @@ class LiveConfiguredModelTest {
     }
 
     @Test
-    fun audioAndTextModelsStayInTheWorkbench() {
+    fun nonImageModelsAreNotFedCameraPixels() {
         assertNotNull(
             cameraModelProblem(
                 ModelConfig("", listOf(TensorInputConfig(listOf(1, 4), InputSource.AUDIO)), emptyList()),

@@ -1,5 +1,28 @@
 # 插件宿主接入（#64）
 
+## Model Zoo 场景接入
+
+`LiteRtScenes` 将固定目录的 34 个 task ID 路由到六个统一开关/配置卡片：画面分析、画面增强与分区、实时英语字幕、神经语音朗读、录音处理与试听、文本决策。`LiteRtCatalogIntegrationTest` 对比目录与实际算法工厂，LM 的独立文本插件不计入这 34 项。文件就绪不代表模型已经完成推理。
+
+- 视觉、图片、文本、Matcha 和录音处理首次显式操作才加载；启用不自动下载模型。缺失文件提示进入“自定义模型 → 从远程下载模型”，配置显示大小、来源、许可及安装状态。
+- `LiteRtAssets` 在模型 owner 线程取得 `AssetResourceStore` lease，所有原生句柄、tokenizer、映射表关闭后才释放；声明 `MODEL_ASSETS` 的插件在 `host.configure(settings, resourcesRevision)` 收到资源写入开始/结束代次后失效并排空。保持原模型目录和用户文件。
+- 运行前读取 `ActivityManager.MemoryInfo.availMem/lowMemory`。系统低内存时拒绝新加载；RAM++ 的门槛为 **3.50 GiB 当前可用内存**：依据已执行 Linux CPU 参考管线峰值 **3,090,028 KiB**，向上取整至 3 GiB 加 512 MiB 余量。来源：协调验证记录 `vision-fixtures/image-tagging-pipeline.json`；这是保守准入门槛，**不是 Android/GPU 内存测量或成功保证**。无法读取 RAM++ 所需内存信息时拒绝加载，并报告 need/have。其他任务没有伪造的逐模型内存估算。
+- `LiteRtWork` 复用 `AsyncModelSlot` 和 `BoundedFrameWorker`，最多一个执行中和一个最新等待请求；本地请求代次独立于配置/会话代次。取消立即判废发布，原生调用返回后同线程释放，不强杀驱动。
+- 人脸框是实际送入模型的 ROI：头部朝向填满黄色框；活体模型的青框用于放脸，黄色框提供 2.7× 上下文。XFeat 先捕获参考，primary=参考、secondary=当前。慢结果在独立来源快照报告显示，不叠加到新帧。EDSR/Real-ESRGAN 整幅快照长边限制 256，替换只在同一次按压 token 有效时显示，释放/取消后迟到结果不能恢复替换。
+- 英语字幕用 2–8 秒共享 16 kHz PCM 窗口，慢推理会跳过旧待处理窗口，不声称原生连续流式听写。录音处理显式录制 2–10 秒，各模型内部重采样；结果音轨可逐项试听。Matcha 仅英语短句，过长音素序列由引擎明确拒绝。播放与旧系统 TTS 共用音频焦点并暂停共享采集，停用/后台/取消停止播放。原始录音不落盘。
+- 单次录音在系统静音/竞争时丢弃已收集 PCM，但保留本次用户请求的恢复观察需求；恢复授权代次后重新采集完整窗口。墙钟上限为所选录音时长加 10 秒（最多 20 秒），静音/恢复事件不延长它；超时、取消、播放、停用或后台均结束需求。超时后可在同一相机会话显式点击“重试麦克风并录音”，重新观察当前系统状态；没有自动反复重开，也不绕过采集方原生读失败锁存。
+
+### 通用操作、静态报告与测量
+
+- `PluginDescriptor.actions` 白名单 + `ACTIONS` 能力，输出 `PluginAction(id,label,enabled)`，宿主 `action()` 才投递 `PluginEvent.Action`；配置弹层通过 `PluginSettingsStore.requestAction` 排队一次显式请求，绑定保存代次，进程重启不恢复请求。
+- `REPORT_IMAGE` 输出 `PluginImageReport(source,input,result,label)`；最多一对、每图最多 4,194,304 像素。`source=null` 是明确标注的文件/生成图片，不能作为相机图层或替换。相机来源仍检查会话/帧号；关闭、改配置、离开立即清空。发布后的 Bitmap 不再改写或 recycle；算法自有输出在复制后释放，输入别名除外。
+- `GUIDE` 输出相对真实照片的 `PhotoRoi`，可另带 `focusRoi`。这表示请求裁剪位置，不冒充人脸检测结果。
+- `PluginOutput.captureAudio` 表示当下采集需求；有界录音插件声明 `continuousAudio=false` 避免初始误采集。字幕需求来自用户 listening 意图，系统 silencing 时仍让唯一前台 recorder 观察恢复；后台、停用、播放仍停止采集。`HostSnapshot.audioPermission` 显示采集方真实状态。
+- 麦克风权限提示同样跟随 `captureAudio` / `continuousAudio` 意图，而不是仅检查能力声明。自定义 IMAGE/TEXT/file 模型不触发录音提示，发现显式 raw PCM 契约后才请求；`HostSnapshot.audioPermissionRequested` 让相机订阅异步发现/操作后的需求变化。单次录音在未授权时仍可点击操作并发布有界授权意图，真实授予后才收 PCM；拒绝、超时或取消清除意图，迟到授权不会重新开始已取消录音。授权/撤权事件继续发送给所有启用的权限订阅者。
+- `FrameCompleted(frame,timing,asyncResults)` 在同步帧消费者返回后投递监控：`totalMs` 从帧进入宿主、转换/姿态开始至同步分发完成，`dispatchMs` 仅 acceptFrame/同步消费者墙钟时间，均不包括后续显示合成或异步模型。`PluginOutput.execution` 单独记录最近完成的异步耗时、后端，贡献携带完成时间/可选来源；不相加成“全部帧耗时”，也不取倒数冒充 FPS。
+
+新增 JVM 回归覆盖精确目录路由、按请求取消/合并/线程排空、资源代次、动作白名单、文件/相机快照隔离、PCM 需求与播放、RAM++ 阈值及文本参数。Android 原生/Compose 操作、GPU/NPU、吞吐和设备内存仍由协调者运行检查，不能用下载或 host 数值参考替代。
+
 公共接入点在 `app/src/main/java/com/example/minimalapk/plugins/`，均为应用模块内的 `internal` 接口。它们是内置插件的最小宿主，不是外部安装/脚本 SDK。
 
 ## 下游接入步骤

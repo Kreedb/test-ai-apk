@@ -16,12 +16,16 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
             require(descriptor.id.matches(Regex("[a-z][a-z0-9_]*")))
             require(PluginCapability.REPLACEMENT !in descriptor.capabilities || PluginCapability.POINTER in descriptor.capabilities)
             require(PluginCapability.AUDIO_PCM !in descriptor.capabilities || PluginCapability.AUDIO_PERMISSION in descriptor.capabilities)
+            require(descriptor.actions.size <= MAX_ACTIONS)
+            require(descriptor.actions.all { it.matches(Regex("[a-z][a-z0-9_]*")) })
+            require(descriptor.actions.isEmpty() || PluginCapability.ACTIONS in descriptor.capabilities)
         }
     }
     private class Entry(val plugin: CameraPlugin) {
         var settings = PluginSettings()
         var generation = 0L
         var output: PluginOutput? = null
+        var execution: PluginTimingContribution? = null
     }
 
     private val lock = Any()
@@ -39,20 +43,27 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
     private var pressSequence = 0L
     private val pressRecipients = mutableSetOf<PluginToken>()
     private var audioPermission = AudioPermission.NOT_REQUESTED
+    private var audioPlayback = false
+    private var appliedResourceRevision = 0L
     private val mutableSnapshot = MutableStateFlow(HostSnapshot())
     val snapshot = mutableSnapshot.asStateFlow()
 
-    fun configure(settings: Map<String, PluginSettings>) {
+    fun configure(settings: Map<String, PluginSettings>, resourcesRevision: Long = appliedResourceRevision) {
         val deliveries = synchronized(lock) {
             if (closed) return
+            val resourcesChanged = appliedResourceRevision != resourcesRevision
+            appliedResourceRevision = resourcesRevision
             entries.values.mapNotNull { entry ->
                 val next = settings[entry.plugin.descriptor.id] ?: PluginSettings()
-                if (entry.settings == next) return@mapNotNull null
+                val oldSettings = entry.settings
+                if (oldSettings == next && !(resourcesChanged &&
+                        PluginCapability.MODEL_ASSETS in entry.plugin.descriptor.capabilities)) return@mapNotNull null
                 val wasEnabled = entry.settings.enabled
                 val oldContext = context(entry)
                 entry.settings = next
                 entry.generation++
                 entry.output = null
+                entry.execution = null
                 pressRecipients.remove(oldContext.token)
                 val event = when {
                     !active && wasEnabled && leavePending -> PluginEvent.Stopped(CameraLifecycle.STOP)
@@ -73,6 +84,9 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
             }
             if (event == PluginEvent.Started && PluginCapability.AUDIO_PERMISSION in entry.plugin.descriptor.capabilities) {
                 deliver(entry, PluginEvent.AudioPermissionChanged(audioPermission), context)
+            }
+            if (event == PluginEvent.Started && PluginCapability.AUDIO_PCM in entry.plugin.descriptor.capabilities) {
+                deliver(entry, PluginEvent.AudioPlaybackChanged(audioPlayback), context)
             }
         }
     }
@@ -101,6 +115,9 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
                         if (PluginCapability.AUDIO_PERMISSION in entry.plugin.descriptor.capabilities) {
                             add(Triple(entry, PluginEvent.AudioPermissionChanged(audioPermission), context))
                         }
+                        if (PluginCapability.AUDIO_PCM in entry.plugin.descriptor.capabilities) {
+                            add(Triple(entry, PluginEvent.AudioPlaybackChanged(audioPlayback), context))
+                        }
                     }
                 }
             } else {
@@ -116,7 +133,7 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
                 frame = null
                 press = null
                 pressRecipients.clear()
-                entries.values.forEach { it.output = null }
+                entries.values.forEach { it.output = null; it.execution = null }
                 audioPermission = AudioPermission.NOT_REQUESTED
                 refresh()
                 recipients.flatMap { entry ->
@@ -147,6 +164,7 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
      * Async plugins should retain this immutable frame and use a single latest-frame worker.
      */
     fun acceptFrame(next: CameraFrame) {
+        val dispatchStarted = System.nanoTime()
         synchronized(lock) {
             if (!active || next.source.session != session || (frame?.source?.frameNumber ?: -1) >= next.source.frameNumber) return
             frame = if (next.poseToken != null && !valid(next.poseToken)) next.copy(poses = emptyList()) else next
@@ -154,6 +172,15 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
         }
         dispatch(PluginCapability.POSE_RESULTS, PluginEvent.Pose(next))
         dispatch(PluginCapability.CAMERA_FRAMES, PluginEvent.Frame(next))
+        val finished = System.nanoTime()
+        val executions = synchronized(lock) {
+            entries.values.filter { it.settings.enabled }.mapNotNull { entry ->
+                entry.execution
+            }
+        }
+        dispatch(PluginCapability.MONITOR, PluginEvent.FrameCompleted(next,
+            FrameProcessingTiming((finished - dispatchStarted) / 1e6,
+                (finished - next.timestampNanos).coerceAtLeast(0) / 1e6), executions))
     }
 
     fun viewport(width: Int, height: Int) {
@@ -165,16 +192,20 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
     }
 
     fun hasSubscribers(capability: PluginCapability): Boolean = synchronized(lock) {
-        active && entries.values.any { it.settings.enabled && capability in it.plugin.descriptor.capabilities }
+        active && entries.values.any { it.settings.enabled && capability in it.plugin.descriptor.capabilities &&
+            (capability != PluginCapability.AUDIO_PCM || wantsAudio(it)) }
     }
 
-    /** True before the camera is foreground too, so the permission owner can ask as soon as an
-     * audio consumer is enabled; cold start with no audio consumer stays silent. */
+    private fun wantsAudio(entry: Entry): Boolean = entry.output?.captureAudio ?: entry.plugin.descriptor.continuousAudio
+
+    /** Audio capability alone is not consent/demand: discovered or bounded consumers publish intent.
+     * Continuous consumers retain the legacy prompt-on-enable behavior. */
     fun requiresAudioPermission(): Boolean = synchronized(lock) {
-        entries.values.any {
-            it.settings.enabled && PluginCapability.AUDIO_PERMISSION in it.plugin.descriptor.capabilities
-        }
+        !closed && entries.values.any(::wantsAudioPermission)
     }
+
+    private fun wantsAudioPermission(entry: Entry): Boolean = entry.settings.enabled &&
+        PluginCapability.AUDIO_PERMISSION in entry.plugin.descriptor.capabilities && wantsAudio(entry)
 
     /** A permission request/capture owner must retain the session it was started in. */
     fun permissionChanged(sessionId: Long, permission: AudioPermission) {
@@ -190,6 +221,7 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
                 pressRecipients.remove(context(entry).token)
                 entry.generation++
                 entry.output = null
+                entry.execution = null
             }
             refresh()
         }
@@ -198,6 +230,30 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
 
     fun audio(sessionId: Long, block: PcmBlock) {
         dispatch(PluginCapability.AUDIO_PCM, PluginEvent.Audio(block), sessionId)
+    }
+
+    fun playbackChanged(playing: Boolean) {
+        synchronized(lock) {
+            if (audioPlayback == playing) return
+            audioPlayback = playing
+        }
+        dispatch(PluginCapability.AUDIO_PCM, PluginEvent.AudioPlaybackChanged(playing))
+    }
+
+    /** A UI click is scoped to the current output's enabled allowlisted action and current session. */
+    fun action(pluginId: String, actionId: String, expectedRevision: Long? = null): Boolean {
+        val delivery = synchronized(lock) {
+            val entry = entries[pluginId] ?: return false
+            val context = context(entry)
+            if (!valid(context.token) || (expectedRevision != null && expectedRevision != entry.settings.revision) ||
+                PluginCapability.ACTIONS !in entry.plugin.descriptor.capabilities ||
+                actionId !in entry.plugin.descriptor.actions ||
+                entry.output?.actions?.none { it.id == actionId && it.enabled } != false) return false
+            Triple(entry, PluginEvent.Action(actionId,
+                frame.takeIf { PluginCapability.CAMERA_FRAMES in entry.plugin.descriptor.capabilities }, System.nanoTime()), context)
+        }
+        deliver(delivery.first, delivery.second, delivery.third)
+        return true
     }
 
     fun press(pointerId: Long, position: ImagePoint, timestampNanos: Long): PressToken? {
@@ -263,6 +319,10 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
         press.takeIf { valid(token) && token in pressRecipients }
     }
 
+    fun currentFrame(token: PluginToken): CameraFrame? = synchronized(lock) {
+        frame.takeIf { valid(token) && PluginCapability.CAMERA_FRAMES in entries.getValue(token.pluginId).plugin.descriptor.capabilities }
+    }
+
     fun contextFor(id: String): PluginContext? = synchronized(lock) {
         entries[id]?.let { context(it) }?.takeIf { valid(it.token) }
     }
@@ -289,7 +349,25 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
             messages = if (PluginCapability.TEXT in capabilities) output.messages.take(MAX_MESSAGES)
                 .map { it.copy(text = it.text.take(MAX_MESSAGE_CHARS)) } else emptyList(),
             layers = layers,
+            actions = if (PluginCapability.ACTIONS in capabilities) output.actions
+                .filter { it.id in entry.plugin.descriptor.actions }.distinctBy { it.id }.take(MAX_ACTIONS)
+                .map { it.copy(label = it.label.take(48)) } else emptyList(),
+            imageReport = output.imageReport?.takeIf {
+                PluginCapability.REPORT_IMAGE in capabilities &&
+                    (it.source?.let { source -> source.session == session && source.frameNumber >= 0 &&
+                        source.frameNumber <= (frame?.source?.frameNumber ?: -1) } ?: it.label.isNotBlank()) &&
+                    boundedReport(it.input) && (it.result == null || boundedReport(it.result))
+            }?.let { it.copy(label = it.label.take(100)) },
+            guide = output.guide?.takeIf { PluginCapability.GUIDE in capabilities }
+                ?.let { it.copy(label = it.label.take(80)) },
+            execution = output.execution?.takeIf { it.elapsedMs.isFinite() && it.elapsedMs >= 0 }
+                ?.let { it.copy(backend = it.backend.take(80), label = it.label.take(80)) },
+            captureAudio = output.captureAudio.takeIf { PluginCapability.AUDIO_PCM in capabilities },
         )
+        entry.output?.execution?.let { execution ->
+            entry.execution = PluginTimingContribution(entry.plugin.descriptor.id, entry.plugin.descriptor.name,
+                execution, output.timestampNanos, entry.output?.imageReport?.source)
+        }
         refresh()
         true
     }
@@ -298,14 +376,16 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
         val recipients = synchronized(lock) {
             if (!active || closed) return
             if (expectedSession != null && expectedSession != session) return
-            if (event is PluginEvent.Audio && audioPermission != AudioPermission.GRANTED) return
+            if (event is PluginEvent.Audio && (audioPermission != AudioPermission.GRANTED || audioPlayback)) return
             val sourceSession = when (event) {
                 is PluginEvent.Frame -> event.frame.source.session
+                is PluginEvent.FrameCompleted -> event.frame.source.session
                 is PluginEvent.Pose -> event.frame.source.session
                 else -> session
             }
             if (sourceSession != session) return
             entries.values.filter { it.settings.enabled && capability in it.plugin.descriptor.capabilities }
+                .filter { event !is PluginEvent.Audio || wantsAudio(it) }
                 .map { it to context(it) }
         }
         recipients.forEach { (entry, context) ->
@@ -316,6 +396,7 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
                 val sanitized = when (event) {
                     is PluginEvent.Pose -> event.copy(frame = clean(event.frame))
                     is PluginEvent.Frame -> event.copy(frame = clean(event.frame))
+                    is PluginEvent.FrameCompleted -> event.copy(frame = clean(event.frame))
                     else -> event
                 }
                 deliver(entry, sanitized, context)
@@ -338,7 +419,7 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
                 if (valid(context.token)) {
                     entry.output = PluginOutput(System.nanoTime(), listOf(
                         PluginMessage((error.message ?: "插件运行失败").take(MAX_MESSAGE_CHARS), MessageKind.ERROR),
-                    ))
+                    ), actions = entry.output?.actions.orEmpty(), captureAudio = false)
                     refresh()
                 }
             }
@@ -391,7 +472,7 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
                     messages = contribution.output.messages.filter { it.kind != MessageKind.TEXT },
                 ))
             } else contribution
-        }.filter { it.output.messages.isNotEmpty() }
+        }.filter { it.output.messages.isNotEmpty() || it.output.actions.isNotEmpty() || it.output.imageReport != null }
         mutableSnapshot.value = HostSnapshot(
             session = session.takeIf { active && !closed },
             frame = frame?.let { if (it.poseToken != null && !valid(it.poseToken)) it.copy(poses = emptyList(), executionProvider = null) else it },
@@ -400,6 +481,12 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
             monitors = monitors,
             reports = reports,
             press = press,
+            guides = if (winner == null) contributions.filter { it.output.guide != null } else emptyList(),
+            audioCaptureRequested = active && !closed && entries.values.any {
+                it.settings.enabled && PluginCapability.AUDIO_PCM in it.plugin.descriptor.capabilities && wantsAudio(it)
+            },
+            audioPermission = audioPermission,
+            audioPermissionRequested = !closed && entries.values.any(::wantsAudioPermission),
         )
     }
 
@@ -418,6 +505,11 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
         const val MAX_MESSAGE_CHARS = 240
         const val MAX_LAYERS = 4
         const val MAX_LINES = 128
+        const val MAX_ACTIONS = 8
+        const val MAX_REPORT_PIXELS = 4_194_304L
+
+        private fun boundedReport(image: PluginImage): Boolean = image.width > 0 && image.height > 0 &&
+            image.width.toLong() * image.height <= MAX_REPORT_PIXELS
 
         private fun sameAspect(space: ImageSpace, image: PluginImage): Boolean =
             image.width > 0 && image.height > 0 &&
