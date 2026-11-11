@@ -47,6 +47,8 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.minimalapk.models.ConfiguredModelStore
+import com.example.minimalapk.plugins.AudioCaptureHost
+import com.example.minimalapk.plugins.AudioPermission
 import com.example.minimalapk.plugins.CameraModelSettingsStore
 import com.example.minimalapk.plugins.CameraSession
 import com.example.minimalapk.plugins.ConfiguredModelPlugin
@@ -56,7 +58,9 @@ import com.example.minimalapk.plugins.PluginHost
 import com.example.minimalapk.plugins.PluginSettingsStore
 import com.example.minimalapk.plugins.PoseEnhancementPlugin
 import com.example.minimalapk.plugins.PoseModelsPlugin
+import com.example.minimalapk.plugins.SuperResolutionPlugin
 import com.example.minimalapk.plugins.SystemMonitorPlugin
+import com.example.minimalapk.plugins.audioPermissionAfterCheck
 import com.example.minimalapk.plugins.cameraFrameRate
 import com.example.minimalapk.plugins.cameraPluginSettings
 import kotlinx.coroutines.flow.combine
@@ -106,21 +110,70 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
     val host = remember(context, lifecycleOwner) {
         PluginHost(listOf(
             poses, PoseEnhancementPlugin(), ConfiguredModelPlugin(context.applicationContext),
-            SystemMonitorPlugin(),
+            SystemMonitorPlugin(), SuperResolutionPlugin(context.applicationContext),
         ))
     }
-    val camera = remember(host, lifecycleOwner) { CameraSession(context, lifecycleOwner, host, poses) }
+    val audio = remember(context, host, lifecycleOwner) {
+        AudioCaptureHost(context.applicationContext, host)
+    }
+    val camera = remember(host, lifecycleOwner, audio) {
+        CameraSession(context, lifecycleOwner, host, poses, audio)
+    }
     val snapshot by host.snapshot.collectAsStateWithLifecycle()
     val error by camera.error.collectAsStateWithLifecycle()
+    var audioPermission by remember { mutableStateOf(AudioPermission.NOT_REQUESTED) }
+    var audioRequested by remember { mutableStateOf(false) }
+    var audioPermanentlyDenied by remember { mutableStateOf(false) }
+    var audioPluginEnabled by remember { mutableStateOf(false) }
+    val audioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        audioRequested = true
+        val next = audioPermissionAfterCheck(granted, requested = true, previous = audioPermission)
+        audioPermission = next
+        audioPermanentlyDenied = context.audioPermanentlyDenied(granted, requested = true)
+        audio.permissionChanged(next)
+    }
+    LifecycleResumeEffect(Unit) {
+        val granted = context.hasAudioPermission()
+        val next = audioPermissionAfterCheck(granted, audioRequested, audioPermission)
+        if (next != audioPermission) {
+            audioPermission = next
+            audio.permissionChanged(next)
+        }
+        audioPermanentlyDenied = context.audioPermanentlyDenied(granted, audioRequested)
+        onPauseOrDispose { }
+    }
+    LaunchedEffect(audioPluginEnabled) {
+        if (!audioPluginEnabled) return@LaunchedEffect
+        if (context.hasAudioPermission()) {
+            audioPermanentlyDenied = false
+            if (audioPermission != AudioPermission.GRANTED) {
+                audioPermission = AudioPermission.GRANTED
+                audio.permissionChanged(AudioPermission.GRANTED)
+            }
+        } else if (!audioRequested) {
+            audioRequested = true
+            audioLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            val next = audioPermissionAfterCheck(false, requested = true, previous = audioPermission)
+            if (next != audioPermission) {
+                audioPermission = next
+                audio.permissionChanged(next)
+            }
+        }
+    }
 
     DisposableEffect(camera) {
         camera.start()
-        onDispose { camera.close(); models.close() }
+        onDispose { camera.close(); audio.close(); models.close() }
     }
-    LaunchedEffect(host, store, models) {
+    LaunchedEffect(host, store, models, audio) {
         combine(store.settings, models.settings, ConfiguredModelStore.revision) { plugins, base, revision ->
             cameraPluginSettings(plugins, base, revision)
-        }.collect { host.configure(it) }
+        }.collect {
+            host.configure(it)
+            audioPluginEnabled = host.requiresAudioPermission()
+            audio.refresh()
+        }
     }
 
     Box(modifier.onSizeChanged { camera.viewport(it.width, it.height) }.pluginPressInput(host)) {
@@ -146,6 +199,34 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
         }
         error?.let {
             Text(it, Modifier.align(Alignment.Center).padding(16.dp), color = MaterialTheme.colorScheme.error)
+        }
+        if (audioPluginEnabled && audioPermission != AudioPermission.GRANTED) {
+            // A denial only disables audio plugins; the camera and every other plugin keep running.
+            Column(
+                Modifier.align(Alignment.TopCenter).padding(8.dp)
+                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    when (audioPermission) {
+                        AudioPermission.DENIED, AudioPermission.REVOKED -> "需要麦克风权限才能运行音频插件"
+                        AudioPermission.MICROPHONE_BUSY -> "麦克风正被占用，音频插件暂不可用"
+                        else -> "正在请求麦克风权限…"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White,
+                )
+                when {
+                    audioPermanentlyDenied -> Button(onClick = { context.openAppSettings() }) { Text("打开设置") }
+                    audioPermission == AudioPermission.DENIED ||
+                        audioPermission == AudioPermission.REVOKED -> Button(onClick = {
+                        audioRequested = true
+                        audioLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }) { Text("授予权限") }
+                }
+            }
         }
         // Monitor metric lines stay in the top-right panel; its STATUS/ERROR lines (for example the
         // "测试全部" NPU diagnosis) and every other plugin's text share the copyable bottom area.
@@ -212,6 +293,16 @@ private fun Context.cameraPermanentlyDenied(granted: Boolean, requested: Boolean
 )
 
 internal fun isCameraPermanentlyDenied(granted: Boolean, requested: Boolean, shouldShowRationale: Boolean?): Boolean =
+    !granted && requested && shouldShowRationale == false
+
+private fun Context.hasAudioPermission(): Boolean =
+    ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+private fun Context.audioPermanentlyDenied(granted: Boolean, requested: Boolean): Boolean = isAudioPermanentlyDenied(
+    granted, requested, findActivity()?.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO),
+)
+
+internal fun isAudioPermanentlyDenied(granted: Boolean, requested: Boolean, shouldShowRationale: Boolean?): Boolean =
     !granted && requested && shouldShowRationale == false
 
 private fun Context.openAppSettings() {

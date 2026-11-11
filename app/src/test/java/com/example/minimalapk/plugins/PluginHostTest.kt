@@ -236,6 +236,21 @@ class PluginHostTest {
     }
 
     @Test
+    fun microphonePermissionIsRequiredOnlyForEnabledAudioPlugins() {
+        val audio = Plugin("audio", setOf(PluginCapability.AUDIO_PERMISSION))
+        val video = Plugin("video", setOf(PluginCapability.CAMERA_FRAMES))
+        PluginHost(listOf(audio, video)).use { host ->
+            assertFalse(host.requiresAudioPermission())
+            host.configure(mapOf("video" to PluginSettings(true)))
+            assertFalse(host.requiresAudioPermission())
+            host.configure(mapOf("audio" to PluginSettings(true), "video" to PluginSettings(true)))
+            assertTrue(host.requiresAudioPermission())
+            host.configure(mapOf("audio" to PluginSettings(false), "video" to PluginSettings(true)))
+            assertFalse(host.requiresAudioPermission())
+        }
+    }
+
+    @Test
     fun audioOnlyReachesEnabledSubscribersWithPermissionAndNeverAfterStop() {
         val audio = Plugin("audio", setOf(PluginCapability.AUDIO_PERMISSION, PluginCapability.AUDIO_PCM))
         val video = Plugin("video", setOf(PluginCapability.CAMERA_FRAMES))

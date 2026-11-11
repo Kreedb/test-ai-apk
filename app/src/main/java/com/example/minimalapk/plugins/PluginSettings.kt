@@ -13,6 +13,7 @@ internal object PluginIds {
     const val CONFIGURED_MODEL = "configured_model"
     const val POSE_MODELS = "pose_models"
     const val SYSTEM_MONITOR = "system_monitor"
+    const val SUPER_RESOLUTION = "super_resolution"
 }
 
 /** Stable key inside `plugin.configured_model.config`; shared by the runner and its configuration UI. */
@@ -51,6 +52,7 @@ internal val pluginDefaults = mapOf(
     PluginIds.POSE_ENHANCEMENT to PluginSettings(true, PoseEnhancementSettings().toConfig()),
     PluginIds.CONFIGURED_MODEL to PluginSettings(config = mapOf(CONFIGURED_MODEL_ID_KEY to "")),
     PluginIds.SYSTEM_MONITOR to PluginSettings(true, SystemMonitorSettings().toConfig()),
+    PluginIds.SUPER_RESOLUTION to PluginSettings(config = SuperResolutionSettings().toConfig()),
 )
 
 /** Small storage seam: tests exercise the same restore/update code without an Android runtime. */

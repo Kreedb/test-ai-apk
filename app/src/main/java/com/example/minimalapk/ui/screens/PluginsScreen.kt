@@ -49,6 +49,7 @@ import com.example.minimalapk.plugins.PluginIds
 import com.example.minimalapk.plugins.PluginSettings
 import com.example.minimalapk.plugins.PluginSettingsStore
 import com.example.minimalapk.plugins.PoseEnhancementSettings
+import com.example.minimalapk.plugins.SuperResolutionSettings
 import com.example.minimalapk.plugins.SystemMonitorSettings
 import com.example.minimalapk.pose.ModelSpec
 import com.example.minimalapk.pose.ModelStore
@@ -63,9 +64,11 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
     val pose = settings.getValue(PluginIds.POSE_ENHANCEMENT)
     val monitor = settings.getValue(PluginIds.SYSTEM_MONITOR)
     val configured = settings.getValue(PluginIds.CONFIGURED_MODEL)
+    val superResolution = settings.getValue(PluginIds.SUPER_RESOLUTION)
     var configure by rememberSaveable { mutableStateOf(false) }
     var configureMonitor by rememberSaveable { mutableStateOf(false) }
     var configureModels by rememberSaveable { mutableStateOf(false) }
+    var configureSuperResolution by rememberSaveable { mutableStateOf(false) }
     var configuredModels by remember { mutableStateOf(emptyList<InstalledConfiguredModel>()) }
     var configuredModelsLoaded by remember { mutableStateOf(false) }
     LaunchedEffect(context) {
@@ -107,6 +110,15 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
                 onConfigure = { configureMonitor = true },
             )
         }
+        item {
+            PluginCard(
+                name = "超分辨率",
+                status = if (superResolution.enabled) "已启用 · 按住预览增强中心区域" else "已停用 · 可继续配置",
+                enabled = superResolution.enabled,
+                onEnabledChange = { store.setEnabled(PluginIds.SUPER_RESOLUTION, it) },
+                onConfigure = { configureSuperResolution = true },
+            )
+        }
     }
     if (configure) {
         PoseEnhancementDialog(PoseEnhancementSettings.from(pose), onSave = {
@@ -119,6 +131,12 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
             store.configure(PluginIds.SYSTEM_MONITOR, it.toConfig())
             configureMonitor = false
         }, onDismiss = { configureMonitor = false })
+    }
+    if (configureSuperResolution) {
+        SuperResolutionDialog(SuperResolutionSettings.from(superResolution), onSave = {
+            store.configure(PluginIds.SUPER_RESOLUTION, it.toConfig())
+            configureSuperResolution = false
+        }, onDismiss = { configureSuperResolution = false })
     }
     if (configureModels) {
         ConfiguredModelDialog(
@@ -287,6 +305,38 @@ private fun PoseEnhancementDialog(
             }
         },
         confirmButton = { TextButton(onClick = { onSave(PoseEnhancementSettings(height, heightLine, armSpan)) }) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun SuperResolutionDialog(
+    initial: SuperResolutionSettings,
+    onSave: (SuperResolutionSettings) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var replacePreview by rememberSaveable { mutableStateOf(initial.replacePreview) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("超分辨率") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                PluginSwitchRow(
+                    "替换画面",
+                    "按住相机预览时显示增强画面；松手或取消立即恢复实时原图",
+                    replacePreview,
+                ) { replacePreview = it }
+                Text(
+                    "仅增强画面中心、较小边一半的方形区域：模型输入 50×50，输出 200×200（4×），" +
+                        "贴回同一来源帧的同一位置，不是整帧超分。模型首次使用时下载（约 5 MB），" +
+                        "下载/加载状态与失败原因显示在相机画面底部。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(SuperResolutionSettings(replacePreview)) }) { Text("保存") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }

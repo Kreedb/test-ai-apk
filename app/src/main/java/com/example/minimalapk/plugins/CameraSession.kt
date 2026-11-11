@@ -29,6 +29,7 @@ internal class CameraSession(
     private val lifecycleOwner: LifecycleOwner,
     private val host: PluginHost,
     private val poses: PoseModelsPlugin,
+    private val audio: AudioCaptureHost? = null,
 ) : AutoCloseable {
     private val application = context.applicationContext
     private val main = ContextCompat.getMainExecutor(application)
@@ -45,8 +46,14 @@ internal class CameraSession(
     private val observer = LifecycleEventObserver { _, event ->
         when (event) {
             Lifecycle.Event.ON_RESUME -> resume()
-            Lifecycle.Event.ON_PAUSE -> host.lifecycle(CameraLifecycle.BACKGROUND)
-            Lifecycle.Event.ON_STOP -> host.lifecycle(CameraLifecycle.STOP)
+            Lifecycle.Event.ON_PAUSE -> {
+                audio?.onBackground()
+                host.lifecycle(CameraLifecycle.BACKGROUND)
+            }
+            Lifecycle.Event.ON_STOP -> {
+                audio?.onBackground()
+                host.lifecycle(CameraLifecycle.STOP)
+            }
             Lifecycle.Event.ON_START -> host.lifecycle(CameraLifecycle.ENTER)
             else -> Unit
         }
@@ -56,6 +63,7 @@ internal class CameraSession(
         // Permission UI also rechecks on resume; do not briefly restart consumers before it runs.
         if (ContextCompat.checkSelfPermission(application, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             host.lifecycle(CameraLifecycle.FOREGROUND)
+            audio?.onForeground()
         }
     }
 
@@ -144,6 +152,7 @@ internal class CameraSession(
     override fun close() {
         if (closed) return
         closed = true
+        audio?.onBackground()
         host.lifecycle(CameraLifecycle.LEAVE)
         lifecycleOwner.lifecycle.removeObserver(observer)
         try {

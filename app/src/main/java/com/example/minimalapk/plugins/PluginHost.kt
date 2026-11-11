@@ -167,6 +167,14 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
         active && entries.values.any { it.settings.enabled && capability in it.plugin.descriptor.capabilities }
     }
 
+    /** True before the camera is foreground too, so the permission owner can ask as soon as an
+     * audio consumer is enabled; cold start with no audio consumer stays silent. */
+    fun requiresAudioPermission(): Boolean = synchronized(lock) {
+        entries.values.any {
+            it.settings.enabled && PluginCapability.AUDIO_PERMISSION in it.plugin.descriptor.capabilities
+        }
+    }
+
     /** A permission request/capture owner must retain the session it was started in. */
     fun permissionChanged(sessionId: Long, permission: AudioPermission) {
         synchronized(lock) {
