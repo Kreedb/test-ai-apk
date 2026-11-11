@@ -92,7 +92,7 @@ fun ConfigScreen(
             onSelect = { option ->
                 backendPreference = option
                 PoseBackendPreference.save(context, option)
-                AppLog.i("Settings", "推理后端切换为 ${option.label}，重新进入相机后生效")
+                AppLog.i("Settings", "推理后端切换为 ${option.label}，相机将自动更新")
                 showBackendDialog = false
             },
             onDismiss = { showBackendDialog = false },
@@ -133,7 +133,7 @@ private fun SettingsList(
                         )
                     },
                     title = "推理后端",
-                    subtitle = "${backendPreference.label} · 重新进入相机生效",
+                    subtitle = "${backendPreference.label} · 保存后自动更新相机",
                     onClick = onOpenBackend,
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
@@ -145,7 +145,7 @@ private fun SettingsList(
                         )
                     },
                     title = "模型",
-                    subtitle = "$modelCount 个模型 · $enabledModels 个启用 · 重新进入相机生效",
+                    subtitle = "$modelCount 个模型 · $enabledModels 个启用 · 保存后自动更新相机",
                     onClick = onOpenModels,
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
