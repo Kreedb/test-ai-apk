@@ -15,26 +15,23 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,33 +43,32 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.minimalapk.log.AppLog
-import com.example.minimalapk.models.ConfiguredModel
 import com.example.minimalapk.models.ConfiguredModelStore
+import com.example.minimalapk.plugins.AudioCaptureHost
+import com.example.minimalapk.plugins.AudioClassificationPlugin
+import com.example.minimalapk.plugins.AudioPermission
 import com.example.minimalapk.plugins.CameraModelSettingsStore
 import com.example.minimalapk.plugins.CameraSession
 import com.example.minimalapk.plugins.ConfiguredModelPlugin
+import com.example.minimalapk.plugins.ExampleScenePlugin
+import com.example.minimalapk.plugins.ExampleScenes
 import com.example.minimalapk.plugins.MessageKind
+import com.example.minimalapk.plugins.PluginContribution
 import com.example.minimalapk.plugins.PluginHost
-import com.example.minimalapk.plugins.PluginIds
 import com.example.minimalapk.plugins.PluginSettingsStore
+import com.example.minimalapk.plugins.PersonalizationPlugin
 import com.example.minimalapk.plugins.PoseEnhancementPlugin
 import com.example.minimalapk.plugins.PoseModelsPlugin
+import com.example.minimalapk.plugins.SuperResolutionPlugin
+import com.example.minimalapk.plugins.SystemMonitorPlugin
+import com.example.minimalapk.plugins.TtsPlugin
+import com.example.minimalapk.plugins.audioPermissionAfterCheck
+import com.example.minimalapk.plugins.cameraFrameRate
 import com.example.minimalapk.plugins.cameraPluginSettings
-import com.example.minimalapk.pose.DeviceUsage
-import com.example.minimalapk.pose.DeviceUsageSampler
-import com.example.minimalapk.pose.PoseTimings
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.withContext
-import java.util.Locale
 
 @Composable
 internal fun CameraScreen(store: PluginSettingsStore) {
@@ -80,11 +76,6 @@ internal fun CameraScreen(store: PluginSettingsStore) {
     var granted by remember { mutableStateOf(context.hasCameraPermission()) }
     var permanentlyDenied by remember { mutableStateOf(false) }
     var requested by remember { mutableStateOf(false) }
-    var exampleModels by remember { mutableStateOf(emptyList<ConfiguredModel>()) }
-    var showExamplePicker by rememberSaveable { mutableStateOf(false) }
-    val settings by store.settings.collectAsStateWithLifecycle()
-    val configured = settings.getValue(PluginIds.CONFIGURED_MODEL)
-    val selected = exampleModels.firstOrNull { it.id == configured.config["model_id"] }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { result ->
         requested = true
         granted = result
@@ -96,29 +87,10 @@ internal fun CameraScreen(store: PluginSettingsStore) {
         onPauseOrDispose { }
     }
     LaunchedEffect(Unit) { if (!granted) launcher.launch(Manifest.permission.CAMERA) }
-    LaunchedEffect(Unit) {
-        ConfiguredModelStore.revision.collect {
-            try {
-                exampleModels = withContext(Dispatchers.IO) { ConfiguredModelStore.list(ConfiguredModelStore.directory(context)) }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                AppLog.w("Camera", "示例模型列表读取失败", error)
-            }
-        }
-    }
 
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         ScreenHeader("相机", "离线姿态与插件预览")
         if (granted) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "示例模型叠加：${if (configured.enabled) selected?.name ?: "待选择" else "关闭"}",
-                    modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = { showExamplePicker = true }) { Text("选择") }
-            }
             PoseCamera(store, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(16.dp)))
         } else {
             Column(
@@ -132,18 +104,6 @@ internal fun CameraScreen(store: PluginSettingsStore) {
             }
         }
     }
-    if (showExamplePicker) {
-        OptionDialog(
-            title = "示例模型叠加", options = listOf<ConfiguredModel?>(null) + exampleModels,
-            selected = selected.takeIf { configured.enabled }, label = { it?.name ?: "关闭（保留基础姿态）" },
-            onSelect = { model ->
-                store.update(PluginIds.CONFIGURED_MODEL) {
-                    it.copy(enabled = model != null, config = it.config + ("model_id" to (model?.id ?: "")))
-                }
-                showExamplePicker = false
-            }, onDismiss = { showExamplePicker = false },
-        )
-    }
 }
 
 @Composable
@@ -153,52 +113,74 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
     val models = remember(context, lifecycleOwner) { CameraModelSettingsStore(context) }
     val poses = remember(context, lifecycleOwner) { PoseModelsPlugin(context.applicationContext) }
     val host = remember(context, lifecycleOwner) {
-        PluginHost(listOf(poses, PoseEnhancementPlugin(), ConfiguredModelPlugin(context.applicationContext)))
+        PluginHost(listOf(
+            poses, PoseEnhancementPlugin(), ConfiguredModelPlugin(context.applicationContext),
+            SystemMonitorPlugin(), SuperResolutionPlugin(context.applicationContext),
+            *ExampleScenes.all.map { ExampleScenePlugin(context.applicationContext, it) }.toTypedArray(),
+            AudioClassificationPlugin(context.applicationContext), TtsPlugin(),
+            PersonalizationPlugin(context.applicationContext),
+        ))
     }
-    val camera = remember(host, lifecycleOwner) { CameraSession(context, lifecycleOwner, host, poses) }
+    val audio = remember(context, host, lifecycleOwner) {
+        AudioCaptureHost(context.applicationContext, host)
+    }
+    val camera = remember(host, lifecycleOwner, audio) {
+        CameraSession(context, lifecycleOwner, host, poses, audio)
+    }
     val snapshot by host.snapshot.collectAsStateWithLifecycle()
     val error by camera.error.collectAsStateWithLifecycle()
-    var fps by remember { mutableFloatStateOf(0f) }
-    var usage by remember { mutableStateOf(DeviceUsage()) }
-    val frameTimes = remember { ArrayDeque<Long>() }
-    val usageSampler = remember { DeviceUsageSampler() }
-
-    DisposableEffect(camera) {
-        camera.start()
-        onDispose { camera.close(); models.close() }
+    var audioPermission by remember { mutableStateOf(AudioPermission.NOT_REQUESTED) }
+    var audioRequested by remember { mutableStateOf(false) }
+    var audioPermanentlyDenied by remember { mutableStateOf(false) }
+    var audioPluginEnabled by remember { mutableStateOf(false) }
+    val audioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        audioRequested = true
+        val next = audioPermissionAfterCheck(granted, requested = true, previous = audioPermission)
+        audioPermission = next
+        audioPermanentlyDenied = context.audioPermanentlyDenied(granted, requested = true)
+        audio.permissionChanged(next)
     }
-    LaunchedEffect(host, store, models) {
-        combine(store.settings, models.settings, ConfiguredModelStore.revision) { plugins, base, revision ->
-            cameraPluginSettings(plugins, base, revision)
-        }.collect { host.configure(it) }
+    LifecycleResumeEffect(Unit) {
+        val granted = context.hasAudioPermission()
+        val next = audioPermissionAfterCheck(granted, audioRequested, audioPermission)
+        if (next != audioPermission) {
+            audioPermission = next
+            audio.permissionChanged(next)
+        }
+        audioPermanentlyDenied = context.audioPermanentlyDenied(granted, audioRequested)
+        onPauseOrDispose { }
     }
-    LaunchedEffect(host) {
-        var lastFrame = -1L
-        host.snapshot.collect { state ->
-            val frame = state.frame
-            if (frame == null) {
-                frameTimes.clear()
-                fps = 0f
-                lastFrame = -1
-            } else if (frame.source.frameNumber != lastFrame) {
-                lastFrame = frame.source.frameNumber
-                // Observe on arrival: capture timestamps predate inference and stretch the first interval.
-                frameTimes.addLast(System.nanoTime())
-                fps = frameRate(frameTimes, System.nanoTime())
+    LaunchedEffect(audioPluginEnabled) {
+        if (!audioPluginEnabled) return@LaunchedEffect
+        if (context.hasAudioPermission()) {
+            audioPermanentlyDenied = false
+            if (audioPermission != AudioPermission.GRANTED) {
+                audioPermission = AudioPermission.GRANTED
+                audio.permissionChanged(AudioPermission.GRANTED)
+            }
+        } else if (!audioRequested) {
+            audioRequested = true
+            audioLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            val next = audioPermissionAfterCheck(false, requested = true, previous = audioPermission)
+            if (next != audioPermission) {
+                audioPermission = next
+                audio.permissionChanged(next)
             }
         }
     }
-    LaunchedEffect(lifecycleOwner) {
-        while (isActive) {
-            if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                usage = withContext(Dispatchers.IO) { usageSampler.sample() }
-                fps = frameRate(frameTimes, System.nanoTime())
-            } else {
-                usageSampler.reset()
-                frameTimes.clear()
-                fps = 0f
-            }
-            delay(1_000)
+
+    DisposableEffect(camera) {
+        camera.start()
+        onDispose { camera.close(); audio.close(); models.close() }
+    }
+    LaunchedEffect(host, store, models, audio) {
+        combine(store.settings, models.settings, ConfiguredModelStore.revision) { plugins, base, revision ->
+            cameraPluginSettings(plugins, base, revision)
+        }.collect {
+            host.configure(it)
+            audioPluginEnabled = host.requiresAudioPermission()
+            audio.refresh()
         }
     }
 
@@ -219,32 +201,72 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
                     PluginLineOverlay(layer, Modifier.fillMaxSize())
                 }
             }
-            MetricsPanel(
-                fps, frame.poses.firstOrNull()?.timings, usage, frame.executionProvider,
-                Modifier.align(Alignment.TopEnd).padding(8.dp),
-            )
+            MonitorPanel(snapshot.monitors, Modifier.align(Alignment.TopEnd).padding(8.dp))
         } else if (error == null) {
             Text("正在启动相机…", Modifier.align(Alignment.Center), style = MaterialTheme.typography.bodyMedium)
         }
         error?.let {
             Text(it, Modifier.align(Alignment.Center).padding(16.dp), color = MaterialTheme.colorScheme.error)
         }
-        if (snapshot.reports.isNotEmpty()) {
+        if (audioPluginEnabled && audioPermission != AudioPermission.GRANTED) {
+            // A denial only disables audio plugins; the camera and every other plugin keep running.
             Column(
-                Modifier.align(Alignment.BottomStart).fillMaxWidth().heightIn(max = 200.dp)
-                    .background(Color.Black.copy(alpha = 0.55f)).verticalScroll(rememberScrollState()).padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+                Modifier.align(Alignment.TopCenter).padding(8.dp)
+                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                snapshot.reports.forEach { report ->
-                    report.output.messages.forEach { message ->
-                        Text(
-                            "${report.name}：${message.text}", style = MaterialTheme.typography.bodySmall,
-                            color = when (message.kind) {
-                                MessageKind.ERROR -> Color(0xFFFF8A80)
-                                MessageKind.STATUS -> Color(0xFFBDBDBD)
-                                MessageKind.TEXT -> Color.White
-                            },
-                        )
+                Text(
+                    when (audioPermission) {
+                        AudioPermission.DENIED, AudioPermission.REVOKED -> "需要麦克风权限才能运行音频插件"
+                        AudioPermission.MICROPHONE_BUSY -> "麦克风正被占用，音频插件暂不可用"
+                        else -> "正在请求麦克风权限…"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White,
+                )
+                when {
+                    audioPermanentlyDenied -> Button(onClick = { context.openAppSettings() }) { Text("打开设置") }
+                    audioPermission == AudioPermission.DENIED ||
+                        audioPermission == AudioPermission.REVOKED -> Button(onClick = {
+                        audioRequested = true
+                        audioLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }) { Text("授予权限") }
+                }
+            }
+        }
+        // Monitor metric lines stay in the top-right panel; its STATUS/ERROR lines (for example the
+        // "测试全部" NPU diagnosis) and every other plugin's text share the copyable bottom area.
+        val monitorIds = snapshot.monitors.mapTo(mutableSetOf()) { it.pluginId }
+        val reports = snapshot.reports.mapNotNull { report ->
+            val messages = if (report.pluginId in monitorIds) {
+                report.output.messages.filter { it.kind != MessageKind.TEXT }
+            } else {
+                report.output.messages
+            }
+            messages.takeIf { it.isNotEmpty() }?.let { report to it }
+        }
+        if (reports.isNotEmpty()) {
+            SelectionContainer(
+                Modifier.align(Alignment.BottomStart).fillMaxWidth(),
+            ) {
+                Column(
+                    Modifier.fillMaxWidth().heightIn(max = 200.dp)
+                        .background(Color.Black.copy(alpha = 0.55f)).verticalScroll(rememberScrollState()).padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    reports.forEach { (report, messages) ->
+                        messages.forEach { message ->
+                            Text(
+                                "${report.name}：${message.text}", style = MaterialTheme.typography.bodySmall,
+                                color = when (message.kind) {
+                                    MessageKind.ERROR -> Color(0xFFFF8A80)
+                                    MessageKind.STATUS -> Color(0xFFBDBDBD)
+                                    MessageKind.TEXT -> Color.White
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -253,37 +275,21 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
 }
 
 @Composable
-private fun MetricsPanel(fps: Float, timings: PoseTimings?, usage: DeviceUsage, executionProvider: String?, modifier: Modifier = Modifier) {
-    Column(
-        modifier.background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        MetricLine("帧率", if (fps > 0f) "${format(fps)} FPS" else "—")
-        MetricLine("推理", timings?.let { "${format(it.inferenceMs)} ms" } ?: "—")
-        MetricLine("预处理", timings?.let { "${format(it.preprocessMs)} ms" } ?: "—")
-        MetricLine("后处理", timings?.let { "${format(it.postprocessMs)} ms" } ?: "—")
-        MetricLine("分析耗时", timings?.let { "${format(it.totalMs)} ms" } ?: "—")
-        MetricLine("加速器", executionProvider ?: "—")
-        MetricLine("CPU(应用)", formatPercent(usage.cpuPercent))
-        MetricLine("GPU", formatPercent(usage.gpuPercent))
-        MetricLine("NPU", formatPercent(usage.npuPercent))
+private fun MonitorPanel(monitors: List<PluginContribution>, modifier: Modifier = Modifier) {
+    val lines = monitors.flatMap { it.output.messages }.filter { it.kind == MessageKind.TEXT }
+    if (lines.isNotEmpty()) {
+        Column(
+            modifier.background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            lines.forEach { Text(it.text, style = MaterialTheme.typography.labelSmall, color = Color.White) }
+        }
     }
 }
 
-@Composable
-private fun MetricLine(label: String, value: String) {
-    Text("$label $value", style = MaterialTheme.typography.labelSmall, color = Color.White)
-}
-
-private fun format(value: Float): String = String.format(Locale.US, "%.1f", value)
-
-internal fun frameRate(timestamps: ArrayDeque<Long>, nowNanos: Long): Float {
-    while (timestamps.size > 2 && nowNanos - timestamps.first() > FPS_WINDOW_NANOS) timestamps.removeFirst()
-    if (timestamps.size < 2) return 0f
-    val spanNanos = (nowNanos - timestamps.first()).toFloat()
-    if (spanNanos <= 0f) return 0f
-    return (timestamps.size - 1) * 1_000_000_000f / spanNanos
-}
+internal fun frameRate(timestamps: ArrayDeque<Long>, nowNanos: Long): Float =
+    cameraFrameRate(timestamps, nowNanos, FPS_WINDOW_NANOS)
 
 private const val FPS_WINDOW_NANOS = 2_000_000_000L
 
@@ -295,6 +301,16 @@ private fun Context.cameraPermanentlyDenied(granted: Boolean, requested: Boolean
 )
 
 internal fun isCameraPermanentlyDenied(granted: Boolean, requested: Boolean, shouldShowRationale: Boolean?): Boolean =
+    !granted && requested && shouldShowRationale == false
+
+private fun Context.hasAudioPermission(): Boolean =
+    ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+private fun Context.audioPermanentlyDenied(granted: Boolean, requested: Boolean): Boolean = isAudioPermanentlyDenied(
+    granted, requested, findActivity()?.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO),
+)
+
+internal fun isAudioPermanentlyDenied(granted: Boolean, requested: Boolean, shouldShowRationale: Boolean?): Boolean =
     !granted && requested && shouldShowRationale == false
 
 private fun Context.openAppSettings() {

@@ -11,9 +11,6 @@ import java.io.File
 class TfliteGraphTest {
     private fun asset(name: String): ByteArray = File("src/main/assets/models/$name").readBytes()
 
-    // Downloadable models live at the repository root, outside the APK.
-    private fun downloadable(name: String): ByteArray = File("../models/$name").readBytes()
-
     private fun contractOf(graph: TfliteGraph): PoseContract {
         val input = graph.inputs().single()
         val output = graph.outputs().single()
@@ -34,8 +31,8 @@ class TfliteGraphTest {
     }
 
     @Test
-    fun readsTheDownloadablePoseContract() {
-        val graph = TfliteGraph(downloadable("yolo11n_pose.tflite"))
+    fun readsTheBundledPoseContractFromBytes() {
+        val graph = TfliteGraph(asset("yolo26n_pose.tflite"))
 
         assertEquals(PoseContract(640, 8400, 17), contractOf(graph))
         assertEquals(0, graph.dynamicSignatureCount())
@@ -43,7 +40,7 @@ class TfliteGraphTest {
 
     @Test
     fun rewritesDynamicSignatureFromTheConcreteShape() {
-        val graph = TfliteGraph(downloadable("yolo11n_pose.tflite"))
+        val graph = TfliteGraph(asset("yolo26n_pose.tflite"))
         val output = graph.outputs().single()
         graph.markSignatureDynamic(output)
         assertTrue(graph.dynamicSignatureCount() > 0)
@@ -100,6 +97,17 @@ class TfliteGraphTest {
         assertThrows(IllegalArgumentException::class.java) {
             inferPoseContract(intArrayOf(1, 640, 640, 3), intArrayOf(1, 1001), true, true)
         }
+    }
+
+    @Test
+    fun knownSummaryListsOnlyFileBackedTensorFacts() {
+        val summary = TfliteGraph(asset("yolo26n_pose.tflite")).describe().knownSummary()
+
+        assertTrue(summary.contains("FLOAT32"))
+        assertTrue(summary.contains("形状"))
+        assertTrue(summary.contains("签名"))
+        assertFalse(summary.contains("mean"))
+        assertFalse(summary.contains("labels"))
     }
 
     @Test

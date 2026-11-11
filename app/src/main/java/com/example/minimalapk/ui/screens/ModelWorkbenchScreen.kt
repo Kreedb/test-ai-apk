@@ -48,6 +48,8 @@ import com.example.minimalapk.models.InputSource
 import com.example.minimalapk.models.MAX_CONFIG_BYTES
 import com.example.minimalapk.models.ModelConfig
 import com.example.minimalapk.models.ModelRunResult
+import com.example.minimalapk.pose.GitHubMirrorMode
+import com.example.minimalapk.pose.GitHubMirrorPreference
 import com.example.minimalapk.pose.GraphDescription
 import com.example.minimalapk.pose.ModelDownload
 import com.example.minimalapk.pose.readCapped
@@ -67,28 +69,44 @@ internal fun ModelWorkbenchScreen(onBack: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var url by rememberSaveable { mutableStateOf("") }
     val directory = remember { ConfiguredModelStore.directory(context) }
+    val mirrorPreference = remember { GitHubMirrorPreference.load(context) }
 
     LaunchedEffect(Unit) {
         runCatching { withContext(Dispatchers.IO) { ConfiguredModelStore.list(directory) } }
             .onSuccess { models = it }.onFailure { if (it is CancellationException) throw it; status = it.message }
     }
-    fun install(load: () -> ConfiguredModel) {
+    fun install(sourceUrl: String? = null, load: () -> ConfiguredModel) {
         if (busy) return
         busy = true
         scope.launch {
             try {
                 val model = withContext(Dispatchers.IO) { load() }
                 models = withContext(Dispatchers.IO) { ConfiguredModelStore.list(directory) }
-                status = "已保存 ${model.name}，请确认配置后运行"
+                status = "已保存 ${model.name}，原始文件与可编辑配置已保留；" +
+                    "张量名称/形状/dtype/量化/签名已读取，归一化、框含义、labels、tokenizer、采样率待确认"
                 selectedId = model.id
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 AppLog.w("ModelWorkbench", "导入失败", e)
-                status = "导入失败：${e.message}"
+                status = buildString {
+                    append("导入失败：${e.message}")
+                    if (sourceUrl != null) append("\n原始地址：$sourceUrl")
+                }
             } finally {
                 busy = false
             }
+        }
+    }
+    fun downloadRemote(address: String, preference: GitHubMirrorPreference) {
+        install(address) {
+            val bytes = ModelDownload.fetch(address, preference)
+            ModelDownload.validateDownloaded(bytes, expectedSize = null, expectedSha256 = null)
+            ConfiguredModelStore.install(
+                directory,
+                address.substringAfterLast('/').substringBefore('?'),
+                bytes,
+            )
         }
     }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -121,16 +139,25 @@ internal fun ModelWorkbenchScreen(onBack: () -> Unit) {
             Button(enabled = !busy, onClick = { picker.launch(arrayOf("*/*")) }) { Text("导入 TFLite") }
             OutlinedTextField(url, { url = it }, label = { Text("模型 https 地址") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
             TextButton(enabled = !busy && url.startsWith("https://"), onClick = {
-                val address = url.trim()
-                install { ConfiguredModelStore.install(directory, address.substringAfterLast('/').substringBefore('?'), ModelDownload.fetch(address)) }
+                downloadRemote(url.trim(), mirrorPreference)
             }) { Text("从远程下载") }
+            if (!mirrorPreference.isDirect) {
+                TextButton(enabled = !busy && url.startsWith("https://"), onClick = {
+                    downloadRemote(url.trim(), GitHubMirrorPreference(mode = GitHubMirrorMode.DIRECT))
+                }) { Text("直连重试") }
+            }
+            Text(
+                text = "GitHub 镜像：${mirrorPreference.summary}（设置 → GitHub 镜像源）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-            Text("示例模型 · 点击下载并配置", style = MaterialTheme.typography.titleMedium)
+            Text("示例模型目录 · 点击下载并配置", style = MaterialTheme.typography.titleMedium)
             ExampleCatalog.configurable.forEach { example ->
                 ElevatedCard(Modifier.fillMaxWidth()) {
-                    SettingRow(example.name, "${example.sizeBytes / 1024 / 1024} MB · 下载后离线 CPU 推理，图片模型可在相机页叠加", {
-                        if (!busy) install { ExampleDownload.install(context, example) }
+                    SettingRow(example.name, "${example.sizeBytes / 1024 / 1024} MB · 下载后离线 CPU 推理，纯 IMAGE 模型可在 插件 → 自定义模型 中选择并叠加到相机", {
+                        if (!busy) install(example.url) { ExampleDownload.install(context, example) }
                     })
                 }
             }
@@ -211,12 +238,19 @@ private fun ConfiguredModelScreen(model: ConfiguredModel, onBack: () -> Unit, on
                 val active = graph.signatures.firstOrNull { it.key == parsed?.getOrNull()?.signature } ?: graph.signatures.first()
                 SelectionContainer {
                     Text(buildString {
+                        appendLine("可用签名：${graph.signatures.joinToString { it.key.ifEmpty { "主子图" } }}")
                         appendLine("签名：${active.key.ifEmpty { "主子图" }}")
-                        active.inputs.forEachIndexed { index, tensor -> appendLine("输入 $index ${tensor.name} ${tensor.typeName} ${tensor.shape}（动态签名 ${tensor.signature}，量化 ${tensor.scale}/${tensor.zeroPoint}）") }
-                        active.outputs.forEachIndexed { index, tensor -> appendLine("输出 $index ${tensor.name} ${tensor.typeName} ${tensor.shape}") }
+                        active.inputs.forEachIndexed { index, tensor -> appendLine("输入 $index ${tensor.name} ${tensor.typeName} 形状 ${tensor.shape} 签名 ${tensor.signature} 量化 scale=${tensor.scale} zero-point=${tensor.zeroPoint}") }
+                        active.outputs.forEachIndexed { index, tensor -> appendLine("输出 $index ${tensor.name} ${tensor.typeName} 形状 ${tensor.shape} 签名 ${tensor.signature}") }
                         if (graph.customOps.isNotEmpty()) appendLine("自定义算子：${graph.customOps.joinToString()}；如运行失败，请提供兼容运行时或重新导出。")
                     }, style = MaterialTheme.typography.bodySmall)
                 }
+                Text(
+                    "以上名称、形状/动态签名、dtype、量化与签名读自模型文件，是可证信息。" +
+                        "配置里的归一化 mean/std、框含义/render、labels、tokenizer 与采样率是推断或待配置，请按模型说明确认。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
                 TextButton(enabled = !busy, onClick = { showSignatures = true }) { Text("选择签名并生成配置") }
                 if (showSignatures) OptionDialog(
                     title = "签名（选择后重建当前配置）", options = graph.signatures, selected = active,
@@ -225,7 +259,9 @@ private fun ConfiguredModelScreen(model: ConfiguredModel, onBack: () -> Unit, on
                     }, onDismiss = { showSignatures = false },
                 )
             }
-            Text("UTF-8 properties 配置：IMAGE 按配置尺寸缩放，mean/std 控制 (像素−mean)/std，量化参数取自模型；NUMBERS 单值填充或逗号分隔；TEXT 每行一个字符串；AUDIO 读取 PCM16 WAV；BINARY 为原始 little-endian 张量。", style = MaterialTheme.typography.bodySmall)
+            Text("UTF-8 properties 配置：IMAGE 按配置尺寸缩放，mean/std 控制 (像素−mean)/std，量化参数取自模型；NUMBERS 单值填充或逗号分隔；TEXT 每行一个字符串；AUDIO 读取 PCM16 WAV；BINARY 为原始 little-endian 张量。" +
+                "自动生成的 mean/std、render/输出含义、labels、tokenizer 与 sampleRate 仅为推断或待配置，必须按模型说明核对。", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             OutlinedTextField(
                 value = text, onValueChange = { if (it.length <= MAX_CONFIG_BYTES) { text = it; result = null } },
                 enabled = !busy, label = { Text("模型配置") }, modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp, max = 420.dp),

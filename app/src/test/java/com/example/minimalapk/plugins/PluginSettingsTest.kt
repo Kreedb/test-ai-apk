@@ -70,6 +70,25 @@ class PluginSettingsTest {
     }
 
     @Test
+    fun configuredModelSelectionKeepsItsStablePreferenceKey() {
+        val preferences = MemoryPreferences()
+        PluginSettingsStore(preferences).use { store ->
+            assertEquals(
+                "",
+                store.settings.value.getValue(PluginIds.CONFIGURED_MODEL).config[CONFIGURED_MODEL_ID_KEY],
+            )
+            store.configure(PluginIds.CONFIGURED_MODEL, mapOf(CONFIGURED_MODEL_ID_KEY to "model-1"))
+            assertEquals("model-1", preferences.values["plugin.configured_model.config.model_id"])
+            assertEquals(
+                "model-1",
+                store.settings.value.getValue(PluginIds.CONFIGURED_MODEL).config[CONFIGURED_MODEL_ID_KEY],
+            )
+            // Choosing a model must not silently enable the camera consumer.
+            assertFalse(store.settings.value.getValue(PluginIds.CONFIGURED_MODEL).enabled)
+        }
+    }
+
+    @Test
     fun malformedStoredValuesFallBackWithoutLosingValidConfiguration() {
         val restored = restorePluginSettings(mapOf(
             "plugin.pose_enhancement.enabled" to "wrong type",

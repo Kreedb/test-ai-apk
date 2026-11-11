@@ -9,6 +9,7 @@ import com.example.minimalapk.models.ModelConfig
 import com.example.minimalapk.models.OutputRender
 import com.example.minimalapk.models.sha256
 import com.example.minimalapk.models.writeAtomically
+import com.example.minimalapk.pose.GitHubMirrorPreference
 import com.example.minimalapk.pose.ModelDownload
 import com.example.minimalapk.pose.readCapped
 import java.io.File
@@ -85,14 +86,17 @@ internal object ExampleDownload {
         val target = ExampleCatalog.file(context, model)
         if (target.length() == model.sizeBytes && target.readBytes().sha256() == model.sha256) return target
         AppLog.i(TAG, "开始下载 ${model.name}（${model.sizeBytes / 1024 / 1024} MB）")
-        val bytes = ModelDownload.fetch(model.url)
-        require(bytes.size.toLong() == model.sizeBytes) {
-            "下载大小不符：期望 ${model.sizeBytes} 字节，实际 ${bytes.size} 字节"
-        }
-        require(bytes.sha256() == model.sha256) { "模型 SHA-256 不符，请重新下载" }
+        val bytes = ModelDownload.fetch(model.url, GitHubMirrorPreference.load(context))
+        ModelDownload.validateDownloaded(bytes, model.sizeBytes, model.sha256)
         target.writeAtomically(bytes)
         AppLog.i(TAG, "已下载 ${model.name}")
         return target
+    }
+
+    /** Reads the label file embedded after the TFLite buffer by the metadata packer. */
+    fun labels(file: File): List<String> = ZipFile(file).use { zip ->
+        val entry = zip.entries().asSequence().firstOrNull { it.name.endsWith(".txt") } ?: return emptyList()
+        zip.getInputStream(entry).use { it.readCapped(1024 * 1024) }.toString(Charsets.UTF_8).trimEnd().lines()
     }
 
     @Synchronized
@@ -105,10 +109,7 @@ internal object ExampleDownload {
             val description = ConfiguredModelStore.describe(model)
             val inferred = ModelConfig.infer(description.signatures.first())
             val labels = if (example in listOf(ExampleCatalog.classification, ExampleCatalog.detection, ExampleCatalog.audio)) {
-                ZipFile(file).use { zip ->
-                    val entry = zip.entries().asSequence().first { it.name.endsWith(".txt") }
-                    zip.getInputStream(entry).use { it.readCapped(1024 * 1024) }.toString(Charsets.UTF_8).trimEnd().lines()
-                }
+                labels(file)
             } else emptyList()
             val config = inferred.copy(
                 inputs = inferred.inputs.map { input -> when (example) {

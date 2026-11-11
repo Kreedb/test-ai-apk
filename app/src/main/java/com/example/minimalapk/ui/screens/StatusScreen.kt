@@ -17,7 +17,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -42,35 +41,27 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.minimalapk.BuildConfig
 import com.example.minimalapk.R
-import com.example.minimalapk.pose.DeviceUsage
-import com.example.minimalapk.pose.DeviceUsageSampler
 import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.PoseAnalyzer
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StatusScreen() {
-    val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
-    var usage by remember { mutableStateOf(DeviceUsage()) }
     var systemInfo by remember { mutableStateOf<SystemInfo?>(null) }
-    var provider by remember { mutableStateOf(PoseAnalyzer.lastExecutionProvider) }
+    // Static last-loaded backend only: the home screen does not start usage monitoring.
+    val provider = PoseAnalyzer.lastExecutionProvider
     val enabledModels = remember {
         ModelStore.load(context).filter { it.enabled }.joinToString("、") { it.name }
             .ifEmpty { "未启用（仅预览）" }
@@ -78,19 +69,6 @@ fun StatusScreen() {
 
     LaunchedEffect(Unit) {
         systemInfo = withContext(Dispatchers.IO) { loadSystemInfo() }
-    }
-
-    LaunchedEffect(lifecycleOwner) {
-        val sampler = DeviceUsageSampler()
-        while (isActive) {
-            provider = PoseAnalyzer.lastExecutionProvider
-            if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                usage = withContext(Dispatchers.IO) { sampler.sample() }
-            } else {
-                sampler.reset()
-            }
-            delay(1_000L)
-        }
     }
 
     Scaffold(
@@ -117,16 +95,15 @@ fun StatusScreen() {
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(13.dp),
         ) {
-            StatusCard(provider = provider, usage = usage)
+            StatusCard(provider = provider)
             systemInfo?.let { InfoCard(systemInfo = it, provider = provider, models = enabledModels) }
-            SupportLinks()
             Spacer(Modifier.height(4.dp))
         }
     }
 }
 
 @Composable
-private fun StatusCard(provider: String?, usage: DeviceUsage) {
+private fun StatusCard(provider: String?) {
     val active = provider != null
     val tag = when {
         provider == null -> "READY"
@@ -154,15 +131,7 @@ private fun StatusCard(provider: String?, usage: DeviceUsage) {
                 )
             },
             supportingContent = {
-                Text(
-                    text = buildString {
-                        append(provider ?: "未启动 · 自动选择 LiteRT（NPU/GPU/CPU）")
-                        append(" · 本应用 CPU ")
-                        append(formatPercent(usage.cpuPercent))
-                        append(" · 系统 GPU ")
-                        append(formatPercent(usage.gpuPercent))
-                    },
-                )
+                Text(text = provider ?: "未启动 · 自动选择 LiteRT（NPU/GPU/CPU）")
             },
             trailingContent = { StatusTag(label = tag) },
             colors = ListItemDefaults.colors(
@@ -241,22 +210,6 @@ private fun InfoCard(systemInfo: SystemInfo, provider: String?, models: String) 
             ),
         )
     }
-}
-
-@Composable
-private fun SupportLinks() {
-    val uriHandler = LocalUriHandler.current
-    InfoGroup(
-        listOf(
-            InfoRow(
-                label = "项目主页",
-                value = "在 GitHub 查看源码与更新",
-                onClick = { runCatching { uriHandler.openUri(REPO_URL) } },
-            ) {
-                Icon(Icons.Filled.Favorite, contentDescription = null)
-            },
-        ),
-    )
 }
 
 private class InfoRow(

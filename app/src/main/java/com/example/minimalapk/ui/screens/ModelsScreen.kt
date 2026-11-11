@@ -46,6 +46,8 @@ import androidx.compose.ui.unit.dp
 import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.models.ConfiguredModelStore
 import com.example.minimalapk.pose.BoxFormat
+import com.example.minimalapk.pose.GitHubMirrorMode
+import com.example.minimalapk.pose.GitHubMirrorPreference
 import com.example.minimalapk.pose.ModelCatalog
 import com.example.minimalapk.pose.ModelDownload
 import com.example.minimalapk.pose.ModelSpec
@@ -53,6 +55,8 @@ import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.OutputLayout
 import com.example.minimalapk.pose.PoseModelImport
 import com.example.minimalapk.pose.RemoteModel
+import com.example.minimalapk.pose.TfliteGraph
+import com.example.minimalapk.pose.knownSummary
 import com.example.minimalapk.pose.readCapped
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -64,14 +68,18 @@ internal fun ModelsScreen(
     specs: List<ModelSpec>,
     onSpecsChange: (List<ModelSpec>) -> Unit,
     onBack: () -> Unit,
+    title: String = "模型",
+    header: (@Composable () -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val mirrorPreference = remember { GitHubMirrorPreference.load(context) }
     var status by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<ModelSpec?>(null) }
     var importing by remember { mutableStateOf(false) }
     var showDownload by remember { mutableStateOf(false) }
     var downloadError by remember { mutableStateOf<String?>(null) }
+    var lastAttempt by remember { mutableStateOf<RemoteModel?>(null) }
     var showWorkbench by remember { mutableStateOf(false) }
     // Imports run for seconds; use the latest list so a toggle made meanwhile is not discarded.
     val currentSpecs by rememberUpdatedState(specs)
@@ -110,13 +118,15 @@ internal fun ModelsScreen(
         }
     }
 
-    fun download(model: RemoteModel) {
+    fun download(model: RemoteModel, preference: GitHubMirrorPreference) {
         importing = true
         downloadError = null
+        lastAttempt = model
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val bytes = ModelDownload.fetch(model.url)
+                    val bytes = ModelDownload.fetch(model.url, preference)
+                    ModelDownload.validateDownloaded(bytes, model.sizeBytes, model.sha256)
                     val (spec, message) = installOrKeepModel(context, model.name, bytes)
                     // The catalog knows the box channel order, which the tensor shape cannot reveal.
                     spec?.copy(boxFormat = model.boxFormat ?: spec.boxFormat) to message
@@ -134,12 +144,13 @@ internal fun ModelsScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        DetailTopBar(title = "模型", onBack = onBack)
+        DetailTopBar(title = title, onBack = onBack)
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            header?.let { pluginHeader -> item { pluginHeader() } }
             item {
                 Text(
                     text = "同帧串行：每帧按顺序运行启用的模型，最多同时启用 " +
@@ -217,7 +228,12 @@ internal fun ModelsScreen(
         ModelDownloadDialog(
             downloading = importing,
             error = downloadError,
-            onDownload = { model -> download(model) },
+            mirror = mirrorPreference,
+            failedModel = lastAttempt.takeIf { downloadError != null },
+            onDownload = { model -> download(model, mirrorPreference) },
+            onRetryDirect = { model ->
+                download(model, GitHubMirrorPreference(mode = GitHubMirrorMode.DIRECT))
+            },
             onDismiss = { if (!importing) showDownload = false },
         )
     }
@@ -281,7 +297,10 @@ private fun ModelCard(spec: ModelSpec, onToggle: (Boolean) -> Unit, onClick: () 
 private fun ModelDownloadDialog(
     downloading: Boolean,
     error: String?,
+    mirror: GitHubMirrorPreference,
+    failedModel: RemoteModel?,
     onDownload: (RemoteModel) -> Unit,
+    onRetryDirect: (RemoteModel) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var url by remember { mutableStateOf("") }
@@ -328,12 +347,30 @@ private fun ModelDownloadDialog(
                     enabled = !downloading,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Text(
+                    text = "下载源：${mirror.summary}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 error?.let {
                     Text(
                         text = "下载失败：$it",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
+                    failedModel?.let { model ->
+                        Text(
+                            text = "原始地址：${model.url}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (failedModel != null && !mirror.isDirect) {
+                        TextButton(
+                            enabled = !downloading,
+                            onClick = { onRetryDirect(failedModel) },
+                        ) { Text("直连重试") }
+                    }
                 }
                 if (downloading) {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -393,7 +430,8 @@ private fun ModelEditDialog(
             Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (spec.imported) {
                     Text(
-                        text = "模型配置：自动识别有误或框/点错位时，按模型的实际张量形状修改；" +
+                        text = "模型配置：张量名称、形状、dtype、量化与签名来自模型文件；" +
+                            "anchor、关键点数与输出布局按形状推断，框格式无法从形状判断，均可在下方修正。" +
                             "输入尺寸由静态输入形状决定，不在此处修改",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -401,19 +439,19 @@ private fun ModelEditDialog(
                     OutlinedTextField(
                         value = anchors,
                         onValueChange = { anchors = it.filter(Char::isDigit).take(7) },
-                        label = { Text("输出 anchor 数") },
+                        label = { Text("输出 anchor 数（推断）") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     )
                     OutlinedTextField(
                         value = keypoints,
                         onValueChange = { keypoints = it.filter(Char::isDigit).take(3) },
-                        label = { Text("关键点数（输出通道 = 5 + 3K）") },
+                        label = { Text("关键点数（推断，输出通道 = 5 + 3K）") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     )
                     Text(
-                        text = "输出布局",
+                        text = "输出布局（推断，可修正）",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -449,7 +487,7 @@ private fun ModelEditDialog(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
                 Text(
-                    text = "检测框格式：同一模型若框位置/大小明显错误，切换为另一种格式",
+                    text = "检测框格式（推断：张量形状无法判断）：同一模型若框位置/大小明显错误，切换为另一种格式",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -515,12 +553,14 @@ private fun installModel(
     } else {
         "，shape signature 已全部为静态（GPU delegate 可用）"
     }
+    val known = TfliteGraph(prepared.bytes).describe().knownSummary()
     val base = "已导入 ${spec.name}：输入 ${spec.inputSize}，" +
-        "${spec.anchors} anchors，${spec.keypoints} 关键点$patched"
+        "${spec.anchors} anchors，${spec.keypoints} 关键点$patched。" +
+        "文件信息：$known。anchor/关键点/输出布局为推断，框格式无法从形状判断，请按模型说明确认。"
     return if (prepared.warnings.isEmpty()) {
         spec to base
     } else {
-        spec to base + "。注意：" + prepared.warnings.joinToString("；")
+        spec to base + "注意：" + prepared.warnings.joinToString("；")
     }
 }
 
@@ -529,8 +569,10 @@ private fun installOrKeepModel(context: Context, name: String?, bytes: ByteArray
         installModel(context, name, bytes)
     } catch (error: IllegalArgumentException) {
         val model = ConfiguredModelStore.install(ConfiguredModelStore.directory(context), name, bytes)
-        null to "已保存 ${model.name} 到模型工作台。姿态管线不适配：${error.message}。" +
-            "打开“模型工作台与配置文件”查看实际张量、修改输入/输出配置并运行，无需丢弃模型。"
+        val known = ConfiguredModelStore.describe(model).knownSummary()
+        null to "已保存 ${model.name} 到模型工作台，原始模型与可编辑配置均已保留。文件信息：$known。" +
+            "姿态管线不适配：${error.message}。打开“模型工作台与配置文件”修改输入/输出配置并运行；" +
+            "归一化 mean/std、框含义、labels、tokenizer、采样率属推断或待配置，需按模型说明确认。"
     }
 }
 

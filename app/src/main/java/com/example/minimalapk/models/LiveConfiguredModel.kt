@@ -13,14 +13,17 @@ internal class LiveConfiguredModel(
     model: ConfiguredModel,
     config: ModelConfig,
     graph: GraphSignature,
+    /** Runtime score threshold for MoveNet/BOXES/SEGMENTATION renders; never rewrites the stored config. */
+    thresholdOverride: Float? = null,
 ) : AutoCloseable {
-    private val config: ModelConfig
+    private val config: ModelConfig =
+        if (thresholdOverride == null) config
+        else config.copy(outputs = config.outputs.map { it.copy(threshold = thresholdOverride) })
     private val graph: GraphSignature
     private val interpreter: Interpreter
 
     init {
-        cameraModelProblem(config)?.let { error(it) }
-        this.config = config
+        cameraModelProblem(this.config)?.let { error(it) }
         this.graph = graph
         val opened = Interpreter(model.file, Interpreter.Options().setNumThreads(2))
         try {
@@ -57,4 +60,4 @@ internal class LiveConfiguredModel(
 /** Returns a user-facing reason when a model cannot take a camera frame, else null. */
 internal fun cameraModelProblem(config: ModelConfig): String? =
     if (config.inputs.all { it.source == InputSource.IMAGE }) null
-    else "示例模型叠加只支持 IMAGE 输入的模型；音频、文本或数值模型请在 示例 → 模型工作台 中运行"
+    else "相机叠加只支持 IMAGE 输入；音频、文本或数值模型请在 插件 → 自定义模型 → 模型工作台 中运行"

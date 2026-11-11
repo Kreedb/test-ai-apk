@@ -71,11 +71,6 @@ internal class AsyncModelSlot<K : Any, R : AutoCloseable>(
         }
     }
 
-    /** True while [key] is both desired and loaded, so a later session can reuse it. */
-    fun isReady(key: K): Boolean = synchronized(lock) {
-        !closed && model != null && desired == key && loadedKey == key && loadedRevision == revision
-    }
-
     fun <T> runIfReady(operation: (K, R) -> T): T? {
         val task = synchronized(lock) {
             val current = model ?: return null

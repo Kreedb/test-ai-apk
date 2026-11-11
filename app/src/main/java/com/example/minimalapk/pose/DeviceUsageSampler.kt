@@ -4,33 +4,86 @@ import android.os.Process
 import java.io.File
 import java.util.Locale
 
-data class DeviceUsage(
+internal data class DeviceUsage(
     val cpuPercent: Float? = null,
     val gpuPercent: Float? = null,
     val npuPercent: Float? = null,
-)
+    val gpuSource: String? = null,
+    val npuResults: List<NpuProbeResult> = emptyList(),
+) {
+    /** First real value wins; a stale value is kept only when no fresh scheme succeeded. */
+    val npu: NpuProbeResult?
+        get() = npuResults.firstOrNull { it.state == NpuProbeState.OK }
+            ?: npuResults.firstOrNull { it.state == NpuProbeState.STALE }
+            ?: npuResults.firstOrNull { it.state == NpuProbeState.PERMISSION_DENIED }
+            ?: npuResults.firstOrNull { it.state == NpuProbeState.PARSE_ERROR }
+            ?: npuResults.firstOrNull { it.state == NpuProbeState.UNSUPPORTED }
+            ?: npuResults.firstOrNull()
+}
+
+/** Sampling seam so the monitor plugin can be tested without touching Android sysfs. */
+internal interface DeviceUsageSource {
+    fun sample(source: NpuSource, nowNanos: Long): DeviceUsage
+    fun reset()
+}
 
 /**
  * Best-effort device utilization sampler.
  *
- * Android does not expose system-wide CPU/GPU/NPU utilization to normal apps,
- * so CPU is the current process's share of the device's total CPU capacity
- * (readable without root) and GPU/NPU are probed through common vendor sysfs
- * nodes, staying `null` when the device does not expose them.
+ * Android does not expose system-wide CPU/GPU/NPU utilization to normal apps.
+ * CPU is this process's share of the device's total CPU capacity (readable without
+ * root). GPU/NPU are bounded reads of documented vendor sysfs nodes; every NPU
+ * source reports its own path, unit and failure state instead of a fake 0%.
  */
-class DeviceUsageSampler {
+internal class DeviceUsageSampler internal constructor(
+    private val files: ProbeFileSystem = RealProbeFileSystem,
+) : DeviceUsageSource {
+    private val npuReader = NpuProbeReader(files)
+    private val lastGood = mutableMapOf<String, NpuProbeResult>()
     private var hasCpuBaseline = false
     private var lastCpuMillis = 0L
     private var lastWallMillis = 0L
 
-    fun sample(): DeviceUsage = DeviceUsage(
-        cpuPercent = readCpuPercent(),
-        gpuPercent = readGpuPercent(),
-        npuPercent = readNpuPercent(),
-    )
+    fun sample(): DeviceUsage = sample(NpuSource.AUTO, System.nanoTime())
 
-    fun reset() {
+    override fun sample(source: NpuSource, nowNanos: Long): DeviceUsage {
+        val gpu = readGpu()
+        val npuResults = npuReader.probe(source, nowNanos).map { staleOr(it, nowNanos) }
+        val primary = npuResults.firstOrNull {
+            it.state == NpuProbeState.OK || it.state == NpuProbeState.STALE
+        }
+        return DeviceUsage(
+            cpuPercent = readCpuPercent(),
+            gpuPercent = gpu?.value,
+            npuPercent = primary?.value,
+            gpuSource = gpu?.sourcePath,
+            npuResults = npuResults,
+        )
+    }
+
+    override fun reset() {
         hasCpuBaseline = false
+        lastGood.clear()
+    }
+
+    private fun staleOr(result: NpuProbeResult, nowNanos: Long): NpuProbeResult {
+        val key = "${result.scheme.id}|${result.sourcePath}"
+        if (result.state == NpuProbeState.OK) {
+            lastGood[key] = result
+            return result
+        }
+        val cached = lastGood[key] ?: return result
+        val age = nowNanos - cached.timestampNanos
+        if (age in 0..STALE_NANOS) {
+            return cached.copy(
+                state = NpuProbeState.STALE,
+                sourcePath = result.sourcePath ?: cached.sourcePath,
+                rawExcerpt = result.rawExcerpt ?: cached.rawExcerpt,
+                detail = "当前读取失败（${result.state.label}），显示 ${age / 1_000_000L} ms 前上次成功值",
+            )
+        }
+        lastGood.remove(key)
+        return result
     }
 
     private fun readCpuPercent(): Float? {
@@ -49,47 +102,46 @@ class DeviceUsageSampler {
         return cpuPercent(cpuDelta, wallDelta)
     }
 
-    private fun readGpuPercent(): Float? =
+    private fun readGpu(): UtilizationReading? =
         readNodes(GPU_NODES)
             ?: readDirectoryLoad(DEV_FREQ, GPU_KEYWORDS, PERCENT_LOAD_FILES)
             ?: readDirectoryLoad(GPU_CLASS, emptyList(), PERCENT_LOAD_FILES)
 
-    private fun readNpuPercent(): Float? =
-        readNodes(NPU_NODES)
-            ?: readDirectoryLoad(DEV_FREQ, NPU_KEYWORDS, PERCENT_LOAD_FILES)
-            ?: readDirectoryLoad(NPU_CLASS, emptyList(), PERCENT_LOAD_FILES)
-
-    private fun readNodes(nodes: List<UtilizationNode>): Float? {
+    private fun readNodes(nodes: List<UtilizationNode>): UtilizationReading? {
         for (node in nodes) {
-            val percent = readNode(node)
-            if (percent != null) return percent
+            val reading = readNode(node)
+            if (reading != null) return reading
         }
         return null
     }
 
-    private fun readNode(node: UtilizationNode): Float? =
+    private fun readNode(node: UtilizationNode): UtilizationReading? =
         runCatching { File(node.path).takeIf(File::canRead)?.readText() }
             .getOrNull()
             ?.let(node.parse)
+            ?.let { UtilizationReading(it, node.path) }
 
     private fun readDirectoryLoad(
         directoryPath: String,
         keywords: List<String>,
         fileNames: List<String>,
-    ): Float? {
+    ): UtilizationReading? {
         val directories = runCatching { File(directoryPath).listFiles() }.getOrNull() ?: return null
-        for (directory in directories) {
+        for (directory in directories.take(64)) {
             if (keywords.isNotEmpty()) {
                 val name = directory.name.lowercase(Locale.US)
                 if (keywords.none(name::contains)) continue
             }
             for (fileName in fileNames) {
-                val percent = readNode(UtilizationNode(File(directory, fileName).path, ::parsePercent))
+                val path = File(directory, fileName).path
+                val percent = readNode(UtilizationNode(path, ::parsePercent))
                 if (percent != null) return percent
             }
         }
         return null
     }
+
+    private data class UtilizationReading(val value: Float, val sourcePath: String)
 
     private data class UtilizationNode(
         val path: String,
@@ -99,11 +151,10 @@ class DeviceUsageSampler {
     private companion object {
         const val DEV_FREQ = "/sys/class/devfreq"
         const val GPU_CLASS = "/sys/class/gpu"
-        const val NPU_CLASS = "/sys/class/npu"
+        const val STALE_NANOS = 5_000_000_000L
 
         val PERCENT_LOAD_FILES = listOf("gpu_busy_percentage", "load", "busy", "utilization")
         val GPU_KEYWORDS = listOf("gpu", "kgsl", "mali", "adreno")
-        val NPU_KEYWORDS = listOf("npu", "nna")
 
         val GPU_NODES = listOf(
             UtilizationNode("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage", ::parsePercent),
@@ -111,11 +162,6 @@ class DeviceUsageSampler {
             UtilizationNode("/sys/class/kgsl/kgsl-3d0/devfreq/gpu_load", ::parsePercent),
             UtilizationNode("/sys/kernel/gpu/gpu_busy", ::parsePercent),
             UtilizationNode("/sys/class/misc/mali0/device/utilisation", ::parsePercent),
-        )
-
-        val NPU_NODES = listOf(
-            UtilizationNode("/sys/class/misc/npu/device/load", ::parsePercent),
-            UtilizationNode("/sys/devices/platform/npu/load", ::parsePercent),
         )
     }
 }

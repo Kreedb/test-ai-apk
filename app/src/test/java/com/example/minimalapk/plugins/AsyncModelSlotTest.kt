@@ -2,7 +2,6 @@ package com.example.minimalapk.plugins
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -120,29 +119,6 @@ class AsyncModelSlotTest {
         assertEquals(0, readyCount.get())
         assertEquals(1, models.single().closes.get())
         assertEquals(models.single().createdOn, models.single().closedOn)
-    }
-
-    @Test
-    fun sameKeyStaysReadyAcrossSessionsWithoutReopening() {
-        val ready = CountDownLatch(1)
-        val attempts = AtomicInteger()
-        val slot = AsyncModelSlot<String, Model>("slot-reuse", open = { key ->
-            attempts.incrementAndGet()
-            Model(key.length)
-        }, ready = { _, _ -> ready.countDown() })
-        try {
-            slot.set("config")
-            assertTrue(ready.await(5, TimeUnit.SECONDS))
-            assertTrue(slot.isReady("config"))
-            assertFalse(slot.isReady("other"))
-            // A new session reusing the same config must not reopen the model.
-            slot.set("config")
-            assertEquals(1, attempts.get())
-            assertNotNull(slot.runIfReady { key, _ -> key })
-        } finally {
-            slot.close()
-        }
-        assertFalse(slot.isReady("config"))
     }
 
     @Test

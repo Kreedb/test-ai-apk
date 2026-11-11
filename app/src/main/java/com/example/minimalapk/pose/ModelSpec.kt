@@ -57,7 +57,7 @@ data class ModelSpec(
 }
 
 /**
- * The model list shown in 设置 → 模型. Bundled models live in code; the store only carries the
+ * The model list shown in 插件 → 自定义模型. Bundled models live in code; the store only carries the
  * user's options, so a changed asset path or shape in a later version wins over stale settings.
  */
 object ModelStore {

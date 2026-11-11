@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -27,17 +28,30 @@ import androidx.compose.ui.unit.dp
 import com.example.minimalapk.BuildConfig
 import com.example.minimalapk.R
 import com.example.minimalapk.log.AppLog
-import com.example.minimalapk.pose.ModelStore
+import com.example.minimalapk.pose.GitHubMirrorPreference
 import com.example.minimalapk.pose.PoseBackendPreference
 import com.example.minimalapk.ui.theme.ThemeSettings
 
-private enum class SettingsPage {
+internal enum class SettingsPage {
     ROOT,
-    MODELS,
+    MIRROR,
     THEME,
     ABOUT,
     LOG,
 }
+
+/** Older builds could restore the removed MODELS page; never reopen a deleted destination. */
+internal fun settingsPageForRestore(saved: Any?): SettingsPage = when (saved) {
+    is SettingsPage -> saved
+    is Enum<*> -> SettingsPage.entries.firstOrNull { it.name == saved.name } ?: SettingsPage.ROOT
+    is String -> SettingsPage.entries.firstOrNull { it.name == saved } ?: SettingsPage.ROOT
+    else -> SettingsPage.ROOT
+}
+
+private val SettingsPageSaver = Saver<SettingsPage, Any>(
+    save = { it.name },
+    restore = { settingsPageForRestore(it) },
+)
 
 @Composable
 fun ConfigScreen(
@@ -45,29 +59,30 @@ fun ConfigScreen(
     onThemeSettingsChange: (ThemeSettings) -> Unit,
 ) {
     val context = LocalContext.current
-    var page by rememberSaveable { mutableStateOf(SettingsPage.ROOT) }
+    var page by rememberSaveable(stateSaver = SettingsPageSaver) { mutableStateOf(SettingsPage.ROOT) }
     var backendPreference by remember { mutableStateOf(PoseBackendPreference.load(context)) }
-    var specs by remember { mutableStateOf(ModelStore.load(context)) }
+    var mirrorPreference by remember { mutableStateOf(GitHubMirrorPreference.load(context)) }
     var showBackendDialog by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = page != SettingsPage.ROOT) { page = SettingsPage.ROOT }
 
     when (page) {
         SettingsPage.ROOT -> SettingsList(
             backendPreference = backendPreference,
-            enabledModels = specs.count { it.enabled },
-            modelCount = specs.size,
+            mirrorPreference = mirrorPreference,
             onOpenBackend = { showBackendDialog = true },
-            onOpenModels = { page = SettingsPage.MODELS },
+            onOpenMirror = { page = SettingsPage.MIRROR },
             onOpenTheme = { page = SettingsPage.THEME },
             onOpenLogs = { page = SettingsPage.LOG },
             onOpenAbout = { page = SettingsPage.ABOUT },
         )
 
-        SettingsPage.MODELS -> ModelsScreen(
-            specs = specs,
-            onSpecsChange = { updated ->
-                specs = updated
-                ModelStore.save(context, updated)
+        SettingsPage.MIRROR -> GitHubMirrorSettingsScreen(
+            preference = mirrorPreference,
+            onSave = { updated ->
+                mirrorPreference = updated
+                GitHubMirrorPreference.save(context, updated)
+                AppLog.i("Settings", "GitHub 镜像源切换为 ${updated.summary}")
+                page = SettingsPage.ROOT
             },
             onBack = { page = SettingsPage.ROOT },
         )
@@ -103,10 +118,9 @@ fun ConfigScreen(
 @Composable
 private fun SettingsList(
     backendPreference: PoseBackendPreference,
-    enabledModels: Int,
-    modelCount: Int,
+    mirrorPreference: GitHubMirrorPreference,
     onOpenBackend: () -> Unit,
-    onOpenModels: () -> Unit,
+    onOpenMirror: () -> Unit,
     onOpenTheme: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenAbout: () -> Unit,
@@ -140,13 +154,13 @@ private fun SettingsList(
                 SettingRow(
                     icon = {
                         Icon(
-                            painter = painterResource(R.drawable.ic_memory),
+                            painter = painterResource(R.drawable.ic_security),
                             contentDescription = null,
                         )
                     },
-                    title = "模型",
-                    subtitle = "$modelCount 个模型 · $enabledModels 个启用 · 保存后自动更新相机",
-                    onClick = onOpenModels,
+                    title = "GitHub 镜像源",
+                    subtitle = "${mirrorPreference.summary} · 仅影响 GitHub 模型下载",
+                    onClick = onOpenMirror,
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                 SettingRow(

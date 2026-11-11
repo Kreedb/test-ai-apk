@@ -12,7 +12,55 @@ internal object PluginIds {
     const val POSE_ENHANCEMENT = "pose_enhancement"
     const val CONFIGURED_MODEL = "configured_model"
     const val POSE_MODELS = "pose_models"
+    const val SYSTEM_MONITOR = "system_monitor"
+    const val SUPER_RESOLUTION = "super_resolution"
+    const val MOVENET_SCENE = "movenet_scene"
+    const val IMAGE_CLASSIFICATION_SCENE = "image_classification_scene"
+    const val OBJECT_DETECTION_SCENE = "object_detection_scene"
+    const val IMAGE_SEGMENTATION_SCENE = "image_segmentation_scene"
+    const val AUDIO_CLASSIFICATION = "audio_classification"
+    const val TTS = "tts"
+    const val PERSONALIZATION = "model_personalization"
 }
+
+/** Stable key inside `plugin.configured_model.config`; shared by the runner and its configuration UI. */
+internal const val CONFIGURED_MODEL_ID_KEY = "model_id"
+
+/** Minimum score for MoveNet keypoints, detection boxes and segmentation pixels. */
+internal const val SCENE_THRESHOLD_KEY = "threshold"
+internal const val AUDIO_TOP_K_KEY = "top_k"
+internal const val TTS_TEXT_KEY = "text"
+
+internal data class SceneThresholdSettings(val thresholdText: String = "0.3") {
+    val threshold: Float? get() = thresholdText.toFloatOrNull()?.takeIf { it in MIN_THRESHOLD..MAX_THRESHOLD }
+
+    fun toConfig(): Map<String, String> = mapOf(SCENE_THRESHOLD_KEY to thresholdText)
+
+    companion object {
+        const val MIN_THRESHOLD = 0.05f
+        const val MAX_THRESHOLD = 0.95f
+
+        fun from(settings: PluginSettings): SceneThresholdSettings =
+            SceneThresholdSettings(settings.config[SCENE_THRESHOLD_KEY] ?: "0.3")
+    }
+}
+
+internal data class AudioClassificationSettings(val topKText: String = "3") {
+    val topK: Int? get() = topKText.toIntOrNull()?.takeIf { it in MIN_TOP_K..MAX_TOP_K }
+
+    fun toConfig(): Map<String, String> = mapOf(AUDIO_TOP_K_KEY to topKText)
+
+    companion object {
+        const val MIN_TOP_K = 1
+        const val MAX_TOP_K = 5
+
+        fun from(settings: PluginSettings): AudioClassificationSettings =
+            AudioClassificationSettings(settings.config[AUDIO_TOP_K_KEY] ?: "3")
+    }
+}
+
+/** Bounded system-TTS input; the caller passes the engine's maximum for this device. */
+internal fun clampTtsText(text: String, maxChars: Int): String = text.take(maxChars.coerceAtLeast(0))
 
 internal data class PluginSettings(
     val enabled: Boolean = false,
@@ -43,9 +91,18 @@ internal data class PoseEnhancementSettings(
 }
 
 internal val pluginDefaults = mapOf(
-    // Preserve the previously visible enhancement. New model consumers remain opt-in.
+    // Preserve the previously visible enhancement and metrics. New model consumers remain opt-in.
     PluginIds.POSE_ENHANCEMENT to PluginSettings(true, PoseEnhancementSettings().toConfig()),
-    PluginIds.CONFIGURED_MODEL to PluginSettings(config = mapOf("model_id" to "")),
+    PluginIds.CONFIGURED_MODEL to PluginSettings(config = mapOf(CONFIGURED_MODEL_ID_KEY to "")),
+    PluginIds.SYSTEM_MONITOR to PluginSettings(true, SystemMonitorSettings().toConfig()),
+    PluginIds.SUPER_RESOLUTION to PluginSettings(config = SuperResolutionSettings().toConfig()),
+    PluginIds.MOVENET_SCENE to PluginSettings(config = SceneThresholdSettings().toConfig()),
+    PluginIds.IMAGE_CLASSIFICATION_SCENE to PluginSettings(),
+    PluginIds.OBJECT_DETECTION_SCENE to PluginSettings(config = SceneThresholdSettings().toConfig()),
+    PluginIds.IMAGE_SEGMENTATION_SCENE to PluginSettings(config = SceneThresholdSettings().toConfig()),
+    PluginIds.AUDIO_CLASSIFICATION to PluginSettings(config = AudioClassificationSettings().toConfig()),
+    PluginIds.TTS to PluginSettings(config = mapOf(TTS_TEXT_KEY to "你好，这是插件语音朗读。")),
+    PluginIds.PERSONALIZATION to PluginSettings(),
 )
 
 /** Small storage seam: tests exercise the same restore/update code without an Android runtime. */

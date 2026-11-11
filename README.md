@@ -4,15 +4,14 @@
 
 ## 功能
 
-底栏包含 5 个选项卡：
+底栏包含 4 个选项卡：
 
 | 选项卡 | 内容 |
 | --- | --- |
-| 主页 | 推理后端状态、CPU/GPU 占用与应用版本、CPU/GPU 型号、设备型号、系统版本与 ABI |
-| 相机 | 基于 CameraX 的后置摄像头实时预览，内置 YOLO-pose 模型做离线姿态测量与性能指标，可在设置中启用、导入与调参 |
-| 示例 | 模型工作台（姿态/分类/检测/分割/音频）、超分辨率、设备端训练、系统语音合成 |
-| 插件 | 统一卡片与独立总开关，点击卡片配置；姿态增强的身高/测量线设置持久保存 |
-| 设置 | 推理后端、模型（启用/导入/阈值/防抖）、主题设置与关于 |
+| 主页 | 上次加载的推理后端与应用版本、CPU/GPU 型号、设备型号、系统版本与 ABI（不启动占用监控） |
+| 相机 | 基于 CameraX 的后置摄像头实时预览，内置 YOLO-pose 模型做离线姿态测量与性能指标，自定义模型由插件选择与启用 |
+| 插件 | 统一卡片与独立总开关，点击卡片配置；姿态增强、自定义模型、系统监控、超分辨率、四个场景示例、声音识别、语音朗读与设备端学习各自独立启停 |
+| 设置 | 推理后端、GitHub 镜像源、主题设置与关于 |
 
 ## 项目结构
 
@@ -34,7 +33,7 @@ app/src/main/java/com/example/minimalapk/
         ├── Common.kt             # 共用组件
         ├── StatusScreen.kt
         ├── CameraScreen.kt
-        ├── ExamplesScreen.kt
+        ├── PersonalizationScreen.kt
         ├── ModelWorkbenchScreen.kt
         ├── PluginsScreen.kt
         ├── ConfigScreen.kt
@@ -51,14 +50,15 @@ app/src/main/java/com/example/minimalapk/
 | 模型 | 获取方式 | 输出框格式 |
 | --- | --- | --- |
 | YOLO26n-pose 640 | 内置 `app/src/main/assets/models/yolo26n_pose.tflite` | `xyxy` |
-| YOLO11n-pose 640 | 下载 `models/yolo11n_pose.tflite` | `cxcywh` |
+| YOLO11n-pose 640 | 下载固定提交地址（可选 GitHub 镜像） | `cxcywh` |
 
-模型共用同一份 `ModelSpec` 描述（输入尺寸、anchor 数、关键点数、框格式、输出布局、阈值、防抖）。YOLO11n-pose 由 `yolo11n-pose.onnx` 经 onnx2tf 转换而来，框通道是中心点+宽高，解码时换算成左上/右下；它放在仓库根目录的 `models/`，不参与 APK 打包，因此 APK 只包含主模型。
+模型共用同一份 `ModelSpec` 描述（输入尺寸、anchor 数、关键点数、框格式、输出布局、阈值、防抖）。YOLO11n-pose 由 `yolo11n-pose.onnx` 经 onnx2tf 转换而来，框通道是中心点+宽高，解码时换算成左上/右下；它不再放在仓库根目录的 `models/`，而是从固定提交 `e9f51fe286a7ea8863d40113e51dc5a4b9d49e88` 的 raw 地址按需下载，因此 APK 只包含主模型。固定大小 11,835,168 字节，SHA-256 为 `01b0d8c7e28369977c69d5c66a60c63301468a5a8ae24bafce942b61bab289c0`，下载后仍走同一套 TFLite 结构校验。
 
-- 设置 → 模型 里可以启用/停用模型、从本地导入或远程下载 tflite、修改检测置信度阈值、关键点阈值、防抖帧数、框格式与输出布局。同一时间最多启用 2 个模型；保存后相机订阅更新并在后台安全重载，零模型、加载期间或加载失败均保留基础预览。
+- 插件 → 自定义模型 里可以启用/停用模型、从本地导入或远程下载 tflite、修改检测置信度阈值、关键点阈值、防抖帧数、框格式与输出布局。插件卡片开关只启停相机侧的自定义模型消费者；打开卡片即可进入模型列表与工作台。同一时间最多启用 2 个姿态模型；保存后相机订阅更新并在后台安全重载，零模型、加载期间或加载失败均保留基础预览。
 - 多个启用模型按“同帧串行”运行：一次预处理后按顺序跑每个模型，帧率约等于各模型推理耗时之和；只有第一个模型驱动叠加层，其余模型在底部只显示置信度。所有模型都关闭时仍显示相机画面（只做旋转与 letterbox，不做推理）。
 - 本版本只做单人：每个模型只取置信度最高的一个检测。
 - 导入模型可以走系统文件选择器（SAF，不需要存储权限），也可以走“从远程下载模型”：内置目录（`ModelCatalog`）或自定义 `https` 地址，下载上限 64MB，下载后与本地导入使用同一套校验。远程下载需要 `INTERNET` 权限，日常推理仍然离线。
+- 设置 → GitHub 镜像源 可选官方直连（默认）、预置 `https://gh-proxy.org/` 或自定义 HTTPS 前缀，保存后所有模型下载立即使用。镜像只改写受支持的 GitHub raw 文件与 `releases/download` 地址；其它来源、伪装域名、带凭据/query/fragment 的地址以及已加过该前缀的地址保持原样。失败时界面显示原始地址与失败原因，并可“直连重试”；无论走镜像还是直连，大小、SHA-256 与 TFLite 结构校验都不会跳过。
 - 导入时会读取 TFLite 的输入/输出张量形状并自动填写模型配置：
   - 接受单输入单输出、float32、NHWC 正方形输入，以及 `5+3K` 姿态头；值优先 `[1, 5+3K, N]` 与锚点优先 `[1, N, 5+3K]` 都会自动识别。非 17 个关键点的模型也会导入，但骨骼与身体测量只按 COCO 17 点索引，缺失的点不标注、不参与测量。
   - 不符合相机姿态管线的模型（量化、NCHW、非正方形、多输入/输出、非姿态头、动态维度等）会保留到“模型工作台”，说明不适配原因，并生成可编辑配置。文件格式损坏、超出 64 MB 或存储失败会阻止导入。工作台不会把一般模型强行解释为姿态模型。
@@ -73,22 +73,38 @@ app/src/main/java/com/example/minimalapk/
 - 性能面板中的“加速器”会显示实际选中的后端（如 `LiteRT (NPU)`、`LiteRT (GPU)`、`LiteRT (GPU/GL)` 或 `LiteRT (CPU)`）。`LiteRT (GPU)`/`LiteRT (GPU/GL)` 表示 GPU 成功参与委托，未被 GPU 委托的算子仍由 CPU 执行。
 - 日志页会记录后端探测顺序、设备信息（SDK/ABI/SoC 厂商与型号）、启用的模型、NPU 门槛未通过的原因、NPU 环境与 JIT 编译耗时、LiteRT GPU 每次尝试的后端（`AUTOMATIC`/`OPENGL`）与环境可用加速器、各后端加载耗时/失败堆栈、导入时的签名改写数量，以及首帧每个模型的预处理/推理/后处理耗时，便于定位启动慢或回退问题。
 - 输入身高用于把像素换算成厘米：`cm/px = 身高 / 人体检测框高度`，再据此估算臂展、双眼间距、肩线/髋线倾斜与肩髋横向偏移。点击“插件 → 姿态增强”卡片配置身高与叠加线；独立总开关关闭后撤回测量线、人体信息和该插件说明，基础骨架与已启用模型列表不受影响。设置保存到 `app_settings`，重启恢复。
-- 相机页的“示例模型叠加”会列出“示例 → 模型工作台”中已下载或导入的模型，并在每个预览帧上运行；姿态、检测框、分割或图片输出直接叠加在摄像头画面上，分类结果写在底部。只支持所有输入均为 `IMAGE` 的模型，音频/文本/数值模型仍在工作台运行；叠加模型使用 CPU Interpreter，会降低帧率。
+- 插件 → 自定义模型 的配置页会列出已下载或导入的模型，并选择其中一个用于相机叠加；选中后由插件在每个预览帧上运行，姿态、检测框、分割或图片输出直接叠加在摄像头画面上，分类结果写在底部。只支持所有输入均为 `IMAGE` 的模型，音频/文本/数值模型仍在工作台运行；叠加模型使用 CPU Interpreter，会降低帧率。未选择、模型已删除或配置不可用时显示“未就绪”及原因。
+- 插件 → 动作观察/物品识别/场景检测/场景分割 分别固定使用 MoveNet、MobileNet、SSD MobileNet、DeepLab 示例模型；首次启用时在专用线程下载并安装到与工作台相同的 `configured_models` 缓存（不覆盖已有配置），之后复用缓存。动作观察输出 17 个关键点与平均置信度；物品识别只给出模型内置 ImageNet 标签的前 5 类，**不是通用视觉理解**；场景检测绘制同源检测框与模型内置标签；场景分割叠加半透明掩码，低于阈值（默认 0.3）的像素不显示。裁剪阈值只作用于相机输出，不改写工作台配置。停用、切页或后台会停止推理并清空输出。
+- 插件 → 声音识别 消费 #68 的共享麦克风 PCM（16 kHz 单声道），按 YAMNet 的约 1 秒窗口做声音/环境声分类并显示最新前几类及置信度；**不是语音识别或转写**，不自行打开麦克风、不把音频写入磁盘。窗口有界，推理慢时丢弃旧窗口；停用、切页、后台或改配置会清空缓冲并拒绝旧结果。工作台的 PCM16 WAV 按需路径继续保留。
+- 插件 → 语音朗读 复用系统 `TextToSpeech` 引擎（不是 LiteRT 模型、不需要 `RECORD_AUDIO`）；文本上限为系统 `getMaxSpeechInputLength()`，只在用户按下朗读时发声，不随相机帧重复、不自动播放。离开页面、切到后台、关闭弹层或停用插件都会停止朗读，避免与声音识别形成回环。
+- 插件 → 设备端学习 在弹层内用相册图片训练 4 类分类头，复用 `filesDir/examples/personalization-head.bin` 的权重与 Adam 状态；图片不会上传。启用后相机插件只读取该存档，用 MobileNetV2 `load` 签名提取特征并运行 4 类 softmax，发布最高类别与置信度；不会在相机路径重新训练或改写存档。没有存档时显示“未就绪：请先在插件中训练”，模型首次下载/加载失败在相机底部报告，不阻塞预览；停用、切页或后台停止推理并释放 Interpreter。
 - 使用条件会影响精度：需要全身入镜、正对镜头、双臂平举，且人物应尽量站直。单目 2D 关键点无法给出临床意义上的脊柱侧弯角度，界面结果仅供筛查参考，不能用于医学诊断。
-- 预览右上角显示性能指标：分析帧率、预处理/推理/分析耗时（取第一个启用模型），以及 CPU、GPU、NPU 利用率。Android 不向普通应用开放系统级占用：CPU 显示本进程占设备总 CPU 算力的比例（0–100%），GPU/NPU 会尝试读取常见厂商的 sysfs 节点，设备不暴露时显示 `N/A`。LiteRT 2.3.2 也没有读取 NPU 利用率的 API，`QualcommOptions.Profiling` 只把逐算子耗时写进 logcat，因此 NPU 无法通过 LiteRT 补上该指标。
-- 模型来自 Ultralytics，许可为 AGPL-3.0；许可全文与模型来源见 `app/src/main/assets/models/NOTICE.txt`、`models/NOTICE.txt` 与 `app/src/main/assets/models/LICENSE-AGPL-3.0.txt`。
+- 预览右上角的性能指标由“插件 → 系统监控”提供，可按开关隐藏帧率、耗时、后端、CPU、GPU、NPU，并配置 250–5000 ms 刷新间隔与 1–10 s FPS 窗口；关闭插件、切页或进入后台会停止采样并清空面板。指标含义严格分开：**帧率**只由相机帧时间戳计算（不是 `1000 / inferenceMs`）；**推理**是第一个启用模型的单次推理耗时；**分析耗时(全部)** 是所有启用模型预处理+推理+后处理之和。Android 不向普通应用开放系统级占用：**CPU(应用)** 是本进程占设备总 CPU 算力的比例（0–100%，不是整机 CPU），GPU/NPU 读取厂商 sysfs 并同时显示来源与单位。
+- NPU 来源必须逐项按真机确认，不可读时显示 `missing` / `permission_denied` / `unsupported` / `parse_error` / `stale`，不会写成 0%。LiteRT 2.3.2 没有读取 NPU 利用率的 API，`QualcommOptions.Profiling` 只把逐算子耗时写进 logcat；选中 NPU 后端也不代表 HTP 真正接管（可能回退 CPU）。当前方案：
+
+  | 方案 | 来源与语义 | 已知限制 |
+  | --- | --- | --- |
+  | 厂商负载节点 | `misc/npu/device/load`、`devices/platform/npu/load` 的完整百分比 | 只接受整文件百分比；文件缺失/不可读如实报错 |
+  | devfreq 设备发现 | 按 `npu`/`nna` 设备名发现，仅读 `load`/`npu_load` | `busy`、`total`、`trans_stat`、频率、地址都不是利用率 |
+  | Rockchip RKNPU | `/sys/kernel/debug/rknpu/load` 与 `/proc/rknpu/load`，解析 `NPU load: CoreN: x%` 并逐核报告 | `%2.d%%` 的零值可为空白加 `%`；rknpu devfreq 的 busy/total 是固定 1/1，不使用 |
+  | Samsung Exynos | NPU 设备的 `rq_load`，原值 0–10000 = 0.01%，显示为“NPU 请求队列忙碌率” | 是调度器请求队列忙碌率，不是硬件 MAC 利用率；`load` 受 `load_policy` 影响，`fps_load` 是执行时间/目标帧时间 |
+  | Qualcomm 诊断 | `/sys/kernel/debug/qcom_stats/cdsp`、`cdsp1` 可读性与 Accumulated Duration | 仅 DSP 睡眠统计（硬件 ticks），不是 NPU 利用率，不硬编码时钟换算 |
+  | busy/total 计数差分 | 未实现 | 未找到可证明会更新且对普通 App 导出的计数；Rockchip 固定 1/1 不能使用，因此明确返回 `unsupported` |
+
+  “测试全部”会输出机型、SoC、Android/API、应用版本和每方案状态/原文摘要，便于复制反馈；请在相机空闲与推理时各测一次。上述 sysfs/debugfs 路径目前只有 JVM 解析与状态测试，**均待真机测试**，不能把 fixture 单测当成 NPU 真机可用。
+- 模型来自 Ultralytics，许可为 AGPL-3.0；许可全文与模型来源见 `app/src/main/assets/models/NOTICE.txt` 与 `app/src/main/assets/models/LICENSE-AGPL-3.0.txt`。
 
 ## 插件宿主
 
-相机底部按插件汇总有限的文字、状态与错误；姿态增强复用基础姿态推理，次模型信息归属“姿态模型”，工作台模型归属“示例模型”。共享状态可观察，同 ID 配置保存也会安全重载模型。宿主提供帧/坐标、按下/释放/取消、会话/配置代次、生命周期和音频权限/PCM 事件类型；图层必须与显示图像同源，按压结束拒绝迟到的替换输出。
+相机底部按插件汇总有限的文字、状态与错误；姿态增强复用基础姿态推理，次模型信息归属“姿态模型”，工作台模型归属“自定义模型”。共享状态可观察，同 ID 配置保存也会安全重载模型。宿主提供帧/坐标、按下/释放/取消、会话/配置代次、生命周期和音频权限/PCM 事件类型；图层必须与显示图像同源，按压结束拒绝迟到的替换输出。
 
-公共接口、下游接入配方、资源所有权、替换仲裁、坐标核对与待执行真机步骤见 [插件宿主接入](docs/plugin-host.md)。音频实际采集、监控及其余示例入口迁移由后续任务接入，当前五个 tab 与模型工作台继续可用。
+公共接口、下游接入配方、资源所有权、替换仲裁、坐标核对与待执行真机步骤见 [插件宿主接入](docs/plugin-host.md)。系统监控、超分辨率、四个场景示例（动作观察/物品识别/场景检测/场景分割）、声音识别、语音朗读与设备端学习已作为插件消费者接入；麦克风 PCM 由 #68 的共享采集宿主统一提供。示例页已删除，底栏固定为四个 tab；模型工作台只保留“插件 → 自定义模型”入口。
 
-## 示例（TensorFlow Lite 例程）
+## 示例能力（TensorFlow Lite 例程）
 
-“示例”选项卡提供下列 [tensorflow/examples](https://github.com/tensorflow/examples/tree/master/lite/examples) 能力。模型首次使用时按需下载，校验固定大小与 SHA-256，下载后离线运行；APK 仍只内置 YOLO26n-pose。
+下列 [tensorflow/examples](https://github.com/tensorflow/examples/tree/master/lite/examples) 能力全部通过“插件”选项卡进入。模型首次使用时按需下载，校验固定大小与 SHA-256，下载后离线运行；APK 仍只内置 YOLO26n-pose。MoveNet/分类/检测/分割在“插件 → 动作观察/物品识别/场景检测/场景分割”，音频分类在“插件 → 声音识别”，超分辨率、语音合成与设备端训练也各有插件卡片；插件与工作台共用同一模型缓存。
 
-| 示例 | 来源 | 输入 → 输出 | 说明 |
+| 能力 | 来源 | 输入 → 输出 | 说明 |
 | --- | --- | --- | --- |
 | 姿态估计 | MoveNet Lightning，Google Coral 的量化测试模型（约 3 MB） | `[1,192,192,3]` uint8 → `[1,1,17,3]` float32 | 选择图片，显示 COCO 17 点与骨骼；官方旧 TF Hub 链接已失效，改用固定提交的 Coral 源 |
 | 图片分类 | `image_classification` MobileNet V1（约 4 MB） | 224×224 RGB → 1001 类 | 反量化后显示 Top-5，类别名从模型附带标签读取 |
@@ -106,10 +122,10 @@ app/src/main/java/com/example/minimalapk/
 
 ## 模型工作台与配置修正
 
-入口：示例 → 模型工作台，或设置 → 模型 → 模型工作台与配置文件。
+入口：插件 → 自定义模型 → 模型工作台与配置文件。
 
 1. 导入本地 `.tflite`、填写 HTTPS 地址，或点击示例目录下载。导入不创建原生运行时，也不执行模型；读取张量形状、dtype、量化参数、自定义算子与所有签名。
-2. 选择主子图或命名签名，自动生成 UTF-8 `.properties` 配置。可以直接编辑、保存、从文件导入或导出；重导相同模型保留已有配置。自动推断仅是起点，归一化、标签及输出含义必须与模型说明一致。已安装的纯图片输入模型也可以在相机页作为实时叠加层运行。
+2. 选择主子图或命名签名，自动生成 UTF-8 `.properties` 配置。可以直接编辑、保存、从文件导入或导出；重导相同模型保留已有配置。张量名称、形状/动态签名、dtype、量化、输入输出、签名与自定义算子读自模型文件；归一化 mean/std、框含义、labels、tokenizer、采样率属推断或待配置，必须与模型说明一致。已安装的纯图片输入模型可在 插件 → 自定义模型 中选择并作为实时叠加层运行。
 3. 选择每个输入的文件，或填写数值/字符串，然后点击运行。固定维度不能通过配置改变，动态维度可填正整数；每次执行新建 Interpreter，因此一般签名调用之间不保留可变张量状态。
 
 | 配置项 | 含义 |
@@ -124,12 +140,32 @@ app/src/main/java/com/example/minimalapk/
 | `output.0.render=VALUES` | `VALUES`、`CLASSIFICATION`、`IMAGE`、`MOVENET`、`SEGMENTATION`、`BOXES` |
 | `output.0.scale=1` / `output.0.offset=0` | 图片输出实数值 → 0–255 像素，例如 0–1 输出使用 scale=255 |
 | `output.0.labels=猫\n狗` | 分类/检测标签，按输出类别索引排列 |
-| `output.0.threshold=0.3` | MoveNet 关键点或检测框分数阈值 |
+| `output.0.threshold=0.3` | MoveNet 关键点、检测框分数或分割像素最大类别分数阈值 |
 | `output.0.classesOutput=1` / `scoresOutput=2` / `countOutput=3` | BOXES 对应的其它输出索引；框按归一化 `[ymin,xmin,ymax,xmax]` 读取 |
 
 同样规则适用于 `input.1.*`、`output.1.*` 等多输入/输出。`IMAGE` 输出为 `[1,H,W,1或3]`，`SEGMENTATION` 为 `[1,H,W,类别数]`；未适配的输出可用 VALUES 查看。运行器支持 float32、int32、uint8、int8、int64、int16、bool 与字符串 I/O；BINARY 输入采用模型原始 dtype、小端存储，适合预先分词的 token、视频张量或多模型中间结果。数值文本经 double 解析，大于 2^53 的精确整数请使用 BINARY。输入总计与每个数值输出最多 4,194,304 个元素，配置文件最多 1 MB。
 
 **兼容性边界**：保存合法模型不等于任意模型都能执行。配置可修正布局、动态输入、输入来源、归一化、签名与结果显示，但不能新增缺失的 Flex/自定义算子、改写固定网络结构或代替专用分词器。`bert_qa`、OCR、风格迁移、多阶段检索、视频分类、生成式 AI、强化学习等完整交互流程尚未逐个移植；可以导入其 TFLite 文件并配置支持的张量/签名，但不宣称具备全部上游应用功能。官方仓库没有 TTS 示例，系统 TTS 是否离线取决于已安装的语音包。
+
+## LiteRT 模型库资产目录与运行时基线
+
+`app/src/main/assets/models/litert-models.tsv` 是从 [google-ai-edge/litert-samples](https://github.com/google-ai-edge/litert-samples) 固定提交 `f9f0e000630e9cdd6d263c4cd80495e4231a2dc8` 的 `samples/litert_model_zoo/android/app/src/main/assets/models.json` 生成的制表符目录，共 34 个任务、76 个文件，其中 16 个文件超过 64 MB。目录记录 taskId、模型名、分组、声明后端、许可证名称/URL、上游与模型卡 URL、文件名、下载 URL、精确字节数和 SHA-256；生成脚本为 `tools/generate-litert-catalog.py`，来源与许可证说明见 `app/src/main/assets/models/NOTICE-LiteRT-Model-Zoo.txt`。应用不引入 JSON 依赖，按行解析并校验 HTTPS、文件名、字节数和 64 位十六进制哈希。
+
+- 下载器按集合（taskId）流式写入 `filesDir/model_assets/<taskId>/`，全程使用 `Long` 计数和私有临时文件，不把大文件读成 `ByteArray`。因此这里的下载不受工作台手工导入的 64 MB 上限影响；**手工导入的 64 MB 上限保持不变。**
+- 断点续传使用 `.part` 文件、HTTP `Range` 与已保存的 `ETag`：206 追加、200 重新开始、416 显式重启、ETag 变化重启；重定向次数有界且只允许 HTTPS，不允许降级。只有受支持的 GitHub URL 会经过镜像改写，Hugging Face / Google Storage 保持直连；URL 和日志不写入凭据或 token。
+- 开始前检查 `usableSpace` 并保留 64 MB 余量；下载中校验声明的字节数和 SHA-256，任一文件大小/哈希不符、响应截断或返回 HTML 都会失败。只有全部文件进入 staging 并验证通过后才整体替换目录；失败时删除 staging、保留旧集合，并留下 `.part` 以便下次续传。`isReady` 只做“所有文件存在且长度精确相等”的低成本检查，`delete(setId)` 同时清理 installed、partial、staging、backup 目录。
+
+| 兼容性项目 | 本仓库基线 | 下载 / 运行门槛 |
+| --- | --- | --- |
+| Android API | `minSdk 24`，`compileSdk`/`targetSdk 37` | API < 24 拒绝；QNN NPU 需要 API 31+ |
+| ABI | 仅打包 `arm64-v8a`、`x86_64` | 其他 ABI 的 APK 不含对应 LiteRT/QNN 原生库 |
+| LiteRT | `2.3.2`（`litert`、`litert-gpu`、`litert-npu-runtime-qualcomm`） | `.tflite` 由打包的 Interpreter / CompiledModel 加载 |
+| QNN | `2.50.0`（`qnn-runtime`） | 仅 `arm64-v8a` + Qualcomm HTP，API 31+，需 JIT 编译成功 |
+| 后端 | CPU 始终可用；GPU/NPU 为探测后可用 | 目录 `backend=gpu` 需要可用 GPU delegate；`npu` 需要 Qualcomm HTP；`mixed` 可回落 CPU |
+| `.litertlm` | 未集成 | 需要额外依赖 `com.google.ai.edge.litertlm:litertlm-android`；本固定目录没有 `.litertlm` 条目，因此未添加 |
+| 下载成功 | **不是执行证明** | 只证明字节数、SHA-256 与服务器响应匹配；算子、动态形状或设备后端仍可能编译/执行失败 |
+
+`RuntimeReadiness` 会在尝试加载前报告无法运行的原因（API 级别、打包 ABI、目录声明的 CPU/GPU/NPU 后端是否可用、需要未打包的 `.litertlm` 运行时），但不会代替真实推理验证。基础相机预览、拍照与现有姿态/示例能力不依赖该模型库目录，下载或运行失败不得影响基础相机。
 
 ## 自动构建
 
