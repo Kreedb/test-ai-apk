@@ -1,6 +1,7 @@
 package com.example.minimalapk.ui.screens
 
 import android.content.Context
+import android.speech.tts.TextToSpeech
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,11 +11,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -22,10 +26,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -39,22 +45,37 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.minimalapk.examples.ExampleCatalog
+import com.example.minimalapk.examples.ExampleDownload
+import com.example.minimalapk.examples.ExampleModel
 import com.example.minimalapk.models.ConfiguredModel
 import com.example.minimalapk.models.ConfiguredModelStore
 import com.example.minimalapk.models.ModelConfig
 import com.example.minimalapk.models.cameraModelProblem
+import com.example.minimalapk.plugins.AudioClassificationSettings
 import com.example.minimalapk.plugins.CONFIGURED_MODEL_ID_KEY
+import com.example.minimalapk.plugins.ExampleSceneSpec
+import com.example.minimalapk.plugins.ExampleScenes
 import com.example.minimalapk.plugins.PluginIds
 import com.example.minimalapk.plugins.PluginSettings
 import com.example.minimalapk.plugins.PluginSettingsStore
 import com.example.minimalapk.plugins.PoseEnhancementSettings
+import com.example.minimalapk.plugins.SceneThresholdSettings
 import com.example.minimalapk.plugins.SuperResolutionSettings
 import com.example.minimalapk.plugins.SystemMonitorSettings
+import com.example.minimalapk.plugins.TTS_TEXT_KEY
+import com.example.minimalapk.plugins.TtsEngine
+import com.example.minimalapk.plugins.clampTtsText
 import com.example.minimalapk.pose.ModelSpec
 import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.NpuSource
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -65,10 +86,15 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
     val monitor = settings.getValue(PluginIds.SYSTEM_MONITOR)
     val configured = settings.getValue(PluginIds.CONFIGURED_MODEL)
     val superResolution = settings.getValue(PluginIds.SUPER_RESOLUTION)
+    val audioClassification = settings.getValue(PluginIds.AUDIO_CLASSIFICATION)
+    val tts = settings.getValue(PluginIds.TTS)
     var configure by rememberSaveable { mutableStateOf(false) }
     var configureMonitor by rememberSaveable { mutableStateOf(false) }
     var configureModels by rememberSaveable { mutableStateOf(false) }
     var configureSuperResolution by rememberSaveable { mutableStateOf(false) }
+    var configureAudio by rememberSaveable { mutableStateOf(false) }
+    var configureTts by rememberSaveable { mutableStateOf(false) }
+    var configureScene by rememberSaveable { mutableStateOf<String?>(null) }
     var configuredModels by remember { mutableStateOf(emptyList<InstalledConfiguredModel>()) }
     var configuredModelsLoaded by remember { mutableStateOf(false) }
     LaunchedEffect(context) {
@@ -119,6 +145,35 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
                 onConfigure = { configureSuperResolution = true },
             )
         }
+        items(ExampleScenes.all, key = { it.id }) { spec ->
+            val scene = settings.getValue(spec.id)
+            PluginCard(
+                name = spec.name,
+                status = sceneStatus(context, scene, spec),
+                enabled = scene.enabled,
+                onEnabledChange = { store.setEnabled(spec.id, it) },
+                onConfigure = { configureScene = spec.id },
+            )
+        }
+        item {
+            PluginCard(
+                name = "声音识别",
+                status = if (audioClassification.enabled) "已启用 · YAMNet 声音/环境声分类（不是语音识别）"
+                else "已停用 · 可继续配置",
+                enabled = audioClassification.enabled,
+                onEnabledChange = { store.setEnabled(PluginIds.AUDIO_CLASSIFICATION, it) },
+                onConfigure = { configureAudio = true },
+            )
+        }
+        item {
+            PluginCard(
+                name = "语音朗读",
+                status = if (tts.enabled) "已启用 · 系统 TTS，显式朗读" else "已停用 · 可继续配置",
+                enabled = tts.enabled,
+                onEnabledChange = { store.setEnabled(PluginIds.TTS, it) },
+                onConfigure = { configureTts = true },
+            )
+        }
     }
     if (configure) {
         PoseEnhancementDialog(PoseEnhancementSettings.from(pose), onSave = {
@@ -151,6 +206,40 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
             onDismiss = { configureModels = false },
         )
     }
+    configureScene?.let { id ->
+        val spec = ExampleScenes.all.firstOrNull { it.id == id }
+        if (spec != null) {
+            ScenePluginDialog(
+                spec = spec,
+                settings = settings.getValue(id),
+                installed = configuredModels,
+                onSave = { config ->
+                    store.configure(id, config)
+                    configureScene = null
+                },
+                onDismiss = { configureScene = null },
+            )
+        }
+    }
+    if (configureAudio) {
+        AudioClassificationDialog(
+            settings = audioClassification,
+            installed = configuredModels,
+            onSave = {
+                store.configure(PluginIds.AUDIO_CLASSIFICATION, it.toConfig())
+                configureAudio = false
+            },
+            onDismiss = { configureAudio = false },
+        )
+    }
+    if (configureTts) {
+        TtsDialog(
+            settings = tts,
+            enabled = tts.enabled,
+            onSaveText = { text -> store.configure(PluginIds.TTS, mapOf(TTS_TEXT_KEY to text)) },
+            onDismiss = { configureTts = false },
+        )
+    }
 }
 
 private data class InstalledConfiguredModel(val model: ConfiguredModel, val problem: String?)
@@ -180,6 +269,256 @@ private fun configuredModelStatus(
     if (selected == null) return "已启用 · 未就绪：所选模型已删除"
     selected.problem?.let { return "已启用 · 未就绪：$it" }
     return "已启用 · ${selected.model.name}"
+}
+
+private fun exampleCached(context: Context, example: ExampleModel): Boolean {
+    val file = ExampleCatalog.file(context, example)
+    return file.isFile && file.length() == example.sizeBytes
+}
+
+private fun sceneStatus(context: Context, settings: PluginSettings, spec: ExampleSceneSpec): String {
+    if (!settings.enabled) return "已停用 · 可继续配置"
+    return if (exampleCached(context, spec.example)) "已启用 · 模型已缓存，在相机帧上运行"
+    else "已启用 · 首次启用时下载约 ${spec.example.sizeBytes / 1024 / 1024} MB"
+}
+
+@Composable
+private fun ScenePluginDialog(
+    spec: ExampleSceneSpec,
+    settings: PluginSettings,
+    installed: List<InstalledConfiguredModel>,
+    onSave: (Map<String, String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var thresholdText by rememberSaveable { mutableStateOf(SceneThresholdSettings.from(settings).thresholdText) }
+    val threshold = thresholdText.toFloatOrNull()
+    val valid = !spec.thresholdEnabled || threshold != null &&
+        threshold in SceneThresholdSettings.MIN_THRESHOLD..SceneThresholdSettings.MAX_THRESHOLD
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(spec.name) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(spec.description, style = MaterialTheme.typography.bodySmall)
+                ExampleModelSection(spec.example, installed)
+                if (spec.thresholdEnabled) {
+                    OutlinedTextField(
+                        value = thresholdText,
+                        onValueChange = { thresholdText = it.filter { char -> char.isDigit() || char == '.' }.take(4) },
+                        label = { Text("置信度阈值") }, singleLine = true, isError = !valid,
+                        supportingText = { Text("0.05–0.95；低于阈值的框/关键点/像素不显示，不修改工作台配置") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                Text(
+                    "启用后插件在专用线程下载并加载模型，在相机帧上运行；多开场景插件会顺序推理并降低帧率。" +
+                        "停用、切页或后台会停止推理并清空输出。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = valid, onClick = {
+                onSave(
+                    if (spec.thresholdEnabled) SceneThresholdSettings(thresholdText).toConfig() else emptyMap(),
+                )
+            }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun AudioClassificationDialog(
+    settings: PluginSettings,
+    installed: List<InstalledConfiguredModel>,
+    onSave: (AudioClassificationSettings) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var topKText by rememberSaveable { mutableStateOf(AudioClassificationSettings.from(settings).topKText) }
+    val topK = topKText.toIntOrNull()
+    val valid = topK != null && topK in AudioClassificationSettings.MIN_TOP_K..AudioClassificationSettings.MAX_TOP_K
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("声音识别") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "YAMNet 对最近约 1 秒的麦克风 PCM 做声音/环境声分类，只显示模型内置标签的前几类。" +
+                        "它不是语音识别，不转写语音内容；插件不自行打开麦克风、不把音频写入磁盘。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                ExampleModelSection(ExampleCatalog.audio, installed)
+                OutlinedTextField(
+                    value = topKText, onValueChange = { topKText = it.filter(Char::isDigit).take(1) },
+                    label = { Text("显示类别数") }, singleLine = true, isError = !valid,
+                    supportingText = { Text("1–5；推理慢于窗口时丢弃旧窗口，只发布最新结果") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "停止、切页、后台或修改配置会清空半窗口缓冲；旧代次的结果不会恢复文字。" +
+                        "共享麦克风权限与其他音频插件由相机宿主统一管理。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = valid, onClick = { onSave(AudioClassificationSettings(topKText)) }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun TtsDialog(
+    settings: PluginSettings,
+    enabled: Boolean,
+    onSaveText: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val maxText = TextToSpeech.getMaxSpeechInputLength()
+    var text by rememberSaveable {
+        mutableStateOf(settings.config[TTS_TEXT_KEY].orEmpty().ifEmpty { "你好，这是插件语音朗读。" })
+    }
+    var status by remember { mutableStateOf("正在初始化系统语音引擎…") }
+    var ready by remember { mutableStateOf(false) }
+    var utterance by remember { mutableStateOf<String?>(null) }
+    val holder = remember { arrayOfNulls<TtsEngine>(1) }
+    DisposableEffect(Unit) {
+        val engine = TtsEngine(context) { message, isReady -> status = message; ready = isReady }
+        holder[0] = engine
+        onDispose {
+            engine.close()
+            holder[0] = null
+        }
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                holder[0]?.stop()
+                utterance = null
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(enabled) {
+        if (!enabled) {
+            holder[0]?.stop()
+            utterance = null
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("语音朗读") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "调用设备自带的 TextToSpeech 引擎，不是 LiteRT 模型；是否离线取决于系统语音包。" +
+                        "只在你按下朗读时发声，不随相机帧重复、不自动播放，也不需要麦克风权限。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = clampTtsText(it, maxText) },
+                    label = { Text("要朗读的文本") }, minLines = 3, modifier = Modifier.fillMaxWidth(),
+                    supportingText = { Text("${text.length} / $maxText 字") },
+                )
+                if (!enabled) {
+                    Text(
+                        "插件已停用：先在卡片总开关中启用，才能在这里朗读。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        enabled = enabled && ready && text.isNotBlank(),
+                        onClick = {
+                            if (holder[0]?.speak(text) == true) {
+                                utterance = text
+                                status = "正在朗读…"
+                                onSaveText(text)
+                            } else {
+                                status = "朗读失败，请检查系统引擎与语音包"
+                            }
+                        },
+                    ) { Text("朗读") }
+                    TextButton(enabled = enabled, onClick = {
+                        holder[0]?.stop()
+                        utterance = null
+                        status = "已停止朗读"
+                    }) { Text("停止") }
+                }
+                utterance?.let {
+                    Text(
+                        "当前朗读：${it.take(120)}${if (it.length > 120) "…" else ""}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Text(
+                    "离开本页、切到后台、关闭弹层或停用插件都会停止朗读，避免与声音识别等音频插件形成回环。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onSaveText(text)
+                onDismiss()
+            }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
+
+@Composable
+private fun ExampleModelSection(example: ExampleModel, installed: List<InstalledConfiguredModel>) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val cached = exampleCached(context, example)
+    val installedModel = installed.firstOrNull { it.model.id == example.sha256 }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("模型：${example.name}（约 ${example.sizeBytes / 1024 / 1024} MB）", style = MaterialTheme.typography.titleSmall)
+        SelectionContainer {
+            Text(example.url, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(
+            if (cached) "本地缓存：已下载（大小匹配，启用时再次校验 SHA-256）"
+            else "本地缓存：未下载（启用或重试时下载并校验大小/SHA-256）",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            if (installedModel != null) "工作台安装：已安装（复用同一模型与配置，不覆盖已有配置）"
+            else "工作台安装：未安装",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        TextButton(enabled = !busy, onClick = {
+            busy = true
+            message = null
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) { ExampleDownload.install(context, example) }
+                    message = "已下载、校验并安装；启用后由相机插件加载"
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    message = "重试失败：${error.message ?: "下载或校验失败"}"
+                } finally {
+                    busy = false
+                }
+            }
+        }) { Text("重试下载") }
+    }
 }
 
 @Composable

@@ -230,8 +230,17 @@ private fun outputBitmap(
     val alpha = if (transparent) 0x80 else 0xff
     val pixels = IntArray(width * height) { index ->
         if (options.render == OutputRender.SEGMENTATION) {
-            val label = (0 until channels).maxBy { values[index * channels + it] }
-            if (label == 0) {
+            var label = 0
+            var best = Double.NEGATIVE_INFINITY
+            for (channel in 0 until channels) {
+                val score = values[index * channels + channel]
+                if (score > best) {
+                    best = score
+                    label = channel
+                }
+            }
+            // Background (class 0) and low-confidence pixels stay transparent/black.
+            if (label == 0 || best < options.threshold) {
                 if (transparent) 0 else 0xff000000.toInt()
             } else {
                 (alpha shl 24) or ((label * 0x3779b9) and 0xffffff)

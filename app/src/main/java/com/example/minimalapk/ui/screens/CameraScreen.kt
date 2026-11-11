@@ -48,10 +48,13 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.minimalapk.models.ConfiguredModelStore
 import com.example.minimalapk.plugins.AudioCaptureHost
+import com.example.minimalapk.plugins.AudioClassificationPlugin
 import com.example.minimalapk.plugins.AudioPermission
 import com.example.minimalapk.plugins.CameraModelSettingsStore
 import com.example.minimalapk.plugins.CameraSession
 import com.example.minimalapk.plugins.ConfiguredModelPlugin
+import com.example.minimalapk.plugins.ExampleScenePlugin
+import com.example.minimalapk.plugins.ExampleScenes
 import com.example.minimalapk.plugins.MessageKind
 import com.example.minimalapk.plugins.PluginContribution
 import com.example.minimalapk.plugins.PluginHost
@@ -60,6 +63,7 @@ import com.example.minimalapk.plugins.PoseEnhancementPlugin
 import com.example.minimalapk.plugins.PoseModelsPlugin
 import com.example.minimalapk.plugins.SuperResolutionPlugin
 import com.example.minimalapk.plugins.SystemMonitorPlugin
+import com.example.minimalapk.plugins.TtsPlugin
 import com.example.minimalapk.plugins.audioPermissionAfterCheck
 import com.example.minimalapk.plugins.cameraFrameRate
 import com.example.minimalapk.plugins.cameraPluginSettings
@@ -111,6 +115,8 @@ private fun PoseCamera(store: PluginSettingsStore, modifier: Modifier) {
         PluginHost(listOf(
             poses, PoseEnhancementPlugin(), ConfiguredModelPlugin(context.applicationContext),
             SystemMonitorPlugin(), SuperResolutionPlugin(context.applicationContext),
+            *ExampleScenes.all.map { ExampleScenePlugin(context.applicationContext, it) }.toTypedArray(),
+            AudioClassificationPlugin(context.applicationContext), TtsPlugin(),
         ))
     }
     val audio = remember(context, host, lifecycleOwner) {

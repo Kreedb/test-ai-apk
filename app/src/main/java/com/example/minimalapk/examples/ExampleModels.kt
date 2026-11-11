@@ -93,6 +93,12 @@ internal object ExampleDownload {
         return target
     }
 
+    /** Reads the label file embedded after the TFLite buffer by the metadata packer. */
+    fun labels(file: File): List<String> = ZipFile(file).use { zip ->
+        val entry = zip.entries().asSequence().firstOrNull { it.name.endsWith(".txt") } ?: return emptyList()
+        zip.getInputStream(entry).use { it.readCapped(1024 * 1024) }.toString(Charsets.UTF_8).trimEnd().lines()
+    }
+
     @Synchronized
     fun install(context: Context, example: ExampleModel): ConfiguredModel {
         val file = ensure(context, example)
@@ -103,10 +109,7 @@ internal object ExampleDownload {
             val description = ConfiguredModelStore.describe(model)
             val inferred = ModelConfig.infer(description.signatures.first())
             val labels = if (example in listOf(ExampleCatalog.classification, ExampleCatalog.detection, ExampleCatalog.audio)) {
-                ZipFile(file).use { zip ->
-                    val entry = zip.entries().asSequence().first { it.name.endsWith(".txt") }
-                    zip.getInputStream(entry).use { it.readCapped(1024 * 1024) }.toString(Charsets.UTF_8).trimEnd().lines()
-                }
+                labels(file)
             } else emptyList()
             val config = inferred.copy(
                 inputs = inferred.inputs.map { input -> when (example) {

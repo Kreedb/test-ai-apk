@@ -10,7 +10,7 @@
 4. 在 `Started` / `ConfigurationChanged` 更新消费者，在 `Stopped` 停止排队并释放资源。每次回调带 `PluginContext(token, settings)`：异步任务保留它，工作前调用 `isCurrent()`，完成后只用该 context 的 `publish()`。不能用任务结束时取到的新 context 包装旧结果。
 5. 模型复用现有 `ModelConfig` / `ConfiguredModelStore` / `LiveConfiguredModel`，不要重建张量解析器。`AsyncModelSlot` 在同一个专用线程创建/运行/关闭，一个在用模型、一个合并的待加载配置；`runIfReady()` 在加载中立即返回 null。慢的图片/音频消费者可用 `BoundedFrameWorker`（一项执行中 + 一项最新待处理）；禁用、换配置、取消按压时 `clear()`，宿主最终 `CameraPlugin.close()` 时关闭 worker，前后台 `Stopped` 后仍可再次 `Started`。工作函数需处理失败并报告带 ID 的错误。
 
-现有 `PoseModelsPlugin` 持有唯一 `PoseAnalyzer`，同时供基础骨架与 `PoseEnhancementPlugin` 使用；增强开关不加载/关闭它、不改写启用模型列表。`ConfiguredModelPlugin` 已承接“自定义模型”插件：稳定 ID 仍为 `configured_model`，配置页复用 `ModelsScreen`/`ModelWorkbenchScreen`，相机模型选择保存在 `plugin.configured_model.config.model_id`；停用只停止该消费者并清空输出。`SystemMonitorPlugin` 只消费相机帧事件，输出右上角指标和底部 NPU 诊断；不依赖姿态增强或任何模型是否启用。设置中的旧“模型”页已删除，恢复旧 `SettingsPage.MODELS` 状态时回落到根页；示例页及其工作台入口暂留，待后续任务迁移。
+现有 `PoseModelsPlugin` 持有唯一 `PoseAnalyzer`，同时供基础骨架与 `PoseEnhancementPlugin` 使用；增强开关不加载/关闭它、不改写启用模型列表。`ConfiguredModelPlugin` 已承接“自定义模型”插件：稳定 ID 仍为 `configured_model`，配置页复用 `ModelsScreen`/`ModelWorkbenchScreen`，相机模型选择保存在 `plugin.configured_model.config.model_id`；停用只停止该消费者并清空输出。`SystemMonitorPlugin` 只消费相机帧事件，输出右上角指标和底部 NPU 诊断；不依赖姿态增强或任何模型是否启用。`ExampleScenePlugin` 以四个固定示例模型实例化（`movenet_scene`、`image_classification_scene`、`object_detection_scene`、`image_segmentation_scene`），沿用 `ExampleDownload.install`、`LiveConfiguredModel` 和 `ConfiguredModelRunner`，阈值只作为运行时覆盖，不改写已存在的 `.properties`。`AudioClassificationPlugin`（`audio_classification`）只消费共享 `AUDIO_PCM`，用有界窗口和专用 worker 运行 YAMNet；`TtsPlugin`（`tts`）只发布系统 TTS 状态，朗读动作在配置弹层中显式触发。设置中的旧“模型”页已删除，恢复旧 `SettingsPage.MODELS` 状态时回落到根页；示例页及其工作台入口暂留，设备端个人化与导航迁移待后续任务。
 
 ## 事件与线程
 
@@ -67,5 +67,8 @@ JVM 覆盖 settings restore/observable/save、关闭/代次/会话失效、有�
 - [ ] 真机 0/90/180/270 旋转、不同视口比例核对上述坐标；增强替换多帧延迟后松手、滑出、多指、系统取消、切页、后台、停用均恢复最新原图。
 - [ ] 监控内存、CPU/GPU 线程：展示中的 Bitmap 没有提前 recycle，离开后模型/Interpreter/GPU 同线程排空释放；release/R8 APK 能安装并完成相同流程。
 - [ ] #66 接入后：录音拒绝/撤权/隐私静音、系统 ASR 麦克风互斥、前后台与停用释放；未经录音权限时视频仍可用。
+- [ ] #68 场景插件：四个卡片分别启用后下载/加载对应示例模型，关键点、检测框、分割掩码与相机预览对齐；阈值修改只影响相机叠加；停用/切页/后台停止推理且不留下旧图层。
+- [ ] #68 声音识别：授予麦克风后约 1 秒窗口持续更新声音/环境声前几类；拒绝/撤权/系统 ASR 占用时停用音频插件但相机继续；启停/切页不残留旧结果，工作台 WAV 路径仍可运行。
+- [ ] #68 语音朗读：系统 TTS 引擎就绪/缺失中文语音包提示正确；只在按下朗读时发声，重复点按不叠加；关闭弹层、切后台、停用插件立即停止，不与声音识别形成回环。
 
 相机卡片交互和实际替换消费者接入后的设备演示仍待执行；这里的 JVM 仲裁测试使用假图片尺寸，不声称跑过相机或超分模型。Bitmap 借用只读通过应用内约定保证，并非运行时沙箱；原生模型推理若永久阻塞，无法安全强制回收它，需设备验证和驱动恢复。当前兼容图片模型按帧同步执行，慢模型会降低基础帧率；异步超分应使用有界 worker。

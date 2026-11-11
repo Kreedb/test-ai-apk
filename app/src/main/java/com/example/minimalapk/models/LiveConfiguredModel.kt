@@ -13,14 +13,17 @@ internal class LiveConfiguredModel(
     model: ConfiguredModel,
     config: ModelConfig,
     graph: GraphSignature,
+    /** Runtime score threshold for MoveNet/BOXES/SEGMENTATION renders; never rewrites the stored config. */
+    thresholdOverride: Float? = null,
 ) : AutoCloseable {
-    private val config: ModelConfig
+    private val config: ModelConfig =
+        if (thresholdOverride == null) config
+        else config.copy(outputs = config.outputs.map { it.copy(threshold = thresholdOverride) })
     private val graph: GraphSignature
     private val interpreter: Interpreter
 
     init {
-        cameraModelProblem(config)?.let { error(it) }
-        this.config = config
+        cameraModelProblem(this.config)?.let { error(it) }
         this.graph = graph
         val opened = Interpreter(model.file, Interpreter.Options().setNumThreads(2))
         try {
