@@ -100,6 +100,33 @@ class PluginSettingsTest {
     }
 
     @Test
+    fun explicitRunRequestsAreOneShotRevisionBoundAndNeverRestoredFromPreferences() {
+        val preferences = MemoryPreferences()
+        PluginSettingsStore(preferences).use { store ->
+            store.requestAction(PluginIds.LITERT_TEXT, "run")
+            assertTrue(store.requests.value.isEmpty())
+            store.setEnabled(PluginIds.LITERT_TEXT, true)
+            store.configure(PluginIds.LITERT_TEXT, mapOf("input" to "first"))
+            store.requestAction(PluginIds.LITERT_TEXT, "run")
+            val first = store.requests.value.getValue(PluginIds.LITERT_TEXT)
+            assertEquals(store.settings.value.getValue(PluginIds.LITERT_TEXT).revision, first.revision)
+            store.requestAction(PluginIds.LITERT_TEXT, "run")
+            val second = store.requests.value.getValue(PluginIds.LITERT_TEXT)
+            store.acknowledgeAction(PluginIds.LITERT_TEXT, first)
+            assertEquals(second, store.requests.value.getValue(PluginIds.LITERT_TEXT))
+            store.acknowledgeAction(PluginIds.LITERT_TEXT, second)
+            assertTrue(store.requests.value.isEmpty())
+            store.requestAction(PluginIds.LITERT_TEXT, "run")
+            store.configure(PluginIds.LITERT_TEXT, mapOf("input" to "changed"))
+            assertTrue(store.requests.value.isEmpty())
+            store.requestAction(PluginIds.LITERT_TEXT, "run")
+            store.setEnabled(PluginIds.LITERT_TEXT, false)
+            assertTrue(store.requests.value.isEmpty())
+        }
+        PluginSettingsStore(preferences).use { assertTrue(it.requests.value.isEmpty()) }
+    }
+
+    @Test
     fun changingEnhancementNeverReloadsBaseModelsButBaseChangesInvalidateMeasurements() {
         val base = CameraModelSettings(ModelStore.builtIn, PoseBackendPreference.AUTO)
         val plugins = pluginDefaults + (PluginIds.CONFIGURED_MODEL to PluginSettings(enabled = true))

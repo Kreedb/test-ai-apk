@@ -8,6 +8,7 @@ lifecycle = "2.11.0"
 camera = "1.6.2"
 materialKolor = "5.0.1"
 litert = "2.3.2"
+litertLm = "0.19.0"
 qnnRuntime = "2.50.0"
 junit = "4.13.2"
 testRunner = "1.7.0"
@@ -29,6 +30,7 @@ androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", versi
 material-kolor = { module = "com.materialkolor:material-kolor", version.ref = "materialKolor" }
 
 litert = { module = "com.google.ai.edge.litert:litert", version.ref = "litert" }
+litert-lm = { module = "com.google.ai.edge.litertlm:litertlm-android", version.ref = "litertLm" }
 litert-gpu = { module = "com.google.ai.edge.litert:litert-gpu", version.ref = "litert" }
 litert-npu-runtime-qualcomm = { module = "com.google.ai.edge.litert:litert-npu-runtime-qualcomm", version.ref = "litert" }
 qnn-runtime = { module = "com.qualcomm.qti:qnn-runtime", version.ref = "qnnRuntime" }

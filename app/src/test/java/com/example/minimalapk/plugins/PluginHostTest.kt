@@ -23,8 +23,10 @@ class PluginHostTest {
         capabilities: Set<PluginCapability> = PluginCapability.entries.toSet() - PluginCapability.MONITOR,
         priority: Int = 0,
         val fails: Boolean = false,
+        actions: Set<String> = emptySet(),
+        continuousAudio: Boolean = true,
     ) : CameraPlugin {
-        override val descriptor = PluginDescriptor(id, id, capabilities, priority)
+        override val descriptor = PluginDescriptor(id, id, capabilities, priority, actions, continuousAudio)
         val events = mutableListOf<PluginEvent>()
         override fun onEvent(event: PluginEvent, context: PluginContext) {
             events += event
@@ -280,6 +282,31 @@ class PluginHostTest {
     }
 
     @Test
+    fun discoveredAudioCapabilityRequestsPermissionOnlyAfterPublishedIntentAndStillReceivesRevocation() {
+        val plugin = Plugin("discovered", setOf(PluginCapability.AUDIO_PERMISSION, PluginCapability.AUDIO_PCM),
+            continuousAudio = false)
+        start(plugin).use { host ->
+            assertFalse(host.requiresAudioPermission())
+            assertFalse(host.snapshot.value.audioPermissionRequested)
+            val initial = host.contextFor("discovered")!!
+            initial.publish(PluginOutput(100, captureAudio = false)) // IMAGE/TEXT-only contract set.
+            assertFalse(host.requiresAudioPermission())
+            initial.publish(PluginOutput(200, captureAudio = true)) // Explicit raw PCM contract discovered.
+            assertTrue(host.requiresAudioPermission())
+            assertTrue(host.snapshot.value.audioPermissionRequested)
+            val session = host.sessionId()!!
+            host.permissionChanged(session, AudioPermission.GRANTED)
+            assertFalse(initial.isCurrent())
+            val granted = host.contextFor("discovered")!!
+            granted.publish(PluginOutput(300, captureAudio = false))
+            assertFalse(host.requiresAudioPermission())
+            host.permissionChanged(session, AudioPermission.REVOKED)
+            assertFalse(granted.isCurrent())
+            assertEquals(AudioPermission.REVOKED, plugin.events.filterIsInstance<PluginEvent.AudioPermissionChanged>().last().permission)
+        }
+    }
+
+    @Test
     fun audioOnlyReachesEnabledSubscribersWithPermissionAndNeverAfterStop() {
         val audio = Plugin("audio", setOf(PluginCapability.AUDIO_PERMISSION, PluginCapability.AUDIO_PCM))
         val video = Plugin("video", setOf(PluginCapability.CAMERA_FRAMES))
@@ -329,6 +356,168 @@ class PluginHostTest {
         assertEquals(2, first.remaining())
         assertEquals(4, block.samples.remaining())
         assertTrue(block.samples.isReadOnly)
+    }
+
+    @Test
+    fun actionsAreAllowlistedEnabledAndScopedToTheSettingsRevision() {
+        val plugin = Plugin("actions", setOf(PluginCapability.ACTIONS, PluginCapability.TEXT, PluginCapability.CAMERA_FRAMES),
+            actions = setOf("run", "cancel"))
+        start(plugin).use { host ->
+            val source = frame(host).also(host::acceptFrame)
+            val context = host.contextFor("actions")!!
+            context.publish(PluginOutput(120, actions = listOf(PluginAction("run", "run"),
+                PluginAction("cancel", "cancel", false), PluginAction("unknown", "unknown"))))
+            assertFalse(host.action("missing", "run"))
+            assertFalse(host.action("actions", "unknown"))
+            assertFalse(host.action("actions", "cancel"))
+            assertFalse(host.action("actions", "run", expectedRevision = 1))
+            assertTrue(host.action("actions", "run", expectedRevision = 0))
+            assertEquals(source, plugin.events.filterIsInstance<PluginEvent.Action>().single().frame)
+            host.configure(mapOf("actions" to PluginSettings(false)))
+            assertFalse(host.action("actions", "run"))
+        }
+    }
+
+    @Test
+    fun slowSnapshotReportRemainsBesideItsOwnInputAndNeverBecomesALiveOverlay() {
+        val plugin = Plugin("report", setOf(PluginCapability.REPORT_IMAGE, PluginCapability.TEXT))
+        start(plugin).use { host ->
+            val source = frame(host).also(host::acceptFrame).source
+            val old = host.contextFor("report")!!
+            host.acceptFrame(frame(host, 5))
+            assertTrue(old.publish(PluginOutput(600, imageReport = PluginImageReport(source, Image(200, 300), Image(400, 300)))))
+            assertEquals(source, host.snapshot.value.reports.single().output.imageReport!!.source)
+            assertEquals(5L, host.snapshot.value.displayedSource!!.frameNumber)
+            assertTrue(host.snapshot.value.layers.isEmpty())
+            assertNull(host.snapshot.value.replacement)
+            host.lifecycle(CameraLifecycle.BACKGROUND)
+            assertTrue(host.snapshot.value.reports.isEmpty())
+            assertFalse(old.publish(PluginOutput(700, imageReport = PluginImageReport(source, Image()))))
+        }
+    }
+
+    @Test
+    fun assetMutationInvalidatesOnlyResourceConsumersAndWithdrawsTheirPressEligibility() {
+        val resource = Plugin("resource", setOf(PluginCapability.TEXT, PluginCapability.MODEL_ASSETS,
+            PluginCapability.POINTER, PluginCapability.REPLACEMENT))
+        val other = Plugin("other", setOf(PluginCapability.TEXT))
+        start(resource, other).use { host ->
+            val source = frame(host).also(host::acceptFrame).source
+            val before = host.contextFor("resource")!!
+            val unchanged = host.contextFor("other")!!
+            val press = host.press(1, ImagePoint(320f, 320f), 110)!!
+            before.publish(PluginOutput(120, replacement = PreviewReplacement(source, Image(), press)))
+            host.configure(mapOf("resource" to PluginSettings(true), "other" to PluginSettings(true)), resourcesRevision = 1)
+            assertFalse(before.isCurrent())
+            assertTrue(unchanged.isCurrent())
+            assertNull(host.snapshot.value.replacement)
+            assertNull(host.contextFor("resource")!!.currentPress())
+            assertTrue(resource.events.contains(PluginEvent.ConfigurationChanged))
+            val reloaded = host.contextFor("resource")!!
+            host.configure(mapOf("resource" to PluginSettings(true), "other" to PluginSettings(true)), resourcesRevision = 1)
+            assertTrue(reloaded.isCurrent())
+            host.configure(mapOf("resource" to PluginSettings(true), "other" to PluginSettings(true)), resourcesRevision = 2)
+            assertFalse(reloaded.isCurrent())
+            assertTrue(unchanged.isCurrent())
+        }
+    }
+
+    @Test
+    fun idleBoundedRecorderReleasesDemandAndPlaybackBlocksPcmWithoutChangingPermission() {
+        val plugin = Plugin("audio", setOf(PluginCapability.AUDIO_PCM, PluginCapability.AUDIO_PERMISSION, PluginCapability.TEXT),
+            continuousAudio = false)
+        start(plugin).use { host ->
+            assertFalse(host.hasSubscribers(PluginCapability.AUDIO_PCM))
+            val session = host.sessionId()!!
+            host.permissionChanged(session, AudioPermission.GRANTED)
+            assertEquals(AudioPermission.GRANTED, host.snapshot.value.audioPermission)
+            val context = host.contextFor("audio")!!
+            context.publish(PluginOutput(100, captureAudio = false))
+            assertFalse(host.hasSubscribers(PluginCapability.AUDIO_PCM))
+            assertFalse(host.snapshot.value.audioCaptureRequested)
+            val block = PcmBlock(ByteBuffer.allocate(8).asReadOnlyBuffer(), 16000, 1, PcmFormat.PCM_16_LE, 200)
+            host.audio(session, block)
+            assertTrue(plugin.events.filterIsInstance<PluginEvent.Audio>().isEmpty())
+            context.publish(PluginOutput(201, captureAudio = true))
+            assertTrue(host.hasSubscribers(PluginCapability.AUDIO_PCM))
+            host.audio(session, block)
+            assertEquals(1, plugin.events.filterIsInstance<PluginEvent.Audio>().size)
+            host.playbackChanged(true)
+            host.audio(session, block)
+            assertEquals(1, plugin.events.filterIsInstance<PluginEvent.Audio>().size)
+            assertTrue(context.isCurrent())
+            host.playbackChanged(false)
+            host.audio(session, block)
+            assertEquals(2, plugin.events.filterIsInstance<PluginEvent.Audio>().size)
+        }
+    }
+
+    @Test
+    fun completedFrameMeasuresSynchronousDispatchAndKeepsAsyncMeasurementsSeparate() {
+        val monitor = Plugin("monitor", setOf(PluginCapability.MONITOR))
+        val async = Plugin("async", setOf(PluginCapability.TEXT))
+        start(monitor, async).use { host ->
+            host.contextFor("async")!!.publish(PluginOutput(50, execution = PluginExecution(99_999.0, "CPU")))
+            host.contextFor("async")!!.publish(PluginOutput(60, listOf(PluginMessage("display status is not a new inference"))))
+            val source = frame(host).copy(timestampNanos = System.nanoTime())
+            host.acceptFrame(source)
+            val completed = monitor.events.filterIsInstance<PluginEvent.FrameCompleted>().single()
+            assertTrue(completed.timing.dispatchMs >= 0)
+            assertTrue(completed.timing.totalMs >= completed.timing.dispatchMs)
+            assertEquals(99_999.0, completed.asyncResults.single().execution.elapsedMs, 0.0)
+            assertEquals(50L, completed.asyncResults.single().completedNanos)
+            assertTrue(completed.timing.totalMs < 99_999.0)
+        }
+    }
+
+    @Test
+    fun snapshotImagesAndGuidesRequireCapabilitiesAndImagesHaveABoundedPixelBudget() {
+        val reports = Plugin("reports", setOf(PluginCapability.REPORT_IMAGE, PluginCapability.GUIDE))
+        val denied = Plugin("denied", emptySet())
+        start(reports, denied).use { host ->
+            val source = frame(host).also(host::acceptFrame).source
+            val guide = PluginGuide(PhotoRoi(.2f, .2f, .8f, .8f), "crop")
+            host.contextFor("denied")!!.publish(PluginOutput(100, imageReport = PluginImageReport(source, Image()), guide = guide))
+            assertTrue(host.snapshot.value.reports.isEmpty())
+            assertTrue(host.snapshot.value.guides.isEmpty())
+            host.contextFor("reports")!!.publish(PluginOutput(101,
+                imageReport = PluginImageReport(source, Image(10_000, 10_000)), guide = guide))
+            assertTrue(host.snapshot.value.reports.isEmpty())
+            assertEquals(guide, host.snapshot.value.guides.single().output.guide)
+            host.contextFor("reports")!!.publish(PluginOutput(102,
+                imageReport = PluginImageReport(source.copy(session = source.session - 1), Image())))
+            assertTrue(host.snapshot.value.reports.isEmpty())
+        }
+    }
+
+    @Test
+    fun fileOriginImageReportIsIndependentOfCameraButClearsOnConfigAndDisable() {
+        val plugin = Plugin("file", setOf(PluginCapability.REPORT_IMAGE))
+        val denied = Plugin("denied", emptySet())
+        start(plugin, denied).use { host ->
+            val before = host.contextFor("file")!!
+            val report = PluginImageReport(null, Image(200, 300), Image(400, 500), "文件输入 / 分割")
+            assertTrue(before.publish(PluginOutput(100, imageReport = report)))
+            assertNull(host.snapshot.value.displayedSource)
+            assertNull(host.snapshot.value.displayedImage)
+            assertNull(host.snapshot.value.replacement)
+            assertTrue(host.snapshot.value.layers.isEmpty())
+            assertEquals(report, host.snapshot.value.reports.single().output.imageReport)
+            host.contextFor("denied")!!.publish(PluginOutput(101, imageReport = report))
+            assertEquals(1, host.snapshot.value.reports.size)
+            val frame = frame(host).also(host::acceptFrame)
+            assertEquals(frame.source, host.snapshot.value.displayedSource)
+            assertEquals(report, host.snapshot.value.reports.single().output.imageReport)
+            assertTrue(host.snapshot.value.layers.isEmpty())
+            host.configure(mapOf("file" to PluginSettings(true, mapOf("file" to "new"), 1)))
+            assertFalse(before.publish(PluginOutput(200, imageReport = report)))
+            assertTrue(host.snapshot.value.reports.isEmpty())
+            val current = host.contextFor("file")!!
+            current.publish(PluginOutput(300, imageReport = report))
+            host.configure(mapOf("file" to PluginSettings(false)))
+            assertFalse(current.publish(PluginOutput(400, imageReport = report)))
+            assertTrue(host.snapshot.value.reports.isEmpty())
+        }
     }
 
     @Test

@@ -22,6 +22,7 @@ internal data class ConfiguredModel(
 
 internal object ConfiguredModelStore {
     private val mutableRevision = MutableStateFlow(0L)
+    private val generations = mutableMapOf<String, Long>()
     /** Successful atomic changes invalidate camera consumers even when the model ID is unchanged. */
     val revision = mutableRevision.asStateFlow()
 
@@ -61,19 +62,33 @@ internal object ConfiguredModelStore {
 
     fun describe(model: ConfiguredModel): GraphDescription = TfliteGraph(model.file.readBytes()).describe()
 
+    @Synchronized
+    fun version(model: ConfiguredModel): ConfiguredModelVersion? {
+        if (!model.file.isFile || !model.configFile.isFile) return null
+        return ConfiguredModelVersion(model.id, model.file.absolutePath, model.configFile.readBytes().sha256(),
+            model.enabledFile.isFile && model.enabledFile.readText().trim() == "true",
+            generations[model.file.absolutePath] ?: 0L)
+    }
+
+    private fun invalidate(model: ConfiguredModel) {
+        val path = model.file.absolutePath
+        generations[path] = (generations[path] ?: 0L) + 1
+        ConfiguredModelResults.invalidate(model)
+        mutableRevision.update { it + 1 }
+    }
+
     /** A separate atomic sidecar keeps camera selection out of the user's version-1 properties. */
     @Synchronized
     fun setEnabled(model: ConfiguredModel, enabled: Boolean) {
         check(model.file.isFile) { "模型已删除，请重新导入" }
         if (enabled) {
-            val config = ModelConfig.decode(model.configFile.readText(), describe(model))
-            require(config.inputs.all { it.source == InputSource.IMAGE }) {
-                "此模型需要文件输入，请点击模型卡片配置并运行；相机仅支持全部为 IMAGE 的输入"
-            }
+            // Non-image models are enabled consumers too: explicit PCM runs live, others on demand.
+            // Decode still rejects an invalid signature/shape; runtime limitations are diagnosed per model.
+            ModelConfig.decode(model.configFile.readText(), describe(model))
         }
         if (model.enabledFile.isFile && model.enabledFile.readText().trim() == enabled.toString()) return
         model.enabledFile.writeAtomically(enabled.toString().toByteArray())
-        mutableRevision.update { it + 1 }
+        invalidate(model)
     }
 
     /**
@@ -86,7 +101,7 @@ internal object ConfiguredModelStore {
         val model = list(directory).firstOrNull { it.id == legacyId } ?: return false
         if (!model.enabledFile.exists()) {
             model.enabledFile.writeAtomically("true".toByteArray())
-            mutableRevision.update { it + 1 }
+            invalidate(model)
         }
         return true
     }
@@ -96,7 +111,7 @@ internal object ConfiguredModelStore {
         ModelConfig.decode(text, description)
         check(model.file.isFile) { "模型已删除，请重新导入" }
         model.configFile.writeAtomically(text.toByteArray())
-        mutableRevision.update { it + 1 }
+        invalidate(model)
     }
 
     @Synchronized
@@ -105,6 +120,6 @@ internal object ConfiguredModelStore {
         model.configFile.delete()
         model.nameFile.delete()
         model.enabledFile.delete()
-        mutableRevision.update { it + 1 }
+        invalidate(model)
     }
 }

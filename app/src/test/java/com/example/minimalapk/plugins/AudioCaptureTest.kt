@@ -71,6 +71,10 @@ class AudioCaptureTest {
             audioPermissionAfterCheck(granted = false, requested = true, previous = AudioPermission.GRANTED),
         )
         assertEquals(
+            AudioPermission.REVOKED,
+            audioPermissionAfterCheck(granted = false, requested = true, previous = AudioPermission.MICROPHONE_BUSY),
+        )
+        assertEquals(
             AudioPermission.GRANTED,
             audioPermissionAfterCheck(granted = true, requested = false, previous = AudioPermission.NOT_REQUESTED),
         )

@@ -49,9 +49,11 @@ class AssetInstallerTest {
                 payload.copyOfRange(half, payload.size),
                 etag = "\"v1\"",
                 contentLength = (payload.size - half).toLong(),
+                contentRange = "bytes $half-${payload.lastIndex}/${payload.size}",
             )
         }
         val set = setOfFiles(asset("model.bin", payload))
+        File(root, ".test-set.partial/.fingerprint").writeText(set.fingerprint)
         val installer = installer(root, transport)
 
         installer.install(set)
@@ -72,6 +74,7 @@ class AssetInstallerTest {
             FakeResponse(ASSET_HTTP_OK, payload, etag = "\"new\"")
         }
         val set = setOfFiles(asset("model.bin", payload))
+        File(root, ".test-set.partial/.fingerprint").writeText(set.fingerprint)
         val installer = installer(root, transport)
 
         installer.install(set)
@@ -94,6 +97,7 @@ class AssetInstallerTest {
             }
         }
         val set = setOfFiles(asset("model.bin", payload))
+        File(root, ".test-set.partial/.fingerprint").writeText(set.fingerprint)
         val installer = installer(root, transport)
 
         installer.install(set)
@@ -115,12 +119,14 @@ class AssetInstallerTest {
                     payload.copyOfRange(half, payload.size),
                     etag = "\"new\"",
                     contentLength = (payload.size - half).toLong(),
+                    contentRange = "bytes $half-${payload.lastIndex}/${payload.size}",
                 )
             } else {
                 FakeResponse(ASSET_HTTP_OK, payload, etag = "\"new\"")
             }
         }
         val set = setOfFiles(asset("model.bin", payload))
+        File(root, ".test-set.partial/.fingerprint").writeText(set.fingerprint)
         val installer = installer(root, transport)
 
         installer.install(set)
@@ -136,6 +142,7 @@ class AssetInstallerTest {
         val oldSet = setOfFiles(asset("model.bin", oldPayload))
         File(root, "test-set").mkdirs()
         File(root, "test-set/model.bin").writeBytes(oldPayload)
+        File(root, "test-set/$ASSET_RECEIPT").writeText("1\n${oldSet.fingerprint}\n")
         val nextPayload = ByteArray(5_000) { 2 }
         val nextSet = setOfFiles(asset("model.bin", nextPayload))
         val transport = FakeTransport {
@@ -163,6 +170,7 @@ class AssetInstallerTest {
         val oldSet = setOfFiles(asset("model.bin", oldPayload))
         File(root, "test-set").mkdirs()
         File(root, "test-set/model.bin").writeBytes(oldPayload)
+        File(root, "test-set/$ASSET_RECEIPT").writeText("1\n${oldSet.fingerprint}\n")
         val nextPayload = ByteArray(64) { 8 }
         val nextSet = setOfFiles(asset("model.bin", nextPayload))
         val html = "<html><body>rate limited</body></html>".toByteArray()
@@ -205,6 +213,7 @@ class AssetInstallerTest {
         val oldSet = setOfFiles(asset("model.bin", oldPayload))
         File(root, "test-set").mkdirs()
         File(root, "test-set/model.bin").writeBytes(oldPayload)
+        File(root, "test-set/$ASSET_RECEIPT").writeText("1\n${oldSet.fingerprint}\n")
         val payload = ByteArray(120) { 6 }
         val badSet = setOfFiles(
             asset("model.bin", payload).copy(sha256 = "0".repeat(64)),
@@ -289,6 +298,7 @@ class AssetInstallerTest {
         val etag: String? = null,
         val contentType: String? = "application/octet-stream",
         val contentLength: Long = body.size.toLong(),
+        val contentRange: String? = null,
     )
 
     private class FakeTransport(
@@ -305,6 +315,7 @@ class AssetInstallerTest {
                 etag = response.etag,
                 contentType = response.contentType,
                 body = ByteArrayInputStream(response.body),
+                contentRange = response.contentRange,
             )
         }
     }

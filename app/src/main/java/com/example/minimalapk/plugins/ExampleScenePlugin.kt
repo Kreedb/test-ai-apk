@@ -11,6 +11,7 @@ import com.example.minimalapk.examples.ExampleModel
 import com.example.minimalapk.examples.ImageFit
 import com.example.minimalapk.examples.fittedImage
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.models.AssetTransfer
 import com.example.minimalapk.models.ConfiguredModelStore
 import com.example.minimalapk.models.ConfiguredModel
 import com.example.minimalapk.models.LiveConfiguredModel
@@ -121,15 +122,18 @@ internal class ExampleScenePlugin(
     private val model = AsyncModelSlot<Request, SceneModel>(
         "ExampleScene:${spec.id}",
         open = { request ->
-            if (!request.context.isCurrent()) throw CancellationException("场景模型请求已失效")
+            val transfer = AssetTransfer {
+                if (!request.context.isCurrent()) throw CancellationException("场景模型请求已失效")
+            }
+            transfer.checkpoint()
             // Scene contracts must not depend on a user's separate custom-model properties.
-            val file = ExampleDownload.ensure(application, spec.example)
+            val file = ExampleDownload.ensure(application, spec.example, transfer)
             val installed = ConfiguredModel(spec.example.sha256, spec.example.name, file)
-            if (!request.context.isCurrent()) throw CancellationException("场景模型请求已失效")
+            transfer.checkpoint()
             val graph = ConfiguredModelStore.describe(installed).signatures.first { it.key.isEmpty() }
             val config = sceneModelConfig(spec.id, graph)
             val labels = ExampleDownload.labels(installed.file, spec.example)
-            if (!request.context.isCurrent()) throw CancellationException("场景模型请求已失效")
+            transfer.checkpoint()
             AppLog.i("ScenePlugin", "${spec.id} sha256=${spec.example.sha256} " +
                 "input=${graph.inputs.single().shape}/type=${graph.inputs.single().type} " +
                 "RGB mean=${config.inputs.single().mean} std=${config.inputs.single().std} " +
@@ -142,7 +146,7 @@ internal class ExampleScenePlugin(
             ))))
         },
         failed = { request, error ->
-            if (request.context.isCurrent()) {
+            if (error !is CancellationException && request.context.isCurrent()) {
                 AppLog.w("ScenePlugin", "${spec.id} 加载/推理失败", error)
                 request.context.publish(PluginOutput(System.nanoTime(), listOf(PluginMessage(
                     "未就绪：${error.message ?: "${spec.name}模型加载失败"}", MessageKind.ERROR,

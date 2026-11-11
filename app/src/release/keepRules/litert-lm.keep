@@ -1,0 +1,27 @@
+# LiteRT-LM 0.19.0 AAR has no consumer rules. Audited against tag v0.19.0:
+# kotlin/java/com/google/ai/edge/litertlm/jni/litertlm.cc.
+# JNI_METHOD resolves these methods by their exported name (not RegisterNatives).
+-keep,allowoptimization class com.google.ai.edge.litertlm.LiteRtLmJni {
+    native <methods>;
+}
+# NativeLibraryLoader has its own exported nativeCheckLoaded symbol in the same JNI library.
+-keep,allowoptimization class com.google.ai.edge.litertlm.NativeLibraryLoader {
+    native <methods>;
+}
+# ThrowLiteRtLmJniException uses FindClass + ThrowNew(String).
+-keep,allowoptimization class com.google.ai.edge.litertlm.LiteRtLmJniException {
+    <init>(java.lang.String);
+}
+# ConvertSamplerConfig uses GetMethodID by these names/signatures.
+-keepclassmembers,allowoptimization class com.google.ai.edge.litertlm.SamplerConfig {
+    int getTopK();
+    double getTopP();
+    double getTemperature();
+    int getSeed();
+}
+# nativeSendMessageAsync reflects on the concrete callback object.
+-keepclassmembers,allowoptimization class * implements com.google.ai.edge.litertlm.LiteRtLmJni$JniMessageCallback {
+    void onMessage(java.lang.String);
+    void onDone();
+    void onError(int, java.lang.String);
+}

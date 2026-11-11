@@ -87,7 +87,7 @@ internal class TtsPlayback {
  * engine callbacks are always posted, including synchronous constructor/speak failures.
  */
 internal class TtsEngine(
-    context: Context,
+    private val context: Context,
     requestedEngine: String = "",
     private val onPlayback: (String?) -> Unit = {},
     private val onStatus: (String, Boolean) -> Unit,
@@ -95,6 +95,8 @@ internal class TtsEngine(
     private val main = Handler(Looper.getMainLooper())
     private val playback = TtsPlayback()
     private var engine: TextToSpeech? = null
+    private var audioFocus: PluginAudioFocus.Lease? = null
+    private var focusGeneration = 0L
     @Volatile private var closed = false
 
     val ready: Boolean get() = !closed && playback.ready
@@ -156,6 +158,7 @@ internal class TtsEngine(
 
     private fun publish() {
         if (closed) return
+        if (playback.text == null) { audioFocus?.close(); audioFocus = null }
         onStatus(playback.message, playback.ready)
         onPlayback(playback.text)
     }
@@ -165,7 +168,24 @@ internal class TtsEngine(
         check(Looper.myLooper() == main.looper) { "朗读必须在主线程调用" }
         if (closed) return false
         val tts = engine ?: return false
-        val id = playback.enqueue(clampTtsText(text, TextToSpeech.getMaxSpeechInputLength())) ?: return false
+        if (!playback.ready || text.isBlank()) return false
+        runCatching { tts.stop() }
+        audioFocus?.close()
+        val focusRequest = ++focusGeneration
+        audioFocus = try {
+            PluginAudioFocus.acquire(context) {
+                onMain { if (focusGeneration == focusRequest) stop() }
+            }
+        } catch (_: Exception) {
+            playback.stop()
+            publish()
+            return false
+        }
+        val id = playback.enqueue(clampTtsText(text, TextToSpeech.getMaxSpeechInputLength())) ?: run {
+            audioFocus?.close()
+            audioFocus = null
+            return false
+        }
         publish()
         val accepted = try {
             tts.speak(playback.text!!, TextToSpeech.QUEUE_FLUSH, null, id) == TextToSpeech.SUCCESS
@@ -179,9 +199,10 @@ internal class TtsEngine(
     fun stop() {
         onMain {
             if (!closed && playback.stop()) {
+                focusGeneration++
                 // Clear synchronously: some engines never emit onStop for a queued utterance.
-                publish()
                 runCatching { engine?.stop() }
+                publish()
             }
         }
     }
@@ -190,11 +211,14 @@ internal class TtsEngine(
         if (closed) return
         closed = true
         onMain {
+            focusGeneration++
             playback.close()
             val tts = engine
             engine = null
             runCatching { tts?.stop() }
             runCatching { tts?.shutdown() }
+            audioFocus?.close()
+            audioFocus = null
         }
     }
 

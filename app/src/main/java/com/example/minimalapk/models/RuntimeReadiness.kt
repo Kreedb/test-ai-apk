@@ -1,6 +1,7 @@
 package com.example.minimalapk.models
 
 import android.os.Build
+import com.example.minimalapk.litert.lm.LocalTextModels
 
 /** Facts the caller supplies so the JVM tests never touch the Android runtime. */
 internal data class DeviceProfile(
@@ -46,9 +47,9 @@ internal fun checkRuntimeCompatibility(
             reasons += "此模型声明需要 NPU，但当前设备没有可用的 Qualcomm HTP 运行时"
         }
     }
-    set.files.filter { it.name.endsWith(".litertlm", ignoreCase = true) }.forEach { file ->
-        reasons += "文件 ${file.name} 需要 .litertlm 运行时；本应用未集成 " +
-            "com.google.ai.edge.litertlm:litertlm-android"
+    if (set.files.any { it.name.endsWith(".litertlm", ignoreCase = true) } && !LocalTextModels.supports(set)) {
+        reasons += "已集成 litertlm-android ${LocalTextModels.RUNTIME_VERSION}，但此 .litertlm 资源/后端未验证；" +
+            "当前仅支持固定修订的 Qwen2.5-Coder-1.5B CPU 配方"
     }
     return RuntimeCompatibility(reasons)
 }

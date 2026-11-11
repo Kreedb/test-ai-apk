@@ -47,6 +47,8 @@ import com.example.minimalapk.plugins.AudioClassificationSettings
 import com.example.minimalapk.plugins.ExampleSceneSpec
 import com.example.minimalapk.plugins.ExampleScenes
 import com.example.minimalapk.plugins.PluginIds
+import com.example.minimalapk.plugins.LiteRtScenes
+import com.example.minimalapk.plugins.LocalTextPlugin
 import com.example.minimalapk.plugins.PluginSettings
 import com.example.minimalapk.plugins.PluginSettingsStore
 import com.example.minimalapk.plugins.PoseEnhancementSettings
@@ -76,6 +78,8 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
     var configureTts by rememberSaveable { mutableStateOf(false) }
     var configurePersonalization by rememberSaveable { mutableStateOf(false) }
     var configureScene by rememberSaveable { mutableStateOf<String?>(null) }
+    var configureLiteRt by rememberSaveable { mutableStateOf<String?>(null) }
+    var configureLocalText by rememberSaveable { mutableStateOf(false) }
     LazyColumn(
         modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -152,6 +156,26 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
                 onConfigure = { configurePersonalization = true },
             )
         }
+        items(LiteRtScenes.all, key = { it.id }) { scene ->
+            val current = settings[scene.id] ?: PluginSettings()
+            PluginCard(
+                name = scene.name,
+                status = "${if (current.enabled) "已启用" else "已停用"} · ${scene.purpose}",
+                enabled = current.enabled,
+                onEnabledChange = { store.setEnabled(scene.id, it) },
+                onConfigure = { configureLiteRt = scene.id },
+            )
+        }
+        item {
+            val localText = settings[LocalTextPlugin.ID] ?: PluginSettings()
+            PluginCard(
+                name = "本地文本助手",
+                status = "${if (localText.enabled) "已启用" else "已停用"} · 根据输入文本生成回答",
+                enabled = localText.enabled,
+                onEnabledChange = { store.setEnabled(LocalTextPlugin.ID, it) },
+                onConfigure = { configureLocalText = true },
+            )
+        }
     }
     if (configure) {
         PoseEnhancementDialog(PoseEnhancementSettings.from(pose), onSave = {
@@ -163,6 +187,10 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
         SystemMonitorDialog(SystemMonitorSettings.from(monitor), onSave = {
             store.configure(PluginIds.SYSTEM_MONITOR, it.toConfig())
             configureMonitor = false
+        }, onCompare = {
+            store.setEnabled(PluginIds.SYSTEM_MONITOR, true)
+            store.requestAction(PluginIds.SYSTEM_MONITOR, "backend_compare")
+            configureMonitor = false
         }, onDismiss = { configureMonitor = false })
     }
     if (configureSuperResolution) {
@@ -173,6 +201,30 @@ internal fun PluginsScreen(store: PluginSettingsStore) {
     }
     if (configureModels) {
         ConfiguredModelDialog(onDismiss = { configureModels = false })
+    }
+    configureLiteRt?.let { id ->
+        LiteRtScenes.all.firstOrNull { it.id == id }?.let { scene ->
+            LiteRtSettingsDialog(
+                scene = scene, settings = settings[id] ?: PluginSettings(),
+                onSave = { config, run ->
+                    store.configure(id, config)
+                    if (run) store.requestAction(id, "run")
+                    configureLiteRt = null
+                },
+                onDownload = { configureLiteRt = null; configureModels = true },
+                onDismiss = { configureLiteRt = null },
+            )
+        }
+    }
+    if (configureLocalText) {
+        LocalTextConfigDialog(
+            settings = settings[LocalTextPlugin.ID] ?: PluginSettings(),
+            onDismiss = { configureLocalText = false },
+            onConfirm = { config ->
+                store.configure(LocalTextPlugin.ID, config)
+                configureLocalText = false
+            },
+        )
     }
     configureScene?.let { id ->
         val spec = ExampleScenes.all.firstOrNull { it.id == id }
@@ -461,6 +513,7 @@ private fun SuperResolutionDialog(
 private fun SystemMonitorDialog(
     initial: SystemMonitorSettings,
     onSave: (SystemMonitorSettings) -> Unit,
+    onCompare: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var showFps by rememberSaveable { mutableStateOf(initial.showFps) }
@@ -483,9 +536,11 @@ private fun SystemMonitorDialog(
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("显示指标", style = MaterialTheme.typography.titleSmall)
+                TextButton(onClick = onCompare) { Text("比较 CPU / GPU / NPU（内置 YOLO26n）") }
+                Text("同一内置模型与固定合成输入；每后端预热 1 次、测量 3 次，包含读回。返回相机执行，可取消；GPU/NPU 可混合 CPU，实际硬件未必可证明。", style = MaterialTheme.typography.bodySmall)
                 PluginSwitchRow("帧率", "相机帧率，来自帧时间戳", showFps) { showFps = it }
-                PluginSwitchRow("耗时", "预处理/推理/后处理/分析总耗时", showTimings) { showTimings = it }
-                PluginSwitchRow("后端", "上次成功加载的推理后端", showBackend) { showBackend = it }
+                PluginSwitchRow("耗时", "主姿态链路 / 同步帧处理 / 异步最近完成（分别显示）", showTimings) { showTimings = it }
+                PluginSwitchRow("后端", "主姿态后端；GPU/NPU 实际分区可能未知", showBackend) { showBackend = it }
                 PluginSwitchRow("CPU", "本应用占设备总 CPU 算力", showCpu) { showCpu = it }
                 PluginSwitchRow("GPU", "厂商 sysfs 负载，显示来源", showGpu) { showGpu = it }
                 PluginSwitchRow("NPU", "按所选来源与单位显示", showNpu) { showNpu = it }

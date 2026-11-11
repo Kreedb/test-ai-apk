@@ -3,6 +3,7 @@ package com.example.minimalapk.models
 import android.content.Context
 import java.io.File
 import java.net.URI
+import java.security.MessageDigest
 
 /** One downloadable file in a catalog set. Sizes and hashes come from the pinned upstream JSON. */
 internal data class AssetFile(
@@ -28,14 +29,40 @@ internal data class AssetSet(
     val modelCardUrl: String,
     val files: List<AssetFile>,
 ) {
-    val totalBytes: Long get() = files.sumOf { it.bytes }
+    val totalBytes: Long get() = files.fold(0L) { total, file ->
+        require(file.bytes > 0 && total <= Long.MAX_VALUE - file.bytes) { "模型集合声明大小无效或溢出" }
+        total + file.bytes
+    }
 
-    /** Cheap readiness check: exact sizes only, no hashing on the hot path. */
-    fun isReadyIn(root: File): Boolean = files.all { file ->
-        val installed = File(File(root, id), file.name)
-        installed.isFile && installed.length() == file.bytes
+    /** Includes the pinned source as well as content; a same-sized catalog upgrade is not ready. */
+    val fingerprint: String get() {
+        val manifest = buildString {
+            appendLine(id)
+            files.sortedBy { it.name }.forEach { file ->
+                appendLine("${file.name}\t${file.url}\t${file.bytes}\t${file.sha256.lowercase()}")
+            }
+        }
+        return MessageDigest.getInstance("SHA-256").digest(manifest.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    /** Verified receipt plus exact sizes; no weight hashing on an engine's hot path. */
+    fun isReadyIn(root: File): Boolean {
+        if (files.isEmpty()) return false
+        val directory = File(root, requireSafeSetId(id))
+        val receipt = File(directory, ASSET_RECEIPT)
+        return receipt.isFile && receipt.length() == ASSET_RECEIPT_BYTES &&
+            runCatching { receipt.readText(Charsets.US_ASCII) == "1\n$fingerprint\n" }.getOrDefault(false) &&
+            files.all { file ->
+                requireSafeFileName(file.name) && File(directory, file.name).let {
+                    it.isFile && it.length() == file.bytes
+                }
+            }
     }
 }
+
+internal const val ASSET_RECEIPT = ".verified"
+internal const val ASSET_RECEIPT_BYTES = 67L
 
 /**
  * Parses the generated tab-separated catalog. Deliberately line-oriented so the app needs no JSON

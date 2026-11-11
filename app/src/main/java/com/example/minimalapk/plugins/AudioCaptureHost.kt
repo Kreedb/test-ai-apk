@@ -5,8 +5,11 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRecordingConfiguration
 import android.media.MediaRecorder
+import android.os.Build
 import androidx.core.content.ContextCompat
 import com.example.minimalapk.log.AppLog
 import java.nio.ByteBuffer
@@ -35,45 +38,13 @@ internal fun pcmChunkBytes(
     return (bytes - bytes % frameBytes).toInt().coerceAtLeast(frameBytes)
 }
 
-/** Pure subscription/lifecycle gate. Capture never starts for a backgrounded, unsubscribed,
- * unpermissioned, or session-less camera. */
-internal class AudioCaptureGate {
-    var foreground: Boolean = false
-        private set
-    var subscribed: Boolean = false
-        private set
-    var session: Long? = null
-        private set
-    var permission: AudioPermission = AudioPermission.NOT_REQUESTED
-        private set
-
-    val shouldCapture: Boolean
-        get() = foreground && subscribed && session != null && permission == AudioPermission.GRANTED
-
-    fun setForeground(value: Boolean) {
-        foreground = value
-    }
-
-    fun setSubscribed(value: Boolean) {
-        subscribed = value
-    }
-
-    fun setSession(value: Long?) {
-        session = value
-    }
-
-    fun setPermission(value: AudioPermission) {
-        permission = value
-    }
-}
-
 internal fun audioPermissionAfterCheck(
     granted: Boolean,
     requested: Boolean,
     previous: AudioPermission,
 ): AudioPermission = when {
     granted -> AudioPermission.GRANTED
-    previous == AudioPermission.GRANTED -> AudioPermission.REVOKED
+    previous == AudioPermission.GRANTED || previous == AudioPermission.MICROPHONE_BUSY -> AudioPermission.REVOKED
     requested -> AudioPermission.DENIED
     else -> AudioPermission.NOT_REQUESTED
 }
@@ -90,18 +61,37 @@ internal class AudioCaptureHost(
 ) : AutoCloseable {
     private val application = context.applicationContext
     private val main = ContextCompat.getMainExecutor(application)
+    private val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val lock = Any()
     private val gate = AudioCaptureGate()
     private var capture: Capture? = null
+    private var playbackPaused = false
+    private var reportPosted = false
     @Volatile private var closed = false
 
-    private class Capture(val session: Long, val record: AudioRecord) {
-        @Volatile var running = true
+    private class Capture(val ticket: AudioCaptureTicket) {
+        // Start/stop/release are serialized on this object; a blocking read never holds it.
+        var record: AudioRecord? = null
+        var started = false
+        var startedNanos = 0L
+        var configurationSeen = false
+        var callback: AudioManager.AudioRecordingCallback? = null
     }
 
     fun permissionChanged(permission: AudioPermission) {
+        if (closed) return
         synchronized(lock) { gate.setPermission(permission) }
         report()
+        reconcile()
+    }
+
+    fun playbackChanged(playing: Boolean) {
+        if (closed) return
+        synchronized(lock) {
+            playbackPaused = playing
+            gate.setPlaybackPaused(playing)
+        }
+        host.playbackChanged(playing)
         reconcile()
     }
 
@@ -122,10 +112,9 @@ internal class AudioCaptureHost(
         if (closed) return
         synchronized(lock) {
             gate.setForeground(true)
-            // A previous MICROPHONE_BUSY is retried once the host returns to the foreground.
-            if (gate.permission == AudioPermission.MICROPHONE_BUSY) {
-                gate.setPermission(AudioPermission.GRANTED)
-            }
+            // Recheck even if the permission UI has not delivered its resume callback yet.
+            gate.setPermission(audioPermissionAfterCheck(hasPermission(),
+                requested = gate.permission != AudioPermission.NOT_REQUESTED, previous = gate.permission))
         }
         refresh()
     }
@@ -144,132 +133,221 @@ internal class AudioCaptureHost(
             stopCapture()
             return
         }
-        val shouldCapture = synchronized(lock) { gate.shouldCapture }
-        val session = synchronized(lock) { gate.session }
-        if (shouldCapture && session != null) {
-            if (capture?.session != session || capture?.running != true) startCapture(session)
-        } else {
-            stopCapture()
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun startCapture(session: Long) {
-        if (!hasPermission()) {
-            val next = synchronized(lock) {
-                audioPermissionAfterCheck(false, requested = true, previous = gate.permission)
-                    .also { gate.setPermission(it) }
-            }
-            report()
-            if (next == AudioPermission.REVOKED) stopCapture()
+        val current = synchronized(lock) { capture }
+        if (current != null) {
+            if (!synchronized(lock) { gate.isRunning(current.ticket) && !playbackPaused }) stopCapture()
+            // Retain ownership until the worker has released the old recorder.
             return
         }
-        val chunkBytes = pcmChunkBytes()
-        val minBuffer = AudioRecord.getMinBufferSize(
-            AUDIO_SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-        )
-        if (minBuffer <= 0) {
-            reportMicrophoneBusy(session)
-            return
-        }
-        val record = try {
-            AudioRecord.Builder()
-                .setAudioSource(MediaRecorder.AudioSource.MIC)
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(AUDIO_SAMPLE_RATE)
-                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                        .build(),
-                )
-                .setBufferSizeInBytes(maxOf(minBuffer, chunkBytes * 2))
-                .build()
-        } catch (error: Throwable) {
-            AppLog.w("AudioCapture", "麦克风初始化失败", error)
-            reportMicrophoneBusy(session)
-            return
-        }
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
-            runCatching { record.release() }
-            reportMicrophoneBusy(session)
-            return
-        }
-        val next = Capture(session, record)
-        synchronized(lock) {
-            if (closed || !gate.shouldCapture || gate.session != session) {
-                runCatching { record.release() }
-                return
-            }
-            capture = next
-        }
+        val next = synchronized(lock) {
+            gate.begin()?.let { Capture(it).also { owner -> capture = owner } }
+        } ?: return
         Thread({ captureLoop(next) }, "AudioCapture").start()
     }
 
+    private fun isRunning(capture: Capture): Boolean = synchronized(lock) {
+        !closed && this.capture === capture && gate.isRunning(capture.ticket)
+    }
+
+    @SuppressLint("MissingPermission")
     private fun captureLoop(capture: Capture) {
         try {
-            if (!capture.running) return
-            capture.record.startRecording()
-            if (capture.record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                capture.running = false
-                reportMicrophoneBusy(capture.session)
+            if (!isRunning(capture)) return
+            if (!hasPermission()) {
+                permissionLost(capture)
                 return
             }
-            val buffer = ByteArray(pcmChunkBytes())
-            while (capture.running && !closed) {
-                val read = capture.record.read(buffer, 0, buffer.size)
-                if (read > 0) {
-                    // PcmBlock requires whole frames; a partial trailing sample is dropped.
-                    val frameBytes = AUDIO_CHANNEL_COUNT * PcmFormat.PCM_16_LE.bytesPerSample
-                    val aligned = read - read % frameBytes
-                    if (aligned > 0) {
-                        val samples = ByteBuffer.wrap(buffer.copyOf(aligned)).asReadOnlyBuffer()
-                        host.audio(
-                            capture.session,
-                            PcmBlock(
-                                samples, AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_COUNT,
-                                PcmFormat.PCM_16_LE, System.nanoTime(),
-                            ),
-                        )
+            val chunkBytes = pcmChunkBytes()
+            val minBuffer = AudioRecord.getMinBufferSize(
+                AUDIO_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+            )
+            if (minBuffer <= 0) {
+                failed(capture, "AudioRecord.getMinBufferSize=$minBuffer")
+                return
+            }
+            val record = AudioRecord.Builder()
+                .setAudioSource(MediaRecorder.AudioSource.MIC)
+                .setAudioFormat(AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(AUDIO_SAMPLE_RATE)
+                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO).build())
+                .setBufferSizeInBytes(maxOf(minBuffer, chunkBytes * 2))
+                .build()
+            synchronized(capture) {
+                capture.record = record
+                if (!isRunning(capture)) return
+                if (record.state != AudioRecord.STATE_INITIALIZED) {
+                    failed(capture, "AudioRecord.state=${record.state}（初始化失败）")
+                    return
+                }
+                synchronized(lock) {
+                    gate.bufferSize(capture.ticket,
+                        record.bufferSizeInFrames * AUDIO_CHANNEL_COUNT * PcmFormat.PCM_16_LE.bytesPerSample)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val callback = object : AudioManager.AudioRecordingCallback() {
+                        override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>) {
+                            // AudioRecord filters to its own port. Preserve even a short silencing
+                            // notification, but query current state before allowing recovery.
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                observeAvailability(capture, wasSilenced = configs.any { it.isClientSilenced })
+                            }
+                        }
                     }
-                } else if (read < 0) {
-                    break
+                    record.registerAudioRecordingCallback(main, callback)
+                    capture.callback = callback
+                }
+                record.startRecording()
+                if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                    failed(capture, "AudioRecord.recordingState=${record.recordingState}（未开始录音）")
+                    return
+                }
+                capture.started = true
+                capture.startedNanos = System.nanoTime()
+            }
+            val buffer = ByteArray(chunkBytes)
+            while (isRunning(capture)) {
+                observeAvailability(capture)
+                val pending = synchronized(lock) { gate.beginRead(capture.ticket) } ?: break
+                val read = record.read(buffer, 0, buffer.size)
+                // Observe both sides of the read; never deliver a block spanning mute/recovery.
+                if (read >= 0) observeAvailability(capture)
+                val outcome = synchronized(lock) { gate.readCompleted(pending, read) }
+                when (outcome) {
+                    AudioReadOutcome.DELIVER -> {
+                        val frameBytes = AUDIO_CHANNEL_COUNT * PcmFormat.PCM_16_LE.bytesPerSample
+                        val aligned = read - read % frameBytes
+                        if (aligned > 0 && synchronized(lock) { gate.canDeliver(pending) }) {
+                            host.audio(capture.ticket.session, PcmBlock(
+                                ByteBuffer.wrap(buffer.copyOf(aligned)).asReadOnlyBuffer(),
+                                AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_COUNT, PcmFormat.PCM_16_LE, System.nanoTime(),
+                            ))
+                        }
+                    }
+                    AudioReadOutcome.FAILED -> {
+                        AppLog.w("AudioCapture", "麦克风采集不可用：AudioRecord.read=$read (${audioReadError(read)})")
+                        postReport()
+                        break
+                    }
+                    AudioReadOutcome.STOP -> break
+                    // A broken vendor returning zero immediately must not create a hot loop.
+                    AudioReadOutcome.EMPTY -> Thread.sleep(AUDIO_CHUNK_MS.toLong())
+                    AudioReadOutcome.DROP -> Unit
                 }
             }
+        } catch (error: SecurityException) {
+            if (hasPermission()) failed(capture, "麦克风采集被系统拒绝", error)
+            else permissionLost(capture)
         } catch (error: Throwable) {
-            if (capture.running && !closed) {
-                AppLog.w("AudioCapture", "麦克风采集失败", error)
-                reportMicrophoneBusy(capture.session)
-            }
+            failed(capture, "麦克风初始化/采集失败", error)
         } finally {
-            runCatching { capture.record.stop() }
-            runCatching { capture.record.release() }
-            synchronized(lock) { if (this.capture === capture) this.capture = null }
+            synchronized(capture) {
+                val record = capture.record
+                if (record != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        capture.callback?.let { runCatching { record.unregisterAudioRecordingCallback(it) } }
+                    }
+                    runCatching { record.stop() }
+                    runCatching { record.release() }
+                }
+                capture.record = null
+                capture.started = false
+            }
+            main.execute {
+                synchronized(lock) {
+                    gate.released(capture.ticket)
+                    if (this.capture === capture) this.capture = null
+                }
+                report()
+                reconcile()
+            }
+        }
+    }
+
+    /** API24 mute observation; API29 adds per-recorder privacy/concurrent-capture silencing.
+     * Android's microphone privacy switch is not necessarily reflected by isMicrophoneMute(). */
+    private fun observeAvailability(capture: Capture, wasSilenced: Boolean = false) {
+        try {
+            synchronized(capture) {
+                if (!capture.started || !isRunning(capture)) return
+                val record = capture.record ?: return
+                if (wasSilenced) {
+                    capture.configurationSeen = true
+                    observed(capture, AudioCaptureAvailability.CLIENT_SILENCED)
+                }
+                val availability = when {
+                    audioManager.isMicrophoneMute -> AudioCaptureAvailability.MICROPHONE_MUTED
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> {
+                        val configuration = record.activeRecordingConfiguration
+                        // The service's initial recording notification can lag startRecording().
+                        // Drop unconfirmed PCM during this bounded grace, rather than cancel a
+                        // short batch capture on a transient null before its first read completes.
+                        if (configuration == null && !capture.configurationSeen &&
+                            System.nanoTime() - capture.startedNanos < 250_000_000L) return
+                        if (configuration != null) capture.configurationSeen = true
+                        when {
+                            configuration == null -> AudioCaptureAvailability.CONFIGURATION_UNAVAILABLE
+                            configuration.isClientSilenced -> AudioCaptureAvailability.CLIENT_SILENCED
+                            else -> AudioCaptureAvailability.AVAILABLE
+                        }
+                    }
+                    else -> AudioCaptureAvailability.AVAILABLE
+                }
+                observed(capture, availability)
+            }
+        } catch (error: Throwable) {
+            failed(capture, "无法确认麦克风静音/录音状态", error)
+        }
+    }
+
+    private fun observed(capture: Capture, availability: AudioCaptureAvailability) {
+        if (synchronized(lock) { gate.observe(capture.ticket, availability) }) {
+            if (availability != AudioCaptureAvailability.AVAILABLE) {
+                AppLog.w("AudioCapture", "停止转发麦克风 PCM：${availability.reason}")
+            }
+            postReport()
+        }
+    }
+
+    private fun permissionLost(capture: Capture) {
+        val changed = synchronized(lock) {
+            if (!gate.isRunning(capture.ticket)) false else {
+                gate.setPermission(AudioPermission.REVOKED)
+                true
+            }
+        }
+        if (changed) {
+            AppLog.w("AudioCapture", "RECORD_AUDIO 权限已撤销，停止采集")
+            postReport()
+        }
+    }
+
+    private fun failed(capture: Capture, reason: String, error: Throwable? = null) {
+        if (synchronized(lock) { gate.fail(capture.ticket) }) {
+            AppLog.w("AudioCapture", reason, error)
+            postReport()
         }
     }
 
     private fun stopCapture() {
         val current = synchronized(lock) {
-            val value = capture
-            capture = null
-            value
+            gate.stop()
+            capture
         } ?: return
-        current.running = false
-        // Unblocks a pending AudioRecord.read; the capture thread releases the record afterwards.
-        runCatching { current.record.stop() }
+        synchronized(current) {
+            // Unblock a pending read; the worker is the only releaser.
+            runCatching { current.record?.stop() }
+        }
     }
 
-    /** Reports a session-scoped busy state without ever throwing from the capture thread. */
-    private fun reportMicrophoneBusy(session: Long) {
-        if (closed) return
+    /** One bounded UI notification; even a quick mute/unmute invalidates old model contexts. */
+    private fun postReport() {
+        synchronized(lock) {
+            if (closed || reportPosted) return
+            reportPosted = true
+        }
         main.execute {
-            if (closed) return@execute
-            val sameSession = synchronized(lock) {
-                gate.foreground && gate.session == session
-            }
-            if (!sameSession) return@execute
-            synchronized(lock) { gate.setPermission(AudioPermission.MICROPHONE_BUSY) }
+            synchronized(lock) { reportPosted = false }
             report()
             reconcile()
         }
@@ -277,8 +355,10 @@ internal class AudioCaptureHost(
 
     private fun report() {
         if (closed) return
-        val (session, permission) = synchronized(lock) { gate.session to gate.permission }
-        if (session != null) host.permissionChanged(session, permission)
+        val status = synchronized(lock) { gate.report() } ?: return
+        if (status.withdrawBeforeGrant) host.permissionChanged(status.session, AudioPermission.MICROPHONE_BUSY)
+        host.permissionChanged(status.session, status.permission)
+        synchronized(lock) { gate.acknowledge(status) }
     }
 
     private fun hasPermission(): Boolean =
@@ -294,4 +374,12 @@ internal class AudioCaptureHost(
         }
         stopCapture()
     }
+}
+
+private fun audioReadError(code: Int): String = when (code) {
+    AudioRecord.ERROR_DEAD_OBJECT -> "ERROR_DEAD_OBJECT"
+    AudioRecord.ERROR_INVALID_OPERATION -> "ERROR_INVALID_OPERATION"
+    AudioRecord.ERROR_BAD_VALUE -> "ERROR_BAD_VALUE"
+    AudioRecord.ERROR -> "ERROR"
+    else -> "UNKNOWN_ERROR"
 }

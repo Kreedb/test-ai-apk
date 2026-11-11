@@ -1,0 +1,37 @@
+Local text model/runtime provenance
+==================================
+
+Runtime: com.google.ai.edge.litertlm:litertlm-android:0.19.0
+Source: https://github.com/google-ai-edge/LiteRT-LM/tree/v0.19.0
+License: Apache License, Version 2.0
+Copyright 2025 The LiteRT-LM Authors.
+The runtime AAR's unmodified LICENSE and THIRD_PARTY_NOTICE.txt are bundled as
+LICENSE-LiteRT-LM.txt and NOTICE-LiteRT-LM-Third-Party.txt in this directory.
+Model weights are not bundled in the application or test APK.
+
+Qwen2.5-Coder-1.5B-Instruct (code suggestions, short question/summary/translation)
+Base: https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct
+License: Apache License, Version 2.0 (inherited from the base model).
+Conversion: https://huggingface.co/litert-community/Qwen2.5-Coder-1.5B-Instruct
+Pinned revision: 7840209bfd393408ef028cf55921d831baa1e4bf
+File: Qwen2.5-Coder-1.5B-Instruct_int4.litertlm
+Bytes: 1117385648
+SHA-256: 273ecc7771ba2dd5fe1bb6d4d4726ad0353102f04ad094082ccf59bca9f21213
+
+Conversion changes, as documented by its publisher: bf16 safetensors converted
+to LiteRT flatbuffers, int4 blockwise-32 OCTAV linears and int8 externalized
+embedding; tokenizer and default-system ChatML template packaged in .litertlm.
+This is the earlier bundle whose weights are inside the graph, deliberately
+matching the fixed sample recipe's 1117385648 bytes, not the later main revision.
+The converter is a community project, not affiliated with Alibaba Cloud/Qwen.
+
+Reference recipe:
+google-ai-edge/litert-samples@f9f0e000630e9cdd6d263c4cd80495e4231a2dc8
+models/qwen/qwen2_5_coder_1_5b_instruct/converted/README.md
+https://github.com/google-ai-edge/litert-samples/blob/f9f0e000630e9cdd6d263c4cd80495e4231a2dc8/models/qwen/qwen2_5_coder_1_5b_instruct/converted/README.md
+The host implements a bounded one-request UI and does not execute generated code.
+The recipe's code-execution quality gate is not run by the application.
+
+The full Apache-2.0 license is available at:
+https://www.apache.org/licenses/LICENSE-2.0
+and in the bundled models/LICENSE-LiteRT.txt.

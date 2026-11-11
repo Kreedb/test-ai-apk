@@ -10,7 +10,7 @@
 | --- | --- |
 | 主页 | 上次加载的推理后端与应用版本、CPU/GPU 型号、设备型号、系统版本与 ABI（不启动占用监控） |
 | 相机 | CameraX 后置摄像头预览，按启用的插件显示识别、测量、增强与监控结果 |
-| 插件 | 独立总开关，点击卡片配置；姿态增强、自定义模型、系统监控、整幅超分、动作观察、物品识别、物体检测、场景分割、声音识别、语音朗读与设备端学习 |
+| 插件 | 独立总开关、点击卡片配置；既有场景及 LiteRT 画面分析、图像增强、英语字幕、神经朗读、录音处理、文本决策与本地文本建议 |
 | 设置 | 推理后端、GitHub 镜像源、应用自检、日志、主题设置与关于 |
 
 ## 项目结构
@@ -72,19 +72,19 @@ app/src/main/java/com/example/minimalapk/
 - 性能面板中的“加速器”会显示实际选中的后端（如 `LiteRT (NPU)`、`LiteRT (GPU)`、`LiteRT (GPU/GL)` 或 `LiteRT (CPU)`）。`LiteRT (GPU)`/`LiteRT (GPU/GL)` 表示 GPU 成功参与委托，未被 GPU 委托的算子仍由 CPU 执行。
 - 日志页会记录后端探测顺序、设备信息（SDK/ABI/SoC 厂商与型号）、启用的模型、NPU 门槛未通过的原因、NPU 环境与 JIT 编译耗时、LiteRT GPU 每次尝试的后端（`AUTOMATIC`/`OPENGL`）与环境可用加速器、各后端加载耗时/失败堆栈、导入时的签名改写数量，以及首帧每个模型的预处理/推理/后处理耗时，便于定位启动慢或回退问题。
 - 输入身高用于把像素换算成厘米：`cm/px = 身高 / 人体检测框高度`，再据此估算臂展、双眼间距、肩线/髋线倾斜与肩髋横向偏移。点击“插件 → 姿态增强”卡片配置身高与叠加线；独立总开关关闭后撤回测量线、人体信息和该插件说明，基础骨架与已启用模型列表不受影响。设置保存到 `app_settings`，重启恢复。
-- 插件 → 自定义模型 的配置页统一列出模型，每个模型独立开关与配置；开启总开关后运行列表中启用的模型，不再另选一个“相机使用的模型”。姿态、检测框、分割或图片输出叠加在预览上，分类结果写在底部。通用相机模型要求所有输入均为 `IMAGE`；其它输入类型保留文件与配置并明确报告不支持实时相机输入。CPU Interpreter 推理可能降低帧率，模型失败分别报告。
+- 插件 → 自定义模型 的配置页统一列出模型，每个模型独立开关与配置；开启总开关后运行列表中启用的模型，不再另选一个“相机使用的模型”。全部为 `IMAGE` 的输入在相机运行；显式单输入原始波形 `AUDIO` 可接共享麦克风，形状、量化、采样率与窗口须满足界面列出的协议。TEXT/NUMBERS/文件输入在模型配置中按需运行，保存并启用的模型可把结果带回相机；文件图像以有来源说明的快照报告显示，不覆盖实时帧。CPU Interpreter 推理可能降低帧率，模型失败分别报告。
 - 原动作观察改为 **抬臂计次**：MoveNet 检查双肩、双腕和髋部，稳定“放下 → 双腕高于肩 → 放下”计一次，遮挡或长时间断帧中止未完成动作。**物品识别** 给出 ImageNet 前 5 类与真实标签；原场景检测改为 **物品定位与计数**，SSD 输出框、类别、当前数量和九宫格位置，同类别高重叠框去重。原场景分割改为 **区域覆盖分析**，保持原图比例输入 DeepLab，用 21 类 logits 的 argmax 输出透明背景色图、类别名称与面积占比，不把 logits 当置信度过滤。各插件按固定模型契约运行，用户的通用模型配置保留；停用、切页或后台清空结果。
 - 插件 → 声音识别 消费共享麦克风 PCM（16 kHz 单声道），按 YAMNet 约 1 秒窗口显示环境声类别与置信度；不转写讲话内容、不保存录音。窗口有界，推理慢时丢弃旧窗口；停用、切页、后台或改配置会清空缓冲并拒绝旧结果。标签随模型文件校验下载，从 TFLite 尾部附加 ZIP 中读取，避免 Android `ZipFile` 拒绝非 ZIP 文件头。
 - 插件 → 语音朗读 复用系统 `TextToSpeech` 引擎，可选择设备上已安装的引擎并保存选择；监听开始、完成、停止与错误回调更新状态。文本上限为系统 `getMaxSpeechInputLength()`，只在点击朗读时发声，不需要麦克风权限；离开页面、后台、关闭弹层或停用时停止朗读。
 - 插件 → 设备端学习 提供“我的物品分类”：命名 4 类 → 每类添加至少 5 张不同照片 → 训练保存 → 新照片验证与相机识别。类别名、未知阈值（默认 75%）、权重与 Adam 状态原子保存；低于阈值显示“未知”。旧 `personalization-head.bin` 保留，旧类别不自动改名，需要确认对应关系后保存。相机只读存档，不训练、不写盘；照片不上传。
 - 使用条件会影响精度：需要全身入镜、正对镜头、双臂平举，且人物应尽量站直。单目 2D 关键点无法给出临床意义上的脊柱侧弯角度，界面结果仅供筛查参考，不能用于医学诊断。
-- 预览请求 1280×960 原始相机图像（设备不支持时由 CameraX 回退），直接绘制原始像素，模型输入缩小不再降低预览清晰度；首帧日志记录实际分辨率。预览右上角的指标由“系统监控”提供，可隐藏帧率、耗时、后端、CPU、GPU、NPU，并配置 250–5000 ms 刷新间隔（默认 250 ms）与 1–10 s FPS 窗口；保留已保存的刷新间隔。监控文字持续到下次采样，不随图层帧号变化移入底部；关闭、切页或后台清空。**帧率**来自相机帧时间戳；**推理**是第一个姿态模型的单次耗时；**分析耗时(全部)** 是启用姿态模型的预处理、推理与后处理之和。**CPU(应用)** 为本进程占设备总算力的比例，GPU/NPU 读取厂商 sysfs，并显示来源与单位。
+- 预览请求 1280×960 原始相机图像（设备不支持时由 CameraX 回退），直接绘制原始像素，模型输入缩小不再降低预览清晰度；首帧日志记录实际分辨率。预览右上角的指标由“系统监控”提供，可隐藏帧率、耗时、后端、CPU、GPU、NPU，并配置 250–5000 ms 刷新间隔（默认 250 ms）与 1–10 s FPS 窗口；保留已保存的刷新间隔。监控文字持续到下次采样，不随图层帧号变化移入底部；关闭、切页或后台清空。**帧率**来自相机帧时间戳；**主姿态**单独报告预处理、含读回的推理链路和后处理；**同步帧处理**覆盖图像转换、姿态及同步插件分发，不含异步/显示。异步模型显示最近完成的耗时和时间，互不相加。**CPU(应用)** 为本进程占设备总算力的比例，GPU/NPU 报告厂商来源与单位。
 - NPU 来源必须逐项按真机确认，不可读时显示 `missing` / `permission_denied` / `unsupported` / `parse_error` / `stale`，不会写成 0%。LiteRT 2.3.2 没有读取 NPU 利用率的 API，`QualcommOptions.Profiling` 只把逐算子耗时写进 logcat；选中 NPU 后端也不代表 HTP 真正接管（可能回退 CPU）。当前方案：
 
   | 方案 | 来源与语义 | 已知限制 |
   | --- | --- | --- |
-  | 厂商负载节点 | `misc/npu/device/load`、`devices/platform/npu/load` 的完整百分比 | 只接受整文件百分比；文件缺失/不可读如实报错 |
-  | devfreq 设备发现 | 按 `npu`/`nna` 设备名发现，仅读 `load`/`npu_load` | `busy`、`total`、`trans_stat`、频率、地址都不是利用率 |
+  | 厂商负载节点 | `misc/npu/device/load`、`devices/platform/npu/load` 原文诊断 | 未核实驱动的单位/作用域时返回 `unsupported`；数值在 0–100 或带 `%` 均不足以证明是利用率 |
+  | devfreq 设备发现 | 按 `npu`/`nna` 设备名发现，读取 `load`/`npu_load` 原文与原因 | 未证实的属性保留为 raw；`busy`、`total`、`trans_stat`、频率、地址都不直接当利用率 |
   | Rockchip RKNPU | `/sys/kernel/debug/rknpu/load` 与 `/proc/rknpu/load`，解析 `NPU load: CoreN: x%` 并逐核报告 | `%2.d%%` 的零值可为空白加 `%`；rknpu devfreq 的 busy/total 是固定 1/1，不使用 |
   | Samsung Exynos | NPU 设备的 `rq_load`，原值 0–10000 = 0.01%，显示为“NPU 请求队列忙碌率” | 是调度器请求队列忙碌率，不是硬件 MAC 利用率；`load` 受 `load_policy` 影响，`fps_load` 是执行时间/目标帧时间 |
   | Qualcomm 诊断 | `/sys/kernel/debug/qcom_stats/cdsp`、`cdsp1` 可读性与 Accumulated Duration | 仅 DSP 睡眠统计（硬件 ticks），不是 NPU 利用率，不硬编码时钟换算 |
@@ -140,7 +140,7 @@ app/src/main/java/com/example/minimalapk/
 | `input.0.source=IMAGE` | `IMAGE` 图片，`NUMBERS` 数值，`TEXT` 字符串，`AUDIO` WAV，`BINARY` 原始张量 |
 | `input.0.layout=NHWC` | 图片支持 `NHWC`/`NCHW`、非正方形及 1/3 通道；按形状拉伸，不做 letterbox |
 | `input.0.mean=0` / `input.0.std=1` | 图片实数值 `(pixel−mean)/std`；uint8/int8 等按模型的 scale/zero-point 量化 |
-| `input.0.values=0` | 数值用空格/逗号分隔，单个值填充整个张量；TEXT 用 `\n` 分隔每个字符串 |
+| `input.0.values=0` | 数值用空格/逗号分隔，单个值填充整个张量；TEXT 用 `\n` 分隔每个字符串，按标准 UTF-8 字节传入，保留 Unicode/NUL；当前 Java API 要求首项非空 |
 | `input.0.sampleRate=16000` | AUDIO 的目标采样率；需要 PCM16 单/双声道 WAV |
 | `output.0.render=VALUES` | `VALUES`、`CLASSIFICATION`、`IMAGE`、`MOVENET`、`SEGMENTATION`、`BOXES` |
 | `output.0.scale=1` / `output.0.offset=0` | 图片输出实数值 → 0–255 像素，例如 0–1 输出使用 scale=255 |
@@ -150,15 +150,16 @@ app/src/main/java/com/example/minimalapk/
 
 同样规则适用于 `input.1.*`、`output.1.*` 等多输入/输出。`IMAGE` 输出为 `[1,H,W,1或3]`，`SEGMENTATION` 为 `[1,H,W,类别数]`；未适配的输出可用 VALUES 查看。运行器支持 float32、int32、uint8、int8、int64、int16、bool 与字符串 I/O；BINARY 输入采用模型原始 dtype、小端存储，适合预先分词的 token、视频张量或多模型中间结果。数值文本经 double 解析，大于 2^53 的精确整数请使用 BINARY。输入总计与每个数值输出最多 4,194,304 个元素，配置文件最多 1 MB。
 
-**兼容性边界**：保存合法模型不等于任意模型都能执行。配置可修正布局、动态输入、输入来源、归一化、签名与结果显示，但不能新增缺失的 Flex/自定义算子、改写固定网络结构或代替专用分词器。`bert_qa`、OCR、风格迁移、多阶段检索、视频分类、生成式 AI、强化学习等完整交互流程尚未逐个移植；可以导入其 TFLite 文件并配置支持的张量/签名，但不宣称具备全部上游应用功能。官方仓库没有 TTS 示例，系统 TTS 是否离线取决于已安装的语音包。
+**兼容性边界**：保存合法模型不等于任意模型都能执行。配置可修正布局、动态输入、输入来源、归一化、签名与结果显示，但不能新增缺失的 Flex/自定义算子、改写固定网络结构或代替专用分词器。专用 LiteRT 场景按下表接入；`bert_qa`、风格迁移、多阶段检索、强化学习及其它未列配方仍须单独适配。既有系统 TTS 是否离线取决于已安装语音包，新增 Matcha 为另一明确标识的本地模型。
 
 ## LiteRT 模型库资产目录与运行时基线
 
 `app/src/main/assets/models/litert-models.tsv` 是从 [google-ai-edge/litert-samples](https://github.com/google-ai-edge/litert-samples) 固定提交 `f9f0e000630e9cdd6d263c4cd80495e4231a2dc8` 的 `samples/litert_model_zoo/android/app/src/main/assets/models.json` 生成的制表符目录，共 34 个任务、76 个文件，其中 16 个文件超过 64 MB。目录记录 taskId、模型名、分组、声明后端、许可证名称/URL、上游与模型卡 URL、文件名、下载 URL、精确字节数和 SHA-256；生成脚本为 `tools/generate-litert-catalog.py`，来源与许可证说明见 `app/src/main/assets/models/NOTICE-LiteRT-Model-Zoo.txt`。应用不引入 JSON 依赖，按行解析并校验 HTTPS、文件名、字节数和 64 位十六进制哈希。
 
 - 下载器按集合（taskId）流式写入 `filesDir/model_assets/<taskId>/`，全程使用 `Long` 计数和私有临时文件，不把大文件读成 `ByteArray`；目录下载不受手工导入的 64 MB 上限影响，手工导入的上限保持不变。
-- 断点续传使用 `.part` 文件、HTTP `Range` 与已保存的 `ETag`：206 追加、200 重新开始、416 显式重启、ETag 变化重启；重定向次数有界且只允许 HTTPS，不允许降级。只有受支持的 GitHub URL 会经过镜像改写，Hugging Face / Google Storage 保持直连；URL 和日志不写入凭据或 token。
-- 开始前检查 `usableSpace` 并保留 64 MB 余量；下载中校验声明的字节数和 SHA-256，任一文件大小/哈希不符、响应截断或返回 HTML 都会失败。只有全部文件进入 staging 并验证通过后才整体替换目录；失败时删除 staging、保留旧集合，并留下 `.part` 以便下次续传。`isReady` 只做“所有文件存在且长度精确相等”的低成本检查，`delete(setId)` 同时清理 installed、partial、staging、backup 目录。
+- 入口在 **自定义模型 → 从远程下载模型 → LiteRT 完整资源集**，显示每集文件/大小/来源/许可、进度、取消、继续、完整集 SAF 导入及删除。模型不随开关自动下载；授权受限资源可先合法取得，再选齐原文件名的全部文件导入。
+- 断点续传使用 `.part`、强 `ETag` 与精确 `Content-Range`：匹配的 206 才追加，200 重启，416/版本或范围变化重启；重定向有界且全程 HTTPS。GitHub 镜像只处理受支持 GitHub URL，其它来源直连。取消关闭阻塞流并在写入/提交边界检查，已校验组件和有效断点可继续。
+- 开始及传输中检查空间并保留 64 MiB 余量；所有文件通过大小/SHA-256 后，写入包含固定来源与哈希的修订收据并原子替换。相同大小的旧修订不会误标就绪；失败保留旧集合，读取前恢复未完成替换。模型持有资源租约；安装/删除先使对应插件代次失效，等待原生句柄释放，再更改文件。
 
 | 兼容性项目 | 本仓库基线 | 下载 / 运行门槛 |
 | --- | --- | --- |
@@ -167,10 +168,29 @@ app/src/main/java/com/example/minimalapk/
 | LiteRT | `2.3.2`（`litert`、`litert-gpu`、`litert-npu-runtime-qualcomm`） | `.tflite` 由打包的 Interpreter / CompiledModel 加载 |
 | QNN | `2.50.0`（`qnn-runtime`） | 仅 `arm64-v8a` + Qualcomm HTP，API 31+，需 JIT 编译成功 |
 | 后端 | CPU 始终可用；GPU/NPU 为探测后可用 | 目录 `backend=gpu` 需要可用 GPU delegate；`npu` 需要 Qualcomm HTP；`mixed` 可回落 CPU |
-| `.litertlm` | 未集成 | 需要额外依赖 `com.google.ai.edge.litertlm:litertlm-android`；本固定目录没有 `.litertlm` 条目，因此未添加 |
+| `.litertlm` | LiteRT-LM `0.19.0` | 独立补充目录只列已适配的固定 Qwen2.5-Coder-1.5B CPU 配方，逐请求新引擎、内存门槛及模板核对；其它 bundle 不自动认作支持 |
 | 下载成功 | **不是执行证明** | 只证明字节数、SHA-256 与服务器响应匹配；算子、动态形状或设备后端仍可能编译/执行失败 |
 
-`RuntimeReadiness` 会在尝试加载前报告无法运行的原因（API 级别、打包 ABI、目录声明的 CPU/GPU/NPU 后端是否可用、需要未打包的 `.litertlm` 运行时），但不会代替真实推理验证。基础相机预览、拍照与现有姿态/示例能力不依赖该模型库目录，下载或运行失败不得影响基础相机。
+`RuntimeReadiness` 报告 API、打包 ABI、声明后端及未适配的 `.litertlm` 配方；场景加载另按实际算法契约、资源租约和内存门槛检查。已安装或检查通过均不代替真实推理验证。基础相机预览与现有姿态/示例能力不依赖该模型库目录。
+
+## LiteRT 场景接续
+
+固定 Zoo 的 34 个任务按六个场景接入，使用已有插件宿主、共享麦克风和资源目录。配置后回相机点击对应动作；慢结果与来源快照一起显示，旧框/蒙版不贴到新帧。CPU/GPU 选择与回退原因随结果报告，不以菜单选择证明硬件执行。
+
+| 场景 | 模型/功能 |
+| --- | --- |
+| 画面分析（12） | RF-DETR、MoViNet、MiniFASNet、6DRepNet、DM-Count、DINOv2、XFeat、RAM++、NIMA、Vision-RWKV、PlantNet、PP-OCRv5 |
+| 画面增强与分区（9） | PIDNet、TwinLite、EDSR、DehazeFormer、RF-DETR-Seg、ormbg、MODNet、Real-ESRGAN、Depth Anything3 |
+| 实时英语字幕（1） | Zipformer small，2–8 秒有界窗口；慢推理可能跳过窗口，不是无损连续听写 |
+| 神经语音朗读（1） | Matcha 英语短句，包含 G2P/时长/CFM/vocoder；CFM 固定 CPU |
+| 录音处理与试听（6） | PANNs、CREPE、Basic Pitch、DAC、TIGER、CMGAN；显式短录音、逐轨试听，播放暂停共享采集 |
+| 文本决策（5） | Laya、Julia、GLiClass Edge、Open-Decision、GLiNER-Decide；真实分词/embedding/校准/解码 |
+
+另有 **本地文本建议**：Qwen2.5-Coder-1.5B-Instruct int4，单独下载约 1.04 GiB；CPU、1024-token 窗口、每次全新引擎，代码只展示。RAM++ 与本地文本在加载前检查当前可用内存；门槛取自实际主机测量并留余量，仍需 Android 设备验证。
+
+系统监控可显式比较同一内置 YOLO26n、同一合成输入的 CPU/GPU/NPU，串行预热/测量并报告加载、推理、读回和关闭耗时。混合后端不能确定实际子图时标“未知”，失败/跳过保留原因。
+
+实现、主机数值对照、Android 检查、升级和剩余任务见 [#63 接续审计](docs/issue-63-continuation.md)。#71–#76 还包含额外 legacy、ASR/TTS、提示分割、跟踪、多模态和生成式配方；上述接入不代表所有子 issue 已完成。
 
 ## 自动构建
 

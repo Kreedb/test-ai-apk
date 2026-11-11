@@ -11,6 +11,7 @@ import com.example.minimalapk.examples.ExampleDownload
 import com.example.minimalapk.examples.SuperResolutionRunner
 import com.example.minimalapk.examples.fittedImage
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.models.AssetTransfer
 import java.util.concurrent.CancellationException
 import java.util.Locale
 
@@ -59,9 +60,12 @@ internal class SuperResolutionPlugin(private val application: Context) : CameraP
     private val model = AsyncModelSlot<ModelRequest, SuperResolutionRunner>(
         name = "SuperResolutionOwner",
         open = { request ->
-            if (!request.context.isCurrent()) throw CancellationException("超分辨率请求已失效")
-            val file = ExampleDownload.ensure(application, ExampleCatalog.superResolution)
-            if (!request.context.isCurrent()) throw CancellationException("超分辨率请求已失效")
+            val transfer = AssetTransfer {
+                if (!request.context.isCurrent()) throw CancellationException("超分辨率请求已失效")
+            }
+            transfer.checkpoint()
+            val file = ExampleDownload.ensure(application, ExampleCatalog.superResolution, transfer)
+            transfer.checkpoint()
             SuperResolutionRunner(file)
         },
         ready = { request, _ ->

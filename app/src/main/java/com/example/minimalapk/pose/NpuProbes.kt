@@ -136,8 +136,9 @@ internal object RealProbeFileSystem : ProbeFileSystem {
     private const val MAX_PROBE_DIRECTORIES = 64
 }
 
-/** Pure, bounded NPU probes. Each parser follows one documented vendor format; none guesses a
- * number out of arbitrary text, and none treats frequency/address/trans_stat as utilization.
+/** Pure, bounded NPU probes. Only documented vendor contracts produce percentages. Generic
+ * load attributes remain raw diagnostics: their names, numeric range or `%` suffix do not prove
+ * what the driver measures. Frequency/address/trans_stat are never treated as utilization.
  */
 internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFileSystem) {
     fun probe(source: NpuSource, nowNanos: Long): List<NpuProbeResult> = when (source) {
@@ -171,91 +172,69 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
         NpuProbeScheme.COUNTER_DELTA -> listOf(probeCounterDelta(nowNanos))
     }
 
-    /** `misc/npu` and `platform/npu` expose a percentage value; the whole file must be that value. */
-    private fun probeVendor(nowNanos: Long): List<NpuProbeResult> {
-        var failure: NpuProbeResult? = null
-        for (path in VENDOR_PERCENT_NODES) {
-            when (val read = files.read(path)) {
-                is ProbeRead.Content -> {
-                    val percent = parseStrictPercent(read.text)
-                    if (percent != null) return listOf(result(
-                        NpuProbeScheme.VENDOR_PERCENT, path, percent, "%", LOAD_SCOPE, nowNanos,
-                    ))
-                    if (failure == null || failure.state == NpuProbeState.MISSING) {
-                        failure = stateResult(
-                            NpuProbeScheme.VENDOR_PERCENT, path, NpuProbeState.PARSE_ERROR, nowNanos,
-                            excerpt = excerpt(read.text), detail = "不是完整的百分比数值",
-                        )
-                    }
-                }
-                ProbeRead.Missing -> if (failure == null) {
-                    failure = stateResult(NpuProbeScheme.VENDOR_PERCENT, path, NpuProbeState.MISSING, nowNanos)
-                }
-                ProbeRead.PermissionDenied -> failure =
-                    stateResult(NpuProbeScheme.VENDOR_PERCENT, path, NpuProbeState.PERMISSION_DENIED, nowNanos)
-                is ProbeRead.Failure -> if (failure == null || failure.state == NpuProbeState.MISSING) {
-                    failure = stateResult(
-                        NpuProbeScheme.VENDOR_PERCENT, path, NpuProbeState.PARSE_ERROR, nowNanos,
-                        detail = read.message,
-                    )
-                }
-            }
-        }
-        return listOf(failure ?: stateResult(
-            NpuProbeScheme.VENDOR_PERCENT, VENDOR_PERCENT_NODES.last(), NpuProbeState.MISSING, nowNanos,
-        ))
-    }
+    /** Keep the persisted scheme ID, but neither legacy path has a verified percentage contract. */
+    private fun probeVendor(nowNanos: Long): List<NpuProbeResult> =
+        probeUnverifiedLoads(NpuProbeScheme.VENDOR_PERCENT, VENDOR_LOAD_NODES, nowNanos)
 
-    /** devfreq discovery by device name/identity, then only known load attributes. `busy`,
-     * `total`, `trans_stat`, `cur_freq` and address nodes are deliberately not utilization.
+    /** Discover candidate load attributes without assuming their units. `load` is not a standard
+     * devfreq percentage ABI; e.g. Samsung's scheduler load depends on load_policy and uses 0.01%
+     * units. Only its separate rq_load scheme below implements the documented queue-load contract.
+     * `busy`, `total`, `trans_stat`, `cur_freq` and address nodes are deliberately not read.
      */
     private fun probeDevfreq(nowNanos: Long): List<NpuProbeResult> {
         val devices = files.listDirectories(DEV_FREQ).filter(::isNpuIdentity)
         if (devices.isEmpty()) {
             return listOf(stateResult(
                 NpuProbeScheme.DEVFREQ, DEV_FREQ, NpuProbeState.UNSUPPORTED, nowNanos,
-                detail = "未发现名称含 npu/nna 的 devfreq 设备",
+                detail = "未发现名称含 npu/nna 的 devfreq 设备", unit = "raw",
             ))
         }
-        var failure: NpuProbeResult? = null
-        for (device in devices) {
-            for (attribute in DEVFREQ_LOAD_ATTRIBUTES) {
-                val path = "$device/$attribute"
-                when (val read = files.read(path)) {
-                    is ProbeRead.Content -> {
-                        val percent = parseStrictPercent(read.text)
-                        if (percent != null) return listOf(result(
-                            NpuProbeScheme.DEVFREQ, path, percent, "%", LOAD_SCOPE, nowNanos,
-                        ))
-                        if (failure == null || failure.state == NpuProbeState.MISSING) {
-                            failure = stateResult(
-                                NpuProbeScheme.DEVFREQ, path, NpuProbeState.PARSE_ERROR, nowNanos,
-                                excerpt = excerpt(read.text), detail = "不是 0–100 的负载百分比",
-                            )
-                        }
-                    }
-                    ProbeRead.Missing -> if (failure == null) {
-                        failure = stateResult(NpuProbeScheme.DEVFREQ, device, NpuProbeState.MISSING, nowNanos)
-                    }
-                    ProbeRead.PermissionDenied -> failure =
-                        stateResult(NpuProbeScheme.DEVFREQ, path, NpuProbeState.PERMISSION_DENIED, nowNanos)
-                    is ProbeRead.Failure -> if (failure == null || failure.state == NpuProbeState.MISSING) {
-                        failure = stateResult(
-                            NpuProbeScheme.DEVFREQ, path, NpuProbeState.PARSE_ERROR, nowNanos,
-                            detail = read.message,
+        return probeUnverifiedLoads(NpuProbeScheme.DEVFREQ, devices.flatMap { device ->
+            DEVFREQ_LOAD_ATTRIBUTES.map { "$device/$it" }
+        }, nowNanos)
+    }
+
+    /** No new driver contracts are inferred here. Keep readable raw evidence and read failures;
+     * collapse missing candidates only, so one unsupported attribute cannot hide another source.
+     */
+    private fun probeUnverifiedLoads(
+        scheme: NpuProbeScheme,
+        paths: List<String>,
+        nowNanos: Long,
+    ): List<NpuProbeResult> {
+        val results = paths.map { path ->
+            val attribute = path.substringAfterLast('/')
+            fun diagnostic(state: NpuProbeState, raw: String? = null, detail: String? = null) = stateResult(
+                scheme, path, state, nowNanos, excerpt = excerpt(raw), detail = detail,
+                unit = "raw", scope = "$attribute（单位/作用域未确认）",
+            )
+            when (val read = files.read(path)) {
+                is ProbeRead.Content -> {
+                    val raw = read.text.trim()
+                    when {
+                        raw.isEmpty() -> diagnostic(NpuProbeState.PARSE_ERROR, raw, "$attribute 节点内容为空")
+                        raw.toDoubleOrNull()?.isFinite() == false -> diagnostic(
+                            NpuProbeState.PARSE_ERROR, raw, "$attribute 返回非有限数值，无法解释负载",
+                        )
+                        else -> diagnostic(
+                            NpuProbeState.UNSUPPORTED, raw,
+                            "$attribute 单位/作用域未确认；缺少已验证的驱动契约，不能按数值范围或 % 后缀推定利用率",
                         )
                     }
                 }
+                ProbeRead.Missing -> diagnostic(NpuProbeState.MISSING)
+                ProbeRead.PermissionDenied -> diagnostic(NpuProbeState.PERMISSION_DENIED)
+                is ProbeRead.Failure -> diagnostic(NpuProbeState.PARSE_ERROR, detail = read.message)
             }
         }
-        return listOf(failure ?: stateResult(
-            NpuProbeScheme.DEVFREQ, devices.first(), NpuProbeState.MISSING, nowNanos,
-        ))
+        return results.filter { it.state != NpuProbeState.MISSING }.ifEmpty { results.take(1) }
     }
 
     /** Rockchip rknpu_debugger.c: `NPU load: Core0: 12%, Core1: ...`; `%2.d%%` may render a zero
      * as whitespace plus `%`. The core number is never the load. `rknpu_devfreq` busy/total is a
      * fixed 1/1 placeholder and is intentionally not read.
+     * Contract: rockchip-linux/kernel@95a3ad83f7f90e0e672b9c99b0858b4964318667,
+     * drivers/rknpu/rknpu_debugger.c:27–75 (issue #66).
      */
     private fun probeRockchip(nowNanos: Long): List<NpuProbeResult> {
         var failure: NpuProbeResult? = null
@@ -299,6 +278,8 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
      * 0.01% units and means scheduler request-queue busy, not hardware MAC utilization. `load`
      * is policy-dependent and `fps_load` is execution time vs target frame time; both stay
      * separate additional readings.
+     * Contract: ExtremeXT/android_kernel_samsung_exynos990@69515fbb7a4395898c05a8624f76a12afbac11c5,
+     * drivers/vision/npu/core/npu-scheduler.c:728–746,1104–1125 (issue #66).
      */
     private fun probeSamsung(nowNanos: Long): List<NpuProbeResult> {
         val devices = npuDeviceCandidates()
@@ -488,7 +469,7 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
         const val LOAD_SCOPE = "NPU 负载"
         const val QUALCOMM_SCOPE = "DSP 睡眠统计（非利用率）"
 
-        val VENDOR_PERCENT_NODES = listOf(
+        val VENDOR_LOAD_NODES = listOf(
             "/sys/class/misc/npu/device/load",
             "/sys/devices/platform/npu/load",
         )
@@ -502,13 +483,6 @@ internal class NpuProbeReader(private val files: ProbeFileSystem = RealProbeFile
             "/sys/kernel/debug/qcom_stats/cdsp1",
         )
     }
-}
-
-/** Whole-file percentage: optional surrounding whitespace and `%`, but no extra text. */
-internal fun parseStrictPercent(raw: String): Float? {
-    val match = STRICT_PERCENT.matchEntire(raw.trim()) ?: return null
-    val value = match.groupValues[1].toFloatOrNull() ?: return null
-    return value.takeIf { it in 0f..100f }
 }
 
 internal data class RockchipLoad(val coreIndexes: List<Int>, val perCore: List<Float>) {
@@ -545,5 +519,4 @@ internal fun excerpt(text: String?): String? =
 
 internal fun formatNumber(value: Float): String = String.format(Locale.US, "%.1f", value)
 
-private val STRICT_PERCENT = Regex("""(\d+(?:\.\d+)?)\s*%?""")
 private val ROCKCHIP_CORE = Regex("""Core\s*(\d+)\s*:\s*(\d{1,3}(?:\.\d+)?)?\s*%""")

@@ -32,8 +32,8 @@ internal interface DeviceUsageSource {
  *
  * Android does not expose system-wide CPU/GPU/NPU utilization to normal apps.
  * CPU is this process's share of the device's total CPU capacity (readable without
- * root). GPU/NPU are bounded reads of documented vendor sysfs nodes; every NPU
- * source reports its own path, unit and failure state instead of a fake 0%.
+ * root). NPU percentages require a documented driver contract; generic load attributes
+ * remain raw diagnostics with their path and unsupported-unit reason instead of a fake 0%.
  */
 internal class DeviceUsageSampler internal constructor(
     private val files: ProbeFileSystem = RealProbeFileSystem,
@@ -49,13 +49,14 @@ internal class DeviceUsageSampler internal constructor(
     override fun sample(source: NpuSource, nowNanos: Long): DeviceUsage {
         val gpu = readGpu()
         val npuResults = npuReader.probe(source, nowNanos).map { staleOr(it, nowNanos) }
-        val primary = npuResults.firstOrNull {
-            it.state == NpuProbeState.OK || it.state == NpuProbeState.STALE
-        }
+        // Auto may retain a stale earlier source before finding a fresh known source. Match the
+        // diagnostic selection's fresh-first order, and never expose raw values as percentages.
+        val primary = npuResults.firstOrNull { it.state == NpuProbeState.OK }
+            ?: npuResults.firstOrNull { it.state == NpuProbeState.STALE }
         return DeviceUsage(
             cpuPercent = readCpuPercent(),
             gpuPercent = gpu?.value,
-            npuPercent = primary?.value,
+            npuPercent = primary?.takeIf { it.unit == "%" }?.value,
             gpuSource = gpu?.sourcePath,
             npuResults = npuResults,
         )

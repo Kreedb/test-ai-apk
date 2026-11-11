@@ -5,6 +5,7 @@ Models:
   Metadata license: AGPL-3.0 License (https://ultralytics.com/license)
 License text: LICENSE-AGPL-3.0.txt (in this directory)
 Runtime LiteRT 2.3.2, Apache-2.0 License (LICENSE-LiteRT.txt in this directory)
+Runtime LiteRT-LM 0.19.0: LICENSE-LiteRT-LM.txt, NOTICE-LiteRT-LM-Third-Party.txt and NOTICE-Local-Text.txt.
 Runtime Qualcomm QNN 2.50.0, Qualcomm AI Hub Model License (LICENSE-QNN.pdf and NOTICE-QNN.txt in this directory)
 Conversion: onnx2tf 2.6.9 (TFLite)
   yolo26n_pose: from the ONNX raw pose head /model.23/Transpose_output_0

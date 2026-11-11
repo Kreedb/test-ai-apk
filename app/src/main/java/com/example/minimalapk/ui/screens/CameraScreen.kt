@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -26,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -47,6 +50,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.minimalapk.models.ConfiguredModelStore
+import com.example.minimalapk.models.AssetResourceStore
 import com.example.minimalapk.plugins.AudioCaptureHost
 import com.example.minimalapk.plugins.AudioClassificationPlugin
 import com.example.minimalapk.plugins.AudioPermission
@@ -65,10 +69,20 @@ import com.example.minimalapk.plugins.PoseModelsPlugin
 import com.example.minimalapk.plugins.SuperResolutionPlugin
 import com.example.minimalapk.plugins.SystemMonitorPlugin
 import com.example.minimalapk.plugins.TtsPlugin
+import com.example.minimalapk.plugins.LiteRtScenes
+import com.example.minimalapk.plugins.LiteRtImagePlugin
+import com.example.minimalapk.plugins.LiteRtTextPlugin
+import com.example.minimalapk.plugins.LiteRtAudioPlugin
+import com.example.minimalapk.plugins.LiteRtCaptionsPlugin
+import com.example.minimalapk.plugins.LiteRtSpeechPlugin
+import com.example.minimalapk.plugins.PluginAudioFocus
+import com.example.minimalapk.plugins.LocalTextPlugin
 import com.example.minimalapk.plugins.audioPermissionAfterCheck
 import com.example.minimalapk.plugins.cameraFrameRate
 import com.example.minimalapk.plugins.cameraPluginSettings
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 @Composable
 internal fun CameraScreen(store: PluginSettingsStore) {
@@ -111,14 +125,20 @@ private fun PluginCamera(store: PluginSettingsStore, modifier: Modifier) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val models = remember(context, lifecycleOwner) { CameraModelSettingsStore(context) }
+    val resources = remember(context) { AssetResourceStore.get(context) }
     val poses = remember(context, lifecycleOwner) { PoseModelsPlugin(context.applicationContext) }
     val host = remember(context, lifecycleOwner) {
         PluginHost(listOf(
             poses, PoseEnhancementPlugin(), ConfiguredModelPlugin(context.applicationContext),
-            SystemMonitorPlugin(), SuperResolutionPlugin(context.applicationContext),
+            SystemMonitorPlugin(context.applicationContext), SuperResolutionPlugin(context.applicationContext),
             *ExampleScenes.all.map { ExampleScenePlugin(context.applicationContext, it) }.toTypedArray(),
             AudioClassificationPlugin(context.applicationContext), TtsPlugin(),
             PersonalizationPlugin(context.applicationContext),
+            LiteRtImagePlugin(context.applicationContext, LiteRtScenes.vision),
+            LiteRtImagePlugin(context.applicationContext, LiteRtScenes.image),
+            LiteRtTextPlugin(context.applicationContext), LiteRtAudioPlugin(context.applicationContext),
+            LiteRtCaptionsPlugin(context.applicationContext), LiteRtSpeechPlugin(context.applicationContext),
+            LocalTextPlugin(context.applicationContext),
         ))
     }
     val audio = remember(context, host, lifecycleOwner) {
@@ -132,7 +152,7 @@ private fun PluginCamera(store: PluginSettingsStore, modifier: Modifier) {
     var audioPermission by remember { mutableStateOf(AudioPermission.NOT_REQUESTED) }
     var audioRequested by remember { mutableStateOf(false) }
     var audioPermanentlyDenied by remember { mutableStateOf(false) }
-    var audioPluginEnabled by remember { mutableStateOf(false) }
+    val audioPermissionNeeded = snapshot.session != null && snapshot.audioPermissionRequested
     val audioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         audioRequested = true
         val next = audioPermissionAfterCheck(granted, requested = true, previous = audioPermission)
@@ -150,8 +170,8 @@ private fun PluginCamera(store: PluginSettingsStore, modifier: Modifier) {
         audioPermanentlyDenied = context.audioPermanentlyDenied(granted, audioRequested)
         onPauseOrDispose { }
     }
-    LaunchedEffect(audioPluginEnabled) {
-        if (!audioPluginEnabled) return@LaunchedEffect
+    LaunchedEffect(audioPermissionNeeded) {
+        if (!audioPermissionNeeded) return@LaunchedEffect
         if (context.hasAudioPermission()) {
             audioPermanentlyDenied = false
             if (audioPermission != AudioPermission.GRANTED) {
@@ -175,40 +195,58 @@ private fun PluginCamera(store: PluginSettingsStore, modifier: Modifier) {
         onDispose { camera.close(); audio.close(); models.close() }
     }
     LaunchedEffect(host, store, models, audio) {
-        combine(store.settings, models.settings, ConfiguredModelStore.revision) { plugins, base, revision ->
-            cameraPluginSettings(plugins, base, revision)
-        }.collect {
-            host.configure(it)
-            audioPluginEnabled = host.requiresAudioPermission()
+        combine(store.settings, models.settings, ConfiguredModelStore.revision, resources.revision) { plugins, base, revision, assetsRevision ->
+            cameraPluginSettings(plugins, base, revision) to assetsRevision
+        }.collect { (settings, assetsRevision) ->
+            host.configure(settings, assetsRevision)
             audio.refresh()
         }
     }
+    LaunchedEffect(audio) {
+        PluginAudioFocus.playing.collect { audio.playbackChanged(it) }
+    }
+    LaunchedEffect(host, audio) {
+        host.snapshot.map { it.audioCaptureRequested }.distinctUntilChanged().collect { audio.refresh() }
+    }
+    LaunchedEffect(host, store) {
+        combine(store.requests, host.snapshot) { requests, state -> requests to state.session }.collect { (requests, session) ->
+            if (session != null) requests.forEach { (id, request) ->
+                if (store.requests.value[id] == request && host.action(id, request.action, request.revision)) store.acknowledgeAction(id, request)
+            }
+        }
+    }
 
-    Box(modifier.onSizeChanged { camera.viewport(it.width, it.height) }.pluginPressInput(host)) {
-        val frame = snapshot.frame
-        val image = snapshot.displayedImage
-        if (image != null && frame != null) {
-            CameraFramePreview(snapshot, Modifier.fillMaxSize())
-            // Never draw current-frame bones on an older replacement snapshot.
-            if (snapshot.displayedSource == frame.source) {
-                BasePoseOverlay(frame.poses.firstOrNull(), frame.source, Modifier.fillMaxSize())
-            }
-            (snapshot.layers + snapshot.monitors).forEach { contribution ->
-                contribution.output.layers.forEach { layer ->
-                    layer.image?.let {
-                        Image(it.bitmap.asImageBitmap(), "${contribution.name} 输出", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                    }
-                    PluginLineOverlay(layer, Modifier.fillMaxSize())
+    Box(modifier.onSizeChanged { camera.viewport(it.width, it.height) }) {
+        Box(Modifier.fillMaxSize().pluginPressInput(host)) {
+            val frame = snapshot.frame
+            val image = snapshot.displayedImage
+            if (image != null && frame != null) {
+                CameraFramePreview(snapshot, Modifier.fillMaxSize())
+                // Never draw current-frame bones on an older replacement snapshot.
+                if (snapshot.displayedSource == frame.source) {
+                    BasePoseOverlay(frame.poses.firstOrNull(), frame.source, Modifier.fillMaxSize())
                 }
+                (snapshot.layers + snapshot.monitors).forEach { contribution ->
+                    contribution.output.layers.forEach { layer ->
+                        layer.image?.let {
+                            Image(it.bitmap.asImageBitmap(), "${contribution.name} 输出", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        }
+                        PluginLineOverlay(layer, Modifier.fillMaxSize())
+                    }
+                }
+                snapshot.guides.forEach { contribution ->
+                    contribution.output.guide?.let { PluginPhotoGuide(it, frame.source, Modifier.fillMaxSize()) }
+                }
+                MonitorPanel(snapshot.monitors, Modifier.align(Alignment.TopEnd).padding(8.dp))
+            } else if (error == null) {
+                Text("正在启动相机…", Modifier.align(Alignment.Center), style = MaterialTheme.typography.bodyMedium)
             }
-            MonitorPanel(snapshot.monitors, Modifier.align(Alignment.TopEnd).padding(8.dp))
-        } else if (error == null) {
-            Text("正在启动相机…", Modifier.align(Alignment.Center), style = MaterialTheme.typography.bodyMedium)
+            error?.let {
+                Text(it, Modifier.align(Alignment.Center).padding(16.dp), color = MaterialTheme.colorScheme.error)
+            }
         }
-        error?.let {
-            Text(it, Modifier.align(Alignment.Center).padding(16.dp), color = MaterialTheme.colorScheme.error)
-        }
-        if (audioPluginEnabled && audioPermission != AudioPermission.GRANTED) {
+        val displayedAudioPermission = if (snapshot.session != null) snapshot.audioPermission else audioPermission
+        if (audioPermissionNeeded && displayedAudioPermission != AudioPermission.GRANTED) {
             // A denial only disables audio plugins; the camera and every other plugin keep running.
             Column(
                 Modifier.align(Alignment.TopCenter).padding(8.dp)
@@ -218,9 +256,9 @@ private fun PluginCamera(store: PluginSettingsStore, modifier: Modifier) {
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    when (audioPermission) {
+                    when (displayedAudioPermission) {
                         AudioPermission.DENIED, AudioPermission.REVOKED -> "需要麦克风权限才能运行音频插件"
-                        AudioPermission.MICROPHONE_BUSY -> "麦克风正被占用，音频插件暂不可用"
+                        AudioPermission.MICROPHONE_BUSY -> "麦克风不可用或被系统静音，音频插件已暂停"
                         else -> "正在请求麦克风权限…"
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -228,8 +266,8 @@ private fun PluginCamera(store: PluginSettingsStore, modifier: Modifier) {
                 )
                 when {
                     audioPermanentlyDenied -> Button(onClick = { context.openAppSettings() }) { Text("打开设置") }
-                    audioPermission == AudioPermission.DENIED ||
-                        audioPermission == AudioPermission.REVOKED -> Button(onClick = {
+                    displayedAudioPermission == AudioPermission.DENIED ||
+                        displayedAudioPermission == AudioPermission.REVOKED -> Button(onClick = {
                         audioRequested = true
                         audioLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     }) { Text("授予权限") }
@@ -256,6 +294,28 @@ private fun PluginCamera(store: PluginSettingsStore, modifier: Modifier) {
                                     MessageKind.TEXT -> Color.White
                                 },
                             )
+                        }
+                        report.output.imageReport?.let { image ->
+                            val label = if (image.source == null) "文件 / 生成结果 · ${image.label}" else image.label
+                            Text("${report.name} · $label", color = Color.White, style = MaterialTheme.typography.labelSmall)
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Image(image.input.bitmap.asImageBitmap(), "${report.name} $label",
+                                    Modifier.weight(1f).heightIn(min = 100.dp, max = 180.dp), contentScale = ContentScale.Fit)
+                                image.result?.let { result ->
+                                    Image(result.bitmap.asImageBitmap(), "${report.name} 分析结果",
+                                        Modifier.weight(1f).heightIn(min = 100.dp, max = 180.dp), contentScale = ContentScale.Fit)
+                                }
+                            }
+                        }
+                        if (report.output.actions.isNotEmpty()) {
+                            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                                report.output.actions.forEach { action ->
+                                    TextButton(enabled = action.enabled,
+                                        onClick = { host.action(report.pluginId, action.id) }) {
+                                        Text(action.label, color = if (action.enabled) Color(0xFF80DEEA) else Color.Gray)
+                                    }
+                                }
+                            }
                         }
                     }
                 }

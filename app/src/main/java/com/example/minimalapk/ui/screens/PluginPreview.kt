@@ -31,6 +31,7 @@ import com.example.minimalapk.plugins.ImageSource
 import com.example.minimalapk.plugins.PluginCapability
 import com.example.minimalapk.plugins.PluginHost
 import com.example.minimalapk.plugins.PluginLayer
+import com.example.minimalapk.plugins.PluginGuide
 import com.example.minimalapk.plugins.RawImageMapping
 import com.example.minimalapk.plugins.ViewportMapping
 import com.example.minimalapk.pose.ModelResult
@@ -183,5 +184,31 @@ internal fun PluginLineOverlay(layer: PluginLayer, modifier: Modifier = Modifier
                 drawContext.canvas.nativeCanvas.drawText(label, (a.x + b.x) / 2 + 12f, (a.y + b.y) / 2, paint)
             }
         }
+    }
+}
+
+/** A guide is a requested crop, not a model detection; it uses the exact normalized input ROI. */
+@Composable
+internal fun PluginPhotoGuide(guide: PluginGuide, source: ImageSource, modifier: Modifier = Modifier) {
+    val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.YELLOW } }
+    Canvas(modifier) {
+        val bounds = source.space.photoBounds
+        val mapping = ViewportMapping(source.space, size.width.toInt(), size.height.toInt())
+        val roi = guide.roi
+        val a = mapping.toPreview(ImagePoint(bounds.left + (bounds.right - bounds.left) * roi.left,
+            bounds.top + (bounds.bottom - bounds.top) * roi.top))
+        val b = mapping.toPreview(ImagePoint(bounds.left + (bounds.right - bounds.left) * roi.right,
+            bounds.top + (bounds.bottom - bounds.top) * roi.bottom))
+        drawRect(Color.Yellow, Offset(a.x, a.y), Size(b.x - a.x, b.y - a.y), style = Stroke(3f))
+        guide.focusRoi?.let { focus ->
+            val c = mapping.toPreview(ImagePoint(bounds.left + (bounds.right - bounds.left) * focus.left,
+                bounds.top + (bounds.bottom - bounds.top) * focus.top))
+            val d = mapping.toPreview(ImagePoint(bounds.left + (bounds.right - bounds.left) * focus.right,
+                bounds.top + (bounds.bottom - bounds.top) * focus.bottom))
+            drawRect(Color.Cyan, Offset(c.x, c.y), Size(d.x - c.x, d.y - c.y), style = Stroke(3f))
+        }
+        paint.textSize = 12.sp.toPx()
+        paint.setShadowLayer(3f, 0f, 0f, android.graphics.Color.BLACK)
+        drawContext.canvas.nativeCanvas.drawText(guide.label, a.x, (a.y - 8f).coerceAtLeast(paint.textSize), paint)
     }
 }

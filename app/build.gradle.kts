@@ -121,6 +121,9 @@ dependencies {
     implementation(libs.material.kolor)
 
     implementation(libs.litert)
+    // File-backed .litertlm execution, separate from the existing TFLite/CompiledModel runtime.
+    // 0.19.0 AAR: API 24, arm64-v8a + x86_64; liblitertlm_jni.so, no duplicate libLiteRt.so.
+    implementation(libs.litert.lm)
     implementation(libs.litert.gpu)
     implementation(libs.litert.npu.runtime.qualcomm)
     implementation(libs.qnn.runtime)

@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Build
 import com.example.minimalapk.BuildConfig
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.litert.lm.LocalTextModels
 import com.example.minimalapk.models.AssetCatalog
 import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.PoseBackendPreference
@@ -175,7 +176,11 @@ internal object AppSelfCheck {
             failure("asset-catalog", error)
             emptyList()
         }
-        return selfCheckInventory(context.filesDir, poses, sets) + failures
+        val localTextSets = try { LocalTextModels.assetSets(context) } catch (error: Exception) {
+            failure("local-text-catalog", error)
+            emptyList()
+        }
+        return selfCheckInventory(context.filesDir, poses, sets + localTextSets) + failures
     }
 
     private fun logEnvironment(context: Context, log: (String) -> Unit) {
