@@ -48,6 +48,8 @@ import com.example.minimalapk.models.InputSource
 import com.example.minimalapk.models.MAX_CONFIG_BYTES
 import com.example.minimalapk.models.ModelConfig
 import com.example.minimalapk.models.ModelRunResult
+import com.example.minimalapk.pose.GitHubMirrorMode
+import com.example.minimalapk.pose.GitHubMirrorPreference
 import com.example.minimalapk.pose.GraphDescription
 import com.example.minimalapk.pose.ModelDownload
 import com.example.minimalapk.pose.readCapped
@@ -67,12 +69,13 @@ internal fun ModelWorkbenchScreen(onBack: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var url by rememberSaveable { mutableStateOf("") }
     val directory = remember { ConfiguredModelStore.directory(context) }
+    val mirrorPreference = remember { GitHubMirrorPreference.load(context) }
 
     LaunchedEffect(Unit) {
         runCatching { withContext(Dispatchers.IO) { ConfiguredModelStore.list(directory) } }
             .onSuccess { models = it }.onFailure { if (it is CancellationException) throw it; status = it.message }
     }
-    fun install(load: () -> ConfiguredModel) {
+    fun install(sourceUrl: String? = null, load: () -> ConfiguredModel) {
         if (busy) return
         busy = true
         scope.launch {
@@ -85,10 +88,24 @@ internal fun ModelWorkbenchScreen(onBack: () -> Unit) {
                 throw e
             } catch (e: Exception) {
                 AppLog.w("ModelWorkbench", "导入失败", e)
-                status = "导入失败：${e.message}"
+                status = buildString {
+                    append("导入失败：${e.message}")
+                    if (sourceUrl != null) append("\n原始地址：$sourceUrl")
+                }
             } finally {
                 busy = false
             }
+        }
+    }
+    fun downloadRemote(address: String, preference: GitHubMirrorPreference) {
+        install(address) {
+            val bytes = ModelDownload.fetch(address, preference)
+            ModelDownload.validateDownloaded(bytes, expectedSize = null, expectedSha256 = null)
+            ConfiguredModelStore.install(
+                directory,
+                address.substringAfterLast('/').substringBefore('?'),
+                bytes,
+            )
         }
     }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -121,16 +138,25 @@ internal fun ModelWorkbenchScreen(onBack: () -> Unit) {
             Button(enabled = !busy, onClick = { picker.launch(arrayOf("*/*")) }) { Text("导入 TFLite") }
             OutlinedTextField(url, { url = it }, label = { Text("模型 https 地址") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
             TextButton(enabled = !busy && url.startsWith("https://"), onClick = {
-                val address = url.trim()
-                install { ConfiguredModelStore.install(directory, address.substringAfterLast('/').substringBefore('?'), ModelDownload.fetch(address)) }
+                downloadRemote(url.trim(), mirrorPreference)
             }) { Text("从远程下载") }
+            if (!mirrorPreference.isDirect) {
+                TextButton(enabled = !busy && url.startsWith("https://"), onClick = {
+                    downloadRemote(url.trim(), GitHubMirrorPreference(mode = GitHubMirrorMode.DIRECT))
+                }) { Text("直连重试") }
+            }
+            Text(
+                text = "GitHub 镜像：${mirrorPreference.summary}（设置 → GitHub 镜像源）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             Text("示例模型 · 点击下载并配置", style = MaterialTheme.typography.titleMedium)
             ExampleCatalog.configurable.forEach { example ->
                 ElevatedCard(Modifier.fillMaxWidth()) {
                     SettingRow(example.name, "${example.sizeBytes / 1024 / 1024} MB · 下载后离线 CPU 推理，图片模型可在相机页叠加", {
-                        if (!busy) install { ExampleDownload.install(context, example) }
+                        if (!busy) install(example.url) { ExampleDownload.install(context, example) }
                     })
                 }
             }

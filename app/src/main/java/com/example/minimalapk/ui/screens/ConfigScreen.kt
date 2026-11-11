@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import com.example.minimalapk.BuildConfig
 import com.example.minimalapk.R
 import com.example.minimalapk.log.AppLog
+import com.example.minimalapk.pose.GitHubMirrorPreference
 import com.example.minimalapk.pose.ModelStore
 import com.example.minimalapk.pose.PoseBackendPreference
 import com.example.minimalapk.ui.theme.ThemeSettings
@@ -34,6 +35,7 @@ import com.example.minimalapk.ui.theme.ThemeSettings
 private enum class SettingsPage {
     ROOT,
     MODELS,
+    MIRROR,
     THEME,
     ABOUT,
     LOG,
@@ -47,6 +49,7 @@ fun ConfigScreen(
     val context = LocalContext.current
     var page by rememberSaveable { mutableStateOf(SettingsPage.ROOT) }
     var backendPreference by remember { mutableStateOf(PoseBackendPreference.load(context)) }
+    var mirrorPreference by remember { mutableStateOf(GitHubMirrorPreference.load(context)) }
     var specs by remember { mutableStateOf(ModelStore.load(context)) }
     var showBackendDialog by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = page != SettingsPage.ROOT) { page = SettingsPage.ROOT }
@@ -54,9 +57,11 @@ fun ConfigScreen(
     when (page) {
         SettingsPage.ROOT -> SettingsList(
             backendPreference = backendPreference,
+            mirrorPreference = mirrorPreference,
             enabledModels = specs.count { it.enabled },
             modelCount = specs.size,
             onOpenBackend = { showBackendDialog = true },
+            onOpenMirror = { page = SettingsPage.MIRROR },
             onOpenModels = { page = SettingsPage.MODELS },
             onOpenTheme = { page = SettingsPage.THEME },
             onOpenLogs = { page = SettingsPage.LOG },
@@ -68,6 +73,17 @@ fun ConfigScreen(
             onSpecsChange = { updated ->
                 specs = updated
                 ModelStore.save(context, updated)
+            },
+            onBack = { page = SettingsPage.ROOT },
+        )
+
+        SettingsPage.MIRROR -> GitHubMirrorSettingsScreen(
+            preference = mirrorPreference,
+            onSave = { updated ->
+                mirrorPreference = updated
+                GitHubMirrorPreference.save(context, updated)
+                AppLog.i("Settings", "GitHub 镜像源切换为 ${updated.summary}")
+                page = SettingsPage.ROOT
             },
             onBack = { page = SettingsPage.ROOT },
         )
@@ -103,9 +119,11 @@ fun ConfigScreen(
 @Composable
 private fun SettingsList(
     backendPreference: PoseBackendPreference,
+    mirrorPreference: GitHubMirrorPreference,
     enabledModels: Int,
     modelCount: Int,
     onOpenBackend: () -> Unit,
+    onOpenMirror: () -> Unit,
     onOpenModels: () -> Unit,
     onOpenTheme: () -> Unit,
     onOpenLogs: () -> Unit,
@@ -135,6 +153,18 @@ private fun SettingsList(
                     title = "推理后端",
                     subtitle = "${backendPreference.label} · 保存后自动更新相机",
                     onClick = onOpenBackend,
+                )
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                SettingRow(
+                    icon = {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_security),
+                            contentDescription = null,
+                        )
+                    },
+                    title = "GitHub 镜像源",
+                    subtitle = "${mirrorPreference.summary} · 仅影响 GitHub 模型下载",
+                    onClick = onOpenMirror,
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
                 SettingRow(

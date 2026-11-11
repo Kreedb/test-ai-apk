@@ -46,6 +46,8 @@ import androidx.compose.ui.unit.dp
 import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.models.ConfiguredModelStore
 import com.example.minimalapk.pose.BoxFormat
+import com.example.minimalapk.pose.GitHubMirrorMode
+import com.example.minimalapk.pose.GitHubMirrorPreference
 import com.example.minimalapk.pose.ModelCatalog
 import com.example.minimalapk.pose.ModelDownload
 import com.example.minimalapk.pose.ModelSpec
@@ -67,11 +69,13 @@ internal fun ModelsScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val mirrorPreference = remember { GitHubMirrorPreference.load(context) }
     var status by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<ModelSpec?>(null) }
     var importing by remember { mutableStateOf(false) }
     var showDownload by remember { mutableStateOf(false) }
     var downloadError by remember { mutableStateOf<String?>(null) }
+    var lastAttempt by remember { mutableStateOf<RemoteModel?>(null) }
     var showWorkbench by remember { mutableStateOf(false) }
     // Imports run for seconds; use the latest list so a toggle made meanwhile is not discarded.
     val currentSpecs by rememberUpdatedState(specs)
@@ -110,13 +114,15 @@ internal fun ModelsScreen(
         }
     }
 
-    fun download(model: RemoteModel) {
+    fun download(model: RemoteModel, preference: GitHubMirrorPreference) {
         importing = true
         downloadError = null
+        lastAttempt = model
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val bytes = ModelDownload.fetch(model.url)
+                    val bytes = ModelDownload.fetch(model.url, preference)
+                    ModelDownload.validateDownloaded(bytes, model.sizeBytes, model.sha256)
                     val (spec, message) = installOrKeepModel(context, model.name, bytes)
                     // The catalog knows the box channel order, which the tensor shape cannot reveal.
                     spec?.copy(boxFormat = model.boxFormat ?: spec.boxFormat) to message
@@ -217,7 +223,12 @@ internal fun ModelsScreen(
         ModelDownloadDialog(
             downloading = importing,
             error = downloadError,
-            onDownload = { model -> download(model) },
+            mirror = mirrorPreference,
+            failedModel = lastAttempt.takeIf { downloadError != null },
+            onDownload = { model -> download(model, mirrorPreference) },
+            onRetryDirect = { model ->
+                download(model, GitHubMirrorPreference(mode = GitHubMirrorMode.DIRECT))
+            },
             onDismiss = { if (!importing) showDownload = false },
         )
     }
@@ -281,7 +292,10 @@ private fun ModelCard(spec: ModelSpec, onToggle: (Boolean) -> Unit, onClick: () 
 private fun ModelDownloadDialog(
     downloading: Boolean,
     error: String?,
+    mirror: GitHubMirrorPreference,
+    failedModel: RemoteModel?,
     onDownload: (RemoteModel) -> Unit,
+    onRetryDirect: (RemoteModel) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var url by remember { mutableStateOf("") }
@@ -328,12 +342,30 @@ private fun ModelDownloadDialog(
                     enabled = !downloading,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Text(
+                    text = "下载源：${mirror.summary}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 error?.let {
                     Text(
                         text = "下载失败：$it",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
+                    failedModel?.let { model ->
+                        Text(
+                            text = "原始地址：${model.url}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (failedModel != null && !mirror.isDirect) {
+                        TextButton(
+                            enabled = !downloading,
+                            onClick = { onRetryDirect(failedModel) },
+                        ) { Text("直连重试") }
+                    }
                 }
                 if (downloading) {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())

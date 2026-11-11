@@ -9,6 +9,7 @@ import com.example.minimalapk.models.ModelConfig
 import com.example.minimalapk.models.OutputRender
 import com.example.minimalapk.models.sha256
 import com.example.minimalapk.models.writeAtomically
+import com.example.minimalapk.pose.GitHubMirrorPreference
 import com.example.minimalapk.pose.ModelDownload
 import com.example.minimalapk.pose.readCapped
 import java.io.File
@@ -85,11 +86,8 @@ internal object ExampleDownload {
         val target = ExampleCatalog.file(context, model)
         if (target.length() == model.sizeBytes && target.readBytes().sha256() == model.sha256) return target
         AppLog.i(TAG, "开始下载 ${model.name}（${model.sizeBytes / 1024 / 1024} MB）")
-        val bytes = ModelDownload.fetch(model.url)
-        require(bytes.size.toLong() == model.sizeBytes) {
-            "下载大小不符：期望 ${model.sizeBytes} 字节，实际 ${bytes.size} 字节"
-        }
-        require(bytes.sha256() == model.sha256) { "模型 SHA-256 不符，请重新下载" }
+        val bytes = ModelDownload.fetch(model.url, GitHubMirrorPreference.load(context))
+        ModelDownload.validateDownloaded(bytes, model.sizeBytes, model.sha256)
         target.writeAtomically(bytes)
         AppLog.i(TAG, "已下载 ${model.name}")
         return target

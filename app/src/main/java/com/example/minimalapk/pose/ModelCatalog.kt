@@ -1,5 +1,6 @@
 package com.example.minimalapk.pose
 
+import com.example.minimalapk.models.sha256
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -11,22 +12,28 @@ data class RemoteModel(
     val url: String,
     val boxFormat: BoxFormat? = null,
     val note: String = "",
+    val sizeBytes: Long? = null,
+    val sha256: String? = null,
 )
 
 /**
  * Downloadable models. The bundled APK keeps only YOLO26n-pose; everything else is fetched from
  * here or a user-supplied URL, so extra models no longer inflate every ABI package.
  *
- * shortcut: the file is served from `models/` on this repository's `main` branch via
- * raw.githubusercontent.com; renaming the branch/directory or making the repo private breaks it.
+ * The URL is pinned to a commit so deleting the weight from the current tree does not break the
+ * download. GitHub mirror settings rewrite it at fetch time; the pinned size and hash below still
+ * validate the bytes that arrive from either route.
  */
 object ModelCatalog {
     val models = listOf(
         RemoteModel(
             name = "YOLO11n-pose 640",
-            url = "https://raw.githubusercontent.com/Kreedb/test-ai-apk/main/models/yolo11n_pose.tflite",
+            url = "https://raw.githubusercontent.com/Kreedb/test-ai-apk/" +
+                "e9f51fe286a7ea8863d40113e51dc5a4b9d49e88/models/yolo11n_pose.tflite",
             boxFormat = BoxFormat.CENTER,
             note = "框为中心点+宽高，导入后自动设为 cxcywh",
+            sizeBytes = 11_835_168,
+            sha256 = "01b0d8c7e28369977c69d5c66a60c63301468a5a8ae24bafce942b61bab289c0",
         ),
     )
 }
@@ -35,8 +42,10 @@ internal object ModelDownload {
     /** The picker and the downloader share one cap before the bytes become a whole-file allocation. */
     const val MAX_BYTES = 64 * 1024 * 1024
 
-    fun fetch(url: String): ByteArray {
-        val parsed = runCatching { URL(url.trim()) }.getOrElse {
+    fun fetch(sourceUrl: String, mirror: GitHubMirrorPreference): ByteArray {
+        // Only supported GitHub URLs are rewritten; every other source keeps its original address.
+        val url = rewriteGitHubUrl(sourceUrl.trim(), mirror.prefix)
+        val parsed = runCatching { URL(url) }.getOrElse {
             throw IllegalArgumentException("下载地址无效")
         }
         require(parsed.protocol == "https") { "只支持 https 下载地址" }
@@ -58,6 +67,23 @@ internal object ModelDownload {
         } finally {
             connection.disconnect()
         }
+    }
+
+    /**
+     * Validates downloaded bytes before they can replace an installed file. Known catalog models
+     * also pin their size and SHA-256, and every download must at least look like TFLite so an HTML
+     * error page is never saved as a model.
+     */
+    fun validateDownloaded(bytes: ByteArray, expectedSize: Long?, expectedSha256: String?) {
+        if (expectedSize != null) {
+            require(bytes.size.toLong() == expectedSize) {
+                "下载大小不符：期望 $expectedSize 字节，实际 ${bytes.size} 字节"
+            }
+        }
+        if (expectedSha256 != null) {
+            require(bytes.sha256() == expectedSha256) { "模型 SHA-256 不符，请重新下载" }
+        }
+        require(PoseModelImport.isTflite(bytes)) { "下载内容不是 TFLite 模型（可能是网页或错误页面）" }
     }
 }
 
