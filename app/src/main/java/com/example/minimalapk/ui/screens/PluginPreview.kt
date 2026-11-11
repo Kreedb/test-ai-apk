@@ -1,8 +1,10 @@
 package com.example.minimalapk.ui.screens
 
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.runtime.Composable
@@ -11,9 +13,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
@@ -21,14 +25,70 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.sp
 import com.example.minimalapk.plugins.CancelReason
+import com.example.minimalapk.plugins.HostSnapshot
 import com.example.minimalapk.plugins.ImagePoint
 import com.example.minimalapk.plugins.ImageSource
 import com.example.minimalapk.plugins.PluginCapability
 import com.example.minimalapk.plugins.PluginHost
 import com.example.minimalapk.plugins.PluginLayer
+import com.example.minimalapk.plugins.RawImageMapping
 import com.example.minimalapk.plugins.ViewportMapping
 import com.example.minimalapk.pose.ModelResult
 import com.example.minimalapk.pose.PoseNet
+
+/** Raw camera pixels → the same centered Crop space used by poses, layers and pointer events.
+ * Compose the existing mappings instead of rounding a second letterbox or stretching the photo
+ * to a square. The matrix applies to the full-resolution raw bitmap, never the model bitmap.
+ */
+internal fun rawPreviewMatrix(
+    rawWidth: Int,
+    rawHeight: Int,
+    source: ImageSource,
+    viewportWidth: Int,
+    viewportHeight: Int,
+): FloatArray {
+    val raw = RawImageMapping(rawWidth, rawHeight, source)
+    val viewport = ViewportMapping(source.space, viewportWidth, viewportHeight)
+    fun map(x: Float, y: Float) = viewport.toPreview(raw.toImage(ImagePoint(x, y)))
+    val origin = map(0f, 0f)
+    val right = map(rawWidth.toFloat(), 0f)
+    val bottom = map(0f, rawHeight.toFloat())
+    return floatArrayOf(
+        (right.x - origin.x) / rawWidth, (bottom.x - origin.x) / rawHeight, origin.x,
+        (right.y - origin.y) / rawWidth, (bottom.y - origin.y) / rawHeight, origin.y,
+        0f, 0f, 1f,
+    )
+}
+
+/** Display raw camera detail independently of the models' input resolution. A replacement is
+ * already an upright, full source-space composite and keeps the existing Crop transform.
+ */
+@Composable
+internal fun CameraFramePreview(snapshot: HostSnapshot, modifier: Modifier = Modifier) {
+    val frame = snapshot.frame ?: return
+    val replacement = snapshot.replacement?.output?.replacement
+    if (replacement != null) {
+        Image(replacement.image.bitmap.asImageBitmap(), null, modifier, contentScale = ContentScale.Crop)
+    } else {
+        val paint = remember { Paint(Paint.FILTER_BITMAP_FLAG) }
+        val matrix = remember { Matrix() }
+        Canvas(modifier) {
+            val padding = PoseNet.LETTERBOX_COLOR
+            drawRect(Color(padding, padding, padding))
+            matrix.setValues(rawPreviewMatrix(
+                frame.raw.width, frame.raw.height, frame.source, size.width.toInt(), size.height.toInt(),
+            ))
+            val canvas = drawContext.canvas.nativeCanvas
+            val save = canvas.save()
+            try {
+                canvas.clipRect(0f, 0f, size.width, size.height)
+                canvas.drawBitmap(frame.raw.bitmap, matrix, paint)
+            } finally {
+                canvas.restoreToCount(save)
+            }
+        }
+    }
+}
 
 /** Down is immediate; a second pointer invalidates the entire gesture until all fingers are up. */
 internal fun Modifier.pluginPressInput(host: PluginHost): Modifier = pointerInput(host) {

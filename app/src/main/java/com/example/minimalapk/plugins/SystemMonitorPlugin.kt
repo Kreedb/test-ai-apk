@@ -38,7 +38,7 @@ internal data class SystemMonitorSettings(
     companion object {
         const val MIN_REFRESH_MS = 250
         const val MAX_REFRESH_MS = 5000
-        const val DEFAULT_REFRESH_MS = 1000
+        const val DEFAULT_REFRESH_MS = 250
         const val MIN_FPS_WINDOW_SECONDS = 1
         const val MAX_FPS_WINDOW_SECONDS = 10
         const val DEFAULT_FPS_WINDOW_SECONDS = 2
@@ -150,9 +150,8 @@ internal fun monitorMetricLines(
         add("帧率 ${if (fps > 0f) "${formatNumber(fps)} FPS" else "—"}")
     }
     if (settings.showTimings) {
-        add("预处理 ${timingsText(primaryTimings) { it.preprocessMs }}")
+        add("预处理 ${timingsText(primaryTimings) { it.preprocessMs }} · 后处理 ${timingsText(primaryTimings) { it.postprocessMs }}")
         add("推理 ${timingsText(primaryTimings) { it.inferenceMs }}")
-        add("后处理 ${timingsText(primaryTimings) { it.postprocessMs }}")
         add("分析耗时(全部) ${analysisTotalMs?.let { "${formatNumber(it)} ms" } ?: "—"}")
     }
     if (settings.showBackend) add("加速器 ${executionProvider ?: "—"}")
@@ -284,9 +283,6 @@ internal class SystemMonitorPlugin(
                 context.publish(PluginOutput(
                     timestampNanos = output.timestampNanos,
                     messages = messages.take(PluginHost.MAX_MESSAGES),
-                    // The host treats monitor contributions as source-compatible layers; an empty
-                    // layer keeps the text panel in HostSnapshot.monitors without drawing pixels.
-                    layers = listOf(PluginLayer(event.frame.source)),
                 ))
             }
             else -> Unit

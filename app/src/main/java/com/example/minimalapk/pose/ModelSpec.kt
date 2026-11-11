@@ -58,7 +58,8 @@ data class ModelSpec(
 
 /**
  * The model list shown in 插件 → 自定义模型. Bundled models live in code; the store only carries the
- * user's options, so a changed asset path or shape in a later version wins over stale settings.
+ * user's options. Asset identity/input geometry come from the APK; decoder options are editable
+ * for bundled and imported models alike and are checked against the file before saving/loading.
  */
 object ModelStore {
     /** Same-frame serial inference: two 640 pose models already halve the frame rate. */
@@ -85,7 +86,10 @@ object ModelStore {
         val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY, null)
             ?: return builtIn
-        val saved = decode(stored)
+        return restore(decode(stored)) { modelFile(context, it).isFile }
+    }
+
+    internal fun restore(saved: List<ModelSpec>, fileExists: (ModelSpec) -> Boolean): List<ModelSpec> {
         if (saved.isEmpty()) return builtIn
         val specs = saved.mapNotNull { entry ->
             val bundled = builtIn.firstOrNull { it.id == entry.id }
@@ -94,11 +98,8 @@ object ModelStore {
                     name = bundled.name,
                     source = bundled.source,
                     inputSize = bundled.inputSize,
-                    anchors = bundled.anchors,
-                    keypoints = bundled.keypoints,
-                    outputLayout = bundled.outputLayout,
                 )
-                modelFile(context, entry).isFile -> entry
+                fileExists(entry) -> entry
                 // An import whose file is gone (cleared data, manual cleanup) would fail at open.
                 else -> null
             }
@@ -107,15 +108,20 @@ object ModelStore {
     }
 
     fun save(context: Context, specs: List<ModelSpec>) {
-        var enabled = 0
-        val capped = specs.map { spec ->
-            val keep = spec.enabled && enabled < MAX_ENABLED
-            if (keep) enabled++
-            spec.copy(enabled = keep)
-        }
+        requireEnabledCapacity(specs)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit { putString(KEY, encode(capped)) }
+            .edit { putString(KEY, encode(specs)) }
     }
+
+    internal fun requireEnabledCapacity(specs: List<ModelSpec>) {
+        require(specs.count { it.enabled } <= MAX_ENABLED) {
+            "姿态加速管线最多同时加载 $MAX_ENABLED 个模型，请先关闭其它姿态模型"
+        }
+    }
+
+    /** Identical model bytes must not reset saved toggles, thresholds or corrected decoder options. */
+    internal fun withImported(specs: List<ModelSpec>, imported: ModelSpec): List<ModelSpec> =
+        if (specs.any { it.id == imported.id }) specs else specs + imported
 
     internal fun encode(specs: List<ModelSpec>): String = specs.joinToString(LINE.toString()) { spec ->
         listOf(
@@ -159,6 +165,25 @@ object ModelStore {
             )
         }.getOrNull()
     }.toList()
+}
+
+/** Tensor count alone is insufficient: transposed heads have the same count but decode differently. */
+internal fun validatePoseModelConfig(spec: ModelSpec, graph: GraphDescription) {
+    require(spec.scoreThreshold in 0f..1f && spec.keypointThreshold in 0f..1f) { "置信度阈值必须在 0–1" }
+    require(spec.debounceFrames in 1..30) { "防抖帧数必须在 1–30" }
+    require(spec.anchors in 1..1_000_000 && spec.keypoints in 1..100) { "锚点数或关键点数超出支持范围" }
+    val signature = graph.signatures.first { it.key.isEmpty() }
+    val input = signature.inputs.singleOrNull() ?: error("姿态模型需要单输入")
+    val output = signature.outputs.singleOrNull() ?: error("姿态模型需要单输出")
+    require(input.type == 0 && output.type == 0) { "姿态模型需要 FLOAT32 输入与输出" }
+    require(input.shape == listOf(1, spec.inputSize, spec.inputSize, 3)) { "输入尺寸与模型文件不一致：${input.shape}" }
+    val expected = when (spec.outputLayout) {
+        OutputLayout.VALUE_MAJOR -> listOf(1, spec.valuesPerAnchor, spec.anchors)
+        OutputLayout.ANCHOR_MAJOR -> listOf(1, spec.anchors, spec.valuesPerAnchor)
+    }
+    require(output.shape == expected) {
+        "当前配置要求 $expected，模型实际输出 ${output.shape}；请核对锚点数、关键点数与布局"
+    }
 }
 
 internal fun modelFile(context: Context, spec: ModelSpec): File =

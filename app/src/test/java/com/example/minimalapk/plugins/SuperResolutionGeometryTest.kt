@@ -1,89 +1,64 @@
 package com.example.minimalapk.plugins
 
+import com.example.minimalapk.pose.PhotoBounds
 import com.example.minimalapk.pose.poseInputLayout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlin.math.abs
 
 class SuperResolutionGeometryTest {
-    private fun source(rawWidth: Int, rawHeight: Int, rotation: Int, input: Int = 640): ImageSource {
-        val layout = poseInputLayout(rawWidth, rawHeight, rotation, input)
-        return ImageSource(1, 1, ImageSpace(input, input, layout.photoBounds), rotation)
+    @Test
+    fun lateTilesCannotPublishAfterReleaseNewPressConfigurationOrSessionChange() {
+        val source = ImageSource(7, 42, ImageSpace(640, 640, PhotoBounds(0f, 80f, 640f, 560f)), 0)
+        val press = PressToken(7, 1, 0, 100, 42)
+        assertTrue(superResolutionRequestIsCurrent(true, press, press, press, source))
+        assertFalse(superResolutionRequestIsCurrent(true, press, null, null, source))
+        assertFalse(superResolutionRequestIsCurrent(true, press, press.copy(sequence = 2), press.copy(sequence = 2), source))
+        assertFalse(superResolutionRequestIsCurrent(false, press, press, press, source))
+        assertFalse(superResolutionRequestIsCurrent(true, press, press, press, source.copy(session = 8)))
+        assertFalse(superResolutionRequestIsCurrent(true, press, press, press, source.copy(frameNumber = 41)))
     }
 
     @Test
-    fun squareRoiMapsThroughEveryRotationWithoutStretching() {
-        listOf(0, 90, 180, 270).forEach { rotation ->
-            val source = source(640, 480, rotation)
-            val roi = superResolutionRoi(source, 640, 480)
-            assertEquals("raw left @$rotation", 200, roi.raw.left)
-            assertEquals("raw top @$rotation", 120, roi.raw.top)
-            assertEquals("raw side @$rotation", 240, roi.raw.width)
-            assertEquals("raw side @$rotation", 240, roi.raw.height)
-            assertEquals("source side @$rotation", 240, roi.source.width)
-            assertEquals("source side @$rotation", 240, roi.source.height)
-            assertEquals("source left @$rotation", 200, roi.source.left)
-            assertEquals("source top @$rotation", 200, roi.source.top)
-            assertEquals(roi.source, roi.composite)
-            assertEquals(PixelRect(0, 0, 50, 50), roi.input)
-
-            val center = ImagePoint(
-                roi.source.left + roi.source.width / 2f,
-                roi.source.top + roi.source.height / 2f,
-            )
-            val back = RawImageMapping(640, 480, source).toRaw(center)
-            assertEquals(320f, back.x, 0.001f)
-            assertEquals(240f, back.y, 0.001f)
-            assertInside(roi.source, source)
+    fun allPhotoPixelsIncludingEdgesAreEnhancedExactlyOnce() {
+        listOf(640 to 480, 1280 to 720, 720 to 1280, 4032 to 3024, 17 to 29, 1 to 20000).forEach { (w, h) ->
+            val plan = superResolutionPlan(w, h)
+            val writes = IntArray(plan.width * plan.height)
+            plan.tiles.forEach { tile ->
+                for (y in tile.core.top until tile.core.bottom) for (x in tile.core.left until tile.core.right) {
+                    writes[y * plan.width + x]++
+                }
+                assertTrue(tile.outputCrop.right <= 200)
+                assertTrue(tile.outputCrop.bottom <= 200)
+                assertEquals(tile.core.left - 5, tile.sampleLeft)
+                assertEquals(tile.core.top - 5, tile.sampleTop)
+            }
+            assertTrue("Gaps/overlap in $w x $h", writes.all { it == 1 })
+            assertTrue(plan.tiles.size <= SUPER_RESOLUTION_MAX_TILES)
+            assertTrue(plan.outputWidth <= SUPER_RESOLUTION_MAX_OUTPUT_EDGE)
+            assertTrue(plan.outputHeight <= SUPER_RESOLUTION_MAX_OUTPUT_EDGE)
+            assertTrue(plan.width <= w && plan.height <= h)
+            // Only integer pixel rounding, not square-cropping/stretching of the camera photo.
+            assertTrue(kotlin.math.abs(plan.width.toDouble() / w - plan.height.toDouble() / h) <= 1.0 / minOf(w, h))
         }
     }
 
     @Test
-    fun nonSquareFrameUsesItsSmallerSideAndKeepsTheSameRegionUpright() {
+    fun sourceCompositePreservesExactHostAspectAndLetterboxAtAllRotations() {
         listOf(0, 90, 180, 270).forEach { rotation ->
-            val source = source(1280, 720, rotation)
-            val roi = superResolutionRoi(source, 1280, 720)
-            assertEquals("raw left @$rotation", 460, roi.raw.left)
-            assertEquals("raw top @$rotation", 180, roi.raw.top)
-            assertEquals("raw side @$rotation", 360, roi.raw.width)
-            assertEquals("source side @$rotation", 180, roi.source.width)
-            assertEquals("source side @$rotation", 180, roi.source.height)
-            assertEquals("source center @$rotation", 320f, roi.source.left + roi.source.width / 2f, 0.001f)
-            assertEquals("source center @$rotation", 320f, roi.source.top + roi.source.height / 2f, 0.001f)
-            assertInside(roi.source, source)
-
-            val back = RawImageMapping(1280, 720, source).toRaw(
-                ImagePoint(
-                    roi.source.left + roi.source.width / 2f,
-                    roi.source.top + roi.source.height / 2f,
-                ),
-            )
-            assertEquals(640f, back.x, 0.001f)
-            assertEquals(360f, back.y, 0.001f)
+            val layout = poseInputLayout(1280, 720, rotation, 640)
+            val space = ImageSpace(640, 640, layout.photoBounds)
+            val plan = if (rotation % 180 == 0) superResolutionPlan(1280, 720) else superResolutionPlan(720, 1280)
+            val (w, h) = superResolutionCompositeSize(space, plan)
+            assertEquals(w.toLong() * space.height, h.toLong() * space.width)
+            assertTrue(w <= 2048 && h <= 2048)
+            assertTrue((layout.photoBounds.right - layout.photoBounds.left) * w / space.width <= plan.outputWidth + 1)
+            assertTrue((layout.photoBounds.bottom - layout.photoBounds.top) * h / space.height <= plan.outputHeight + 1)
         }
-    }
-
-    @Test
-    fun fractionScalesTheRoiButNeverTheFixedModelInput() {
-        val source = source(640, 480, 90)
-        val small = superResolutionRoi(source, 640, 480, fraction = 0.25f)
-        val full = superResolutionRoi(source, 640, 480, fraction = 1f)
-        assertEquals(120, small.raw.width)
-        assertEquals(120, small.source.width)
-        assertEquals(480, full.raw.width)
-        // A full-frame dense model call is possible mathematically, but the plugin always uses the
-        // centered 50% default and reports the ROI instead of claiming whole-frame SR.
-        assertTrue(small.source.width < full.source.width)
-        assertEquals(PixelRect(0, 0, 50, 50), small.input)
-    }
-
-    private fun assertInside(rect: PixelRect, source: ImageSource) {
-        val bounds = source.space.photoBounds
-        assertTrue(rect.left >= bounds.left)
-        assertTrue(rect.top >= bounds.top)
-        assertTrue(rect.right <= bounds.right)
-        assertTrue(rect.bottom <= bounds.bottom)
-        assertTrue(abs(rect.width - rect.height) <= 1)
+        val space = ImageSpace(1280, 720, PhotoBounds(0f, 0f, 1280f, 720f))
+        val (w, h) = superResolutionCompositeSize(space, superResolutionPlan(1280, 720))
+        assertEquals(w.toLong() * 720, h.toLong() * 1280)
+        assertTrue(w <= 2048 && h <= 2048)
     }
 }

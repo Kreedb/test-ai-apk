@@ -84,7 +84,9 @@ internal class CameraSession(
                 provider = cameraProvider
                 val useCase = ImageAnalysis.Builder()
                     .setResolutionSelector(ResolutionSelector.Builder().setResolutionStrategy(
-                        ResolutionStrategy(Size(640, 480), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER),
+                        // Keep the 4:3 camera field of view, but retain enough source pixels for the
+                        // preview. Each model still resizes independently to its own input tensor.
+                        ResolutionStrategy(Size(1280, 960), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER),
                     ).build())
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
@@ -105,9 +107,15 @@ internal class CameraSession(
                         val analyzed = poses.analyze(raw, rotation)
                         val result = analyzed?.frame ?: PoseAnalyzer.preview(raw, rotation)
                         val space = ImageSpace(result.bitmap.width, result.bitmap.height, result.photoBounds)
+                        if (number == 1L) {
+                            AppLog.i("Camera", "预览原图 ${raw.width}×${raw.height}，旋转 $rotation°；" +
+                                "分析输入 ${space.width}×${space.height}（预览不使用缩小后的分析图）")
+                        }
                         val frame = CameraFrame(
                             source = ImageSource(session, number, space, rotation),
                             timestampNanos = timestamp,
+                            // The UI draws raw through this image space; plugins keep their existing
+                            // upright analysis image and coordinates, including letterbox rounding.
                             raw = BitmapImage(raw), image = BitmapImage(result.bitmap),
                             viewport = ViewportMapping(space, viewportWidth, viewportHeight),
                             poses = result.results, poseToken = analyzed?.token,

@@ -10,6 +10,8 @@ import com.example.minimalapk.pose.NpuProbeScheme
 import com.example.minimalapk.pose.NpuProbeState
 import com.example.minimalapk.pose.NpuSource
 import com.example.minimalapk.pose.PhotoBounds
+import com.example.minimalapk.pose.PoseDetection
+import com.example.minimalapk.pose.PoseKeypoint
 import com.example.minimalapk.pose.PoseTimings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -120,6 +122,63 @@ class SystemMonitorPluginTest {
 
         // 2 intervals over the 1 s span between captured timestamps; the clock would report 1.7.
         assertEquals("帧率 2.0 FPS", checkNotNull(third).metricLines.first())
+    }
+
+    @Test
+    fun defaultRefreshPublishesAtFourHertzWithoutSamplingEveryCameraFrame() {
+        var now = 0L
+        val usage = FakeUsage()
+        val engine = SystemMonitorEngine(usage) { now }
+        engine.start(SystemMonitorSettings())
+        assertNotNull(engine.onFrame(frame(timestamp = now)))
+        for (millis in 50..200 step 50) {
+            now = millis * 1_000_000L
+            assertNull(engine.onFrame(frame(timestamp = now)))
+        }
+        assertEquals(1, usage.samples)
+        now = 250_000_000L
+        val refreshed = checkNotNull(engine.onFrame(frame(timestamp = now)))
+        assertEquals("帧率 20.0 FPS", refreshed.metricLines.first())
+        assertEquals(2, usage.samples)
+    }
+
+    @Test
+    fun monitorMetricsStayInPanelAlongsidePoseEnhancementBetweenSamples() {
+        var now = 0L
+        val usage = FakeUsage()
+        val monitor = SystemMonitorPlugin(usage, { now }) {
+            MonitorDeviceInfo("Test Phone", "Test SoC", "Android 15", "1.0")
+        }
+        val pose = ModelResult(
+            ModelStore.builtIn.first(),
+            PoseDetection(100f, 20f, 500f, 620f, .9f, List(17) { PoseKeypoint(320f, 320f, .9f) }),
+            PoseTimings(2f, 10f, 1f),
+        )
+        PluginHost(listOf(monitor, PoseEnhancementPlugin())).use { host ->
+            host.configure(mapOf(
+                PluginIds.SYSTEM_MONITOR to PluginSettings(true, SystemMonitorSettings().toConfig()),
+                PluginIds.POSE_ENHANCEMENT to PluginSettings(true, PoseEnhancementSettings().toConfig()),
+            ))
+            host.lifecycle(CameraLifecycle.ENTER)
+            host.lifecycle(CameraLifecycle.FOREGROUND)
+            for (number in 1L..6L) {
+                now = (number - 1) * 50_000_000L
+                host.acceptFrame(frame(session = host.sessionId()!!, number = number, timestamp = now, poses = listOf(pose)))
+                val snapshot = host.snapshot.value
+                assertEquals(PluginIds.SYSTEM_MONITOR, snapshot.monitors.single().pluginId)
+                assertTrue(snapshot.monitors.single().output.messages.any { it.text.startsWith("NPU ") })
+                // No dummy image layer and no metric text for the bottom report area to append.
+                assertTrue(snapshot.monitors.single().output.layers.isEmpty())
+                assertEquals(PluginIds.POSE_ENHANCEMENT, snapshot.layers.single().pluginId)
+                val heightLine = snapshot.layers.single().output.layers.single().lines.single()
+                assertEquals(ImagePoint(300f, 20f), heightLine.start)
+                assertEquals(ImagePoint(300f, 620f), heightLine.end)
+                assertEquals(listOf(pose), snapshot.frame!!.poses)
+                assertEquals(listOf(PluginIds.POSE_ENHANCEMENT), snapshot.reports.map { it.pluginId })
+            }
+            assertEquals(2, usage.samples)
+            assertEquals("帧率 20.0 FPS", host.snapshot.value.monitors.single().output.messages.first().text)
+        }
     }
 
     @Test

@@ -16,6 +16,15 @@ import java.nio.ByteOrder
 
 internal data class SoundLabel(val label: String, val score: Float)
 
+/** Fail visibly rather than attach a plausible but shifted/truncated class list to scores. */
+internal fun rankedSoundLabels(labels: List<String>, scores: DoubleArray): List<SoundLabel> {
+    require(labels.size == scores.size && labels.all { it.isNotBlank() }) {
+        "声音识别标签数 ${labels.size} 与输出类别数 ${scores.size} 不符"
+    }
+    require(scores.isNotEmpty() && scores.all { it.isFinite() }) { "声音识别输出无效" }
+    return scores.indices.map { SoundLabel(labels[it], scores[it].toFloat()) }.sortedByDescending { it.score }
+}
+
 /**
  * YAMNet from tensorflow/examples/lite/examples/audio_classification. The input is one mono
  * waveform window; the output is independent per-class scores (not a transcription). Labels come
@@ -37,13 +46,19 @@ internal class AudioClassificationRunner(model: ConfiguredModel) : Closeable {
     val windowSamples: Int = tensorElements(inputConfig.shape)
     val sampleRate: Int = inputConfig.sampleRate
     val labels: List<String> = config.outputs.firstOrNull()?.labels?.takeIf { it.isNotEmpty() }
-        ?: ExampleDownload.labels(model.file)
+        ?: ExampleDownload.labels(model.file, ExampleCatalog.audio)
 
-    private val interpreter = Interpreter(model.file, Interpreter.Options().setNumThreads(2))
-
-    init {
-        require(labels.isNotEmpty()) { "声音识别模型缺少类别标签文件" }
-        configureInputs(interpreter, config)
+    private val interpreter = Interpreter(model.file, Interpreter.Options().setNumThreads(2)).also { runtime ->
+        try {
+            require(labels.isNotEmpty() && labels.all { it.isNotBlank() }) { "声音识别模型缺少类别标签文件" }
+            configureInputs(runtime, config)
+            val output = if (config.signature.isEmpty()) runtime.getOutputTensor(0)
+            else runtime.getOutputTensorFromSignature(outputTensor.name, config.signature)
+            require(labels.size == output.numElements()) { "声音识别标签数 ${labels.size} 与输出类别数 ${output.numElements()} 不符" }
+        } catch (error: Throwable) {
+            runtime.close()
+            throw error
+        }
     }
 
     /** Returns every class score sorted from highest to lowest. Pure inference; no Android UI. */
@@ -69,9 +84,7 @@ internal class AudioClassificationRunner(model: ConfiguredModel) : Closeable {
             tensor.asReadOnlyBuffer(), outputTensor.type,
             quantization.scale, quantization.zeroPoint.toLong(),
         )
-        return scores.indices.map { index ->
-            SoundLabel(labels.getOrNull(index) ?: "#$index", scores[index].toFloat())
-        }.sortedByDescending { it.score }
+        return rankedSoundLabels(labels, scores)
     }
 
     @Synchronized

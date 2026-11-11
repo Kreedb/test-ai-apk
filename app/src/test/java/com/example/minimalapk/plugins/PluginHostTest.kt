@@ -20,7 +20,7 @@ class PluginHostTest {
 
     private class Plugin(
         id: String,
-        capabilities: Set<PluginCapability> = PluginCapability.entries.toSet(),
+        capabilities: Set<PluginCapability> = PluginCapability.entries.toSet() - PluginCapability.MONITOR,
         priority: Int = 0,
         val fails: Boolean = false,
     ) : CameraPlugin {
@@ -215,6 +215,35 @@ class PluginHostTest {
             assertTrue(host.snapshot.value.reports.isEmpty())
             host.acceptFrame(frame(host, 3))
             assertTrue(host.snapshot.value.layers.isEmpty())
+        }
+    }
+
+    @Test
+    fun monitorTextSurvivesNewFramesAndReplacementsButItsDrawingLayersStaySourceBound() {
+        val monitor = Plugin("monitor", setOf(PluginCapability.MONITOR, PluginCapability.TEXT))
+        start(monitor, Plugin("enhance")).use { host ->
+            val first = frame(host).also(host::acceptFrame)
+            val context = host.contextFor("monitor")!!
+            val messages = listOf(
+                PluginMessage("帧率 30.0 FPS"), PluginMessage("诊断详情", MessageKind.STATUS),
+            )
+            assertTrue(context.publish(PluginOutput(100, messages, listOf(PluginLayer(first.source)))))
+            assertEquals(listOf(PluginLayer(first.source)), host.snapshot.value.monitors.single().output.layers)
+            assertEquals(listOf(messages.last()), host.snapshot.value.reports.single().output.messages)
+
+            val press = host.press(1, ImagePoint(320f, 320f), 110)!!
+            host.acceptFrame(frame(host, 2))
+            assertEquals(messages, host.snapshot.value.monitors.single().output.messages)
+            assertTrue(host.snapshot.value.monitors.single().output.layers.isEmpty())
+            assertTrue(host.contextFor("enhance")!!.publish(PluginOutput(
+                210, replacement = PreviewReplacement(first.source, Image(1280, 1280), press),
+            )))
+            assertEquals(messages, host.snapshot.value.monitors.single().output.messages)
+            assertEquals(listOf(PluginLayer(first.source)), host.snapshot.value.monitors.single().output.layers)
+
+            host.release(1, ImagePoint(320f, 320f), 220)
+            assertTrue(host.snapshot.value.monitors.single().output.layers.isEmpty())
+            assertEquals(listOf(messages.last()), host.snapshot.value.reports.single().output.messages)
         }
     }
 

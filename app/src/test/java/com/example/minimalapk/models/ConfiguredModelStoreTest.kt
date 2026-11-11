@@ -3,6 +3,7 @@ package com.example.minimalapk.models
 import com.example.minimalapk.pose.TfliteGraph
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -74,6 +75,62 @@ class ConfiguredModelStoreTest {
         assertThrows(IllegalStateException::class.java) { target.writeAtomically(byteArrayOf(1, 2)) }
         assertEquals("keep", File(target, "previous").readText())
         assertEquals(listOf("model"), folder.root.listFiles()!!.map { it.name })
+    }
+
+    @Test
+    fun legacySingletonBecomesOneEnabledModelWithoutTouchingBytesConfigOrCheckpoint() {
+        val directory = folder.newFolder()
+        val model = ConfiguredModelStore.install(directory, "legacy", fixture())
+        val bytes = model.file.readBytes()
+        val config = model.configFile.readText()
+        val checkpoint = File(directory, "personalization.checkpoint").apply { writeText("trained weights") }
+        val before = ConfiguredModelStore.revision.value
+
+        assertTrue(ConfiguredModelStore.migrateLegacySelection(directory, model.id))
+        assertTrue(ConfiguredModelStore.list(directory).single().enabled)
+        assertEquals(before + 1, ConfiguredModelStore.revision.value)
+        assertTrue(ConfiguredModelStore.migrateLegacySelection(directory, model.id))
+        assertEquals(before + 1, ConfiguredModelStore.revision.value)
+        assertArrayEquals(bytes, model.file.readBytes())
+        assertEquals(config, model.configFile.readText())
+        assertEquals("trained weights", checkpoint.readText())
+
+        ConfiguredModelStore.setEnabled(model, false)
+        assertTrue(ConfiguredModelStore.migrateLegacySelection(directory, model.id))
+        assertFalse(ConfiguredModelStore.list(directory).single().enabled)
+        assertFalse(ConfiguredModelStore.migrateLegacySelection(directory, "missing"))
+        assertEquals("trained weights", checkpoint.readText())
+    }
+
+    @Test
+    fun imageModelTogglePersistsAcrossReimportAndDeletingItDoesNotDeleteOtherFiles() {
+        val directory = folder.newFolder()
+        val bytes = File("src/main/assets/models/yolo26n_pose.tflite").readBytes()
+        val model = ConfiguredModelStore.install(directory, "image", bytes)
+        val config = model.configFile.readText()
+        assertFalse(model.enabled)
+        ConfiguredModelStore.setEnabled(model, true)
+        val importedAgain = ConfiguredModelStore.install(directory, "image again", bytes) { error("must preserve saved config") }
+        assertTrue(importedAgain.enabled)
+        assertTrue(ConfiguredModelStore.list(directory).single().enabled)
+        assertEquals(config, importedAgain.configFile.readText())
+        ConfiguredModelStore.setEnabled(importedAgain, false)
+        assertFalse(ConfiguredModelStore.list(directory).single().enabled)
+        val checkpoint = File(directory, "training.bin").apply { writeText("keep") }
+        ConfiguredModelStore.delete(importedAgain)
+        assertFalse(importedAgain.enabledFile.exists())
+        assertEquals("keep", checkpoint.readText())
+    }
+
+    @Test
+    fun unsupportedCameraInputsStayAvailableForFileRunsWithoutAnEnabledToggle() {
+        val model = ConfiguredModelStore.install(folder.newFolder(), "multi-input", fixture())
+        val before = ConfiguredModelStore.revision.value
+        assertThrows(IllegalArgumentException::class.java) { ConfiguredModelStore.setEnabled(model, true) }
+        assertFalse(model.enabledFile.exists())
+        assertEquals(before, ConfiguredModelStore.revision.value)
+        assertArrayEquals(fixture(), model.file.readBytes())
+        assertTrue(model.configFile.isFile)
     }
 
     // Schema-generated, no operators/weights: two inputs, an INT8 tensor and a named second subgraph.

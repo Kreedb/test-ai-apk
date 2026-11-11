@@ -21,8 +21,11 @@ internal fun cameraPluginSettings(
     val configured = plugins.getValue(PluginIds.CONFIGURED_MODEL)
     val enhancement = plugins.getValue(PluginIds.POSE_ENHANCEMENT)
     val baseConfig = base.toConfig()
+    // Enhancement is also a consumer of the shared pose producer. Merely having a saved model
+    // enabled must not keep this hidden plugin running when both visible consumers are off.
+    val posesNeeded = (configured.enabled || enhancement.enabled) && base.specs.any { it.enabled }
     return plugins +
-        (PluginIds.POSE_MODELS to PluginSettings(enabled = true, config = baseConfig)) +
+        (PluginIds.POSE_MODELS to PluginSettings(enabled = posesNeeded, config = baseConfig)) +
         (PluginIds.POSE_ENHANCEMENT to enhancement.copy(config = enhancement.config + mapOf(
             "pose_models" to baseConfig.getValue("models"), "pose_backend" to baseConfig.getValue("backend"),
         ))) +

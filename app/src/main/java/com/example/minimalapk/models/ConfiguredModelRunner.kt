@@ -132,19 +132,6 @@ internal fun execute(
     return ModelRunResult(report, rendered)
 }
 
-/**
- * The camera draws the first output image over the square preview. Square renders already crop
- * identically; other aspect ratios are stretched into a square so both layers still align.
- * Text-only results have no overlay.
- */
-internal fun ModelRunResult.overlay(size: Int): Bitmap? {
-    val rendered = images.firstOrNull()?.second ?: return null
-    if (rendered.width == rendered.height) return rendered
-    val overlay = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-    Canvas(overlay).drawBitmap(rendered, null, RectF(0f, 0f, size.toFloat(), size.toFloat()), Paint(Paint.FILTER_BITMAP_FLAG))
-    return overlay
-}
-
 private data class TensorOutput(val shape: List<Int>, val values: DoubleArray, val text: String? = null)
 
 private fun tensorOutput(tensor: Tensor, description: GraphTensor): TensorOutput {

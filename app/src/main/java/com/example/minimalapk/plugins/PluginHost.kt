@@ -1,5 +1,6 @@
 package com.example.minimalapk.plugins
 
+import com.example.minimalapk.log.AppLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.CancellationException
@@ -332,6 +333,7 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
         } catch (_: CancellationException) {
             // Normal lifecycle cancellation is not a plugin fault.
         } catch (error: Throwable) {
+            AppLog.e("PluginHost", "${entry.plugin.descriptor.id} ${event.javaClass.simpleName} 失败", error)
             synchronized(lock) {
                 if (valid(context.token)) {
                     entry.output = PluginOutput(System.nanoTime(), listOf(
@@ -364,11 +366,29 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
             contribution.output.layers.filter { it.source == source }.takeIf { it.isNotEmpty() }
                 ?.let { contribution.copy(output = contribution.output.copy(layers = it)) }
         }
+        // Monitor text describes a sampling interval, not one image. Keep it until the plugin
+        // updates/withdraws it, including while another frame or a held replacement is displayed.
+        // Pixels/lines from a monitor still obey the exact-source rule used by other overlays.
+        val monitors = contributions.filter {
+            PluginCapability.MONITOR in entries.getValue(it.pluginId).plugin.descriptor.capabilities
+        }.map { contribution ->
+            contribution.copy(output = contribution.output.copy(
+                layers = contribution.output.layers.filter { it.source == source },
+            ))
+        }
         val reports = contributions.map { contribution ->
             if (replacements.size > 1 && contribution in replacements.drop(1)) {
                 contribution.copy(output = contribution.output.copy(messages =
                     (contribution.output.messages.take(MAX_MESSAGES - 1) +
                         PluginMessage("主画面由 ${winner!!.name} 替换（优先级 / 插件 ID 仲裁）", MessageKind.STATUS)),
+                ))
+            } else contribution
+        }.map { contribution ->
+            // Metric text has one home: the monitor panel. Explicit diagnoses/errors remain
+            // copyable reports, even when a monitor has no image-compatible drawing layer.
+            if (PluginCapability.MONITOR in entries.getValue(contribution.pluginId).plugin.descriptor.capabilities) {
+                contribution.copy(output = contribution.output.copy(
+                    messages = contribution.output.messages.filter { it.kind != MessageKind.TEXT },
                 ))
             } else contribution
         }.filter { it.output.messages.isNotEmpty() }
@@ -377,7 +397,7 @@ internal class PluginHost(plugins: List<CameraPlugin>) : AutoCloseable {
             frame = frame?.let { if (it.poseToken != null && !valid(it.poseToken)) it.copy(poses = emptyList(), executionProvider = null) else it },
             replacement = winner,
             layers = compatible.filter { PluginCapability.MONITOR !in entries.getValue(it.pluginId).plugin.descriptor.capabilities },
-            monitors = compatible.filter { PluginCapability.MONITOR in entries.getValue(it.pluginId).plugin.descriptor.capabilities },
+            monitors = monitors,
             reports = reports,
             press = press,
         )

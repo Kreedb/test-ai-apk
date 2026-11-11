@@ -1,66 +1,205 @@
 package com.example.minimalapk.plugins
 
 import android.content.Context
+import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
 
-/**
- * System TextToSpeech wrapper shared by the plugin card and its dialog. Initialization is
- * asynchronous and reported through [onStatus]; no model or microphone is involved.
- */
-internal class TtsEngine(context: Context, private val onStatus: (String, Boolean) -> Unit) : AutoCloseable {
-    private var engine: TextToSpeech? = null
-    private var closed = false
+/** Empty means follow the system default; otherwise this is an installed engine package name. */
+internal const val TTS_ENGINE_KEY = "engine"
 
-    @Volatile
-    var ready: Boolean = false
+internal data class TtsEngineChoice(val packageName: String, val label: String)
+
+@Suppress("DEPRECATION")
+internal fun installedTtsEngines(context: Context): List<TtsEngineChoice> {
+    val manager = context.packageManager
+    return manager.queryIntentServices(Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0)
+        .mapNotNull { result ->
+            val service = result.serviceInfo ?: return@mapNotNull null
+            if (!service.exported || !service.enabled || !service.applicationInfo.enabled) return@mapNotNull null
+            TtsEngineChoice(service.packageName, result.loadLabel(manager).toString().ifBlank { service.packageName })
+        }.distinctBy { it.packageName }.sortedBy { it.label }
+}
+
+/** Pure main-thread state: a late callback can only affect the utterance that created it. */
+internal class TtsPlayback {
+    private var sequence = 0L
+    private var activeId: String? = null
+    private var closed = false
+    var ready = false
+        private set
+    var text: String? = null
+        private set
+    var message = "正在初始化系统语音引擎…"
         private set
 
-    init {
-        val created = TextToSpeech(context.applicationContext) { code ->
-            // The constructor can return before the engine binds; finish setup after assignment.
-            Handler(Looper.getMainLooper()).post {
-                val tts = engine ?: return@post
-                if (closed) return@post
-                if (code != TextToSpeech.SUCCESS) {
-                    ready = false
-                    onStatus("系统语音引擎初始化失败", false)
-                    return@post
-                }
-                val result = tts.setLanguage(Locale.CHINA)
-                ready = result != TextToSpeech.LANG_MISSING_DATA &&
-                    result != TextToSpeech.LANG_NOT_SUPPORTED
-                onStatus(
-                    if (ready) "语音引擎就绪：${tts.defaultEngine ?: "系统默认"}"
-                    else "系统缺少中文语音包，请在系统设置中安装",
-                    ready,
-                )
-            }
-        }
-        engine = created
+    fun initialized(isReady: Boolean, status: String): Boolean {
+        if (closed) return false
+        ready = isReady
+        message = status
+        return true
     }
 
-    /** Queues a new utterance, replacing the previous one. Returns false when the engine is not ready. */
+    fun enqueue(value: String): String? {
+        if (closed || !ready || value.isBlank()) return null
+        val id = "plugin-tts-${++sequence}"
+        activeId = id
+        text = value
+        message = "等待语音引擎朗读…"
+        return id
+    }
+
+    fun started(id: String): Boolean {
+        if (closed || id != activeId) return false
+        message = "正在朗读…"
+        return true
+    }
+
+    fun finished(id: String, status: String): Boolean {
+        if (closed || id != activeId) return false
+        activeId = null
+        text = null
+        message = status
+        return true
+    }
+
+    fun stop(): Boolean {
+        if (closed) return false
+        activeId = null
+        text = null
+        message = "已停止朗读"
+        return true
+    }
+
+    fun close() {
+        closed = true
+        ready = false
+        activeId = null
+        text = null
+    }
+}
+
+/**
+ * Own one binding per selected engine. All client callbacks are delivered on the main looper;
+ * engine callbacks are always posted, including synchronous constructor/speak failures.
+ */
+internal class TtsEngine(
+    context: Context,
+    requestedEngine: String = "",
+    private val onPlayback: (String?) -> Unit = {},
+    private val onStatus: (String, Boolean) -> Unit,
+) : AutoCloseable {
+    private val main = Handler(Looper.getMainLooper())
+    private val playback = TtsPlayback()
+    private var engine: TextToSpeech? = null
+    @Volatile private var closed = false
+
+    val ready: Boolean get() = !closed && playback.ready
+
+    init {
+        check(Looper.myLooper() == main.looper) { "TTS 必须在主线程创建" }
+        try {
+            require(requestedEngine.isEmpty() || installedTtsEngines(context).any { it.packageName == requestedEngine }) {
+                "所选语音引擎未安装或已停用，请重新选择"
+            }
+            engine = TextToSpeech(context.applicationContext, { code ->
+                // Post even if a vendor calls onInit inline, before the constructor returns.
+                main.post {
+                    if (!closed) initialize(code)
+                }
+            }, requestedEngine.takeIf { it.isNotEmpty() })
+        } catch (error: Exception) {
+            main.post {
+                if (!closed && playback.initialized(false, "语音引擎初始化失败：${error.message ?: "无法连接服务"}")) publish()
+            }
+        }
+    }
+
+    private fun initialize(code: Int) {
+        val tts = engine ?: return
+        try {
+            check(code == TextToSpeech.SUCCESS) { "无法连接系统语音服务" }
+            check(tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String) = event { playback.started(utteranceId) }
+                override fun onDone(utteranceId: String) = event { playback.finished(utteranceId, "朗读完成") }
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String) = event {
+                    playback.finished(utteranceId, "朗读失败，请检查语音引擎与语音包")
+                }
+                override fun onError(utteranceId: String, errorCode: Int) = event {
+                    playback.finished(utteranceId, "朗读失败（错误 $errorCode），请检查语音引擎与语音包")
+                }
+                override fun onStop(utteranceId: String, interrupted: Boolean) = event {
+                    playback.finished(utteranceId, "已停止朗读")
+                }
+            }) == TextToSpeech.SUCCESS) { "语音服务无法报告朗读状态" }
+            val language = tts.setLanguage(Locale.CHINA)
+            check(language >= TextToSpeech.LANG_AVAILABLE) {
+                if (language == TextToSpeech.LANG_MISSING_DATA) "系统缺少中文语音包，请在系统设置中安装"
+                else "语音服务不支持中文，请选择其他引擎或安装中文语音包"
+            }
+            // defaultEngine is a setting, not the bound engine. The public Android API may
+            // silently fall back; report readiness without claiming the requested engine bound.
+            playback.initialized(true, "中文语音服务就绪")
+        } catch (error: Exception) {
+            playback.initialized(false, "语音引擎未就绪：${error.message ?: "初始化失败"}")
+        }
+        publish()
+    }
+
+    private fun event(update: () -> Boolean) {
+        main.post { if (!closed && update()) publish() }
+    }
+
+    private fun publish() {
+        if (closed) return
+        onStatus(playback.message, playback.ready)
+        onPlayback(playback.text)
+    }
+
+    /** Called by the UI. Replacing speech invalidates the old ID before QUEUE_FLUSH fires onStop. */
     fun speak(text: String): Boolean {
+        check(Looper.myLooper() == main.looper) { "朗读必须在主线程调用" }
+        if (closed) return false
         val tts = engine ?: return false
-        if (!ready || text.isBlank()) return false
-        return tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "plugin-tts") != TextToSpeech.ERROR
+        val id = playback.enqueue(clampTtsText(text, TextToSpeech.getMaxSpeechInputLength())) ?: return false
+        publish()
+        val accepted = try {
+            tts.speak(playback.text!!, TextToSpeech.QUEUE_FLUSH, null, id) == TextToSpeech.SUCCESS
+        } catch (_: Exception) {
+            false
+        }
+        if (!accepted && playback.finished(id, "朗读失败，请检查系统引擎与语音包")) publish()
+        return accepted
     }
 
     fun stop() {
-        engine?.stop()
+        onMain {
+            if (!closed && playback.stop()) {
+                // Clear synchronously: some engines never emit onStop for a queued utterance.
+                publish()
+                runCatching { engine?.stop() }
+            }
+        }
     }
 
     override fun close() {
         if (closed) return
         closed = true
-        ready = false
-        val tts = engine
-        engine = null
-        tts?.stop()
-        tts?.shutdown()
+        onMain {
+            playback.close()
+            val tts = engine
+            engine = null
+            runCatching { tts?.stop() }
+            runCatching { tts?.shutdown() }
+        }
+    }
+
+    private fun onMain(action: () -> Unit) {
+        if (Looper.myLooper() == main.looper) action() else main.post { action() }
     }
 }
 
