@@ -109,8 +109,10 @@ internal class SystemMonitorEngine(
         if (frameTimes.isEmpty() || frame.timestampNanos > frameTimes.last()) {
             frameTimes.addLast(frame.timestampNanos)
         }
+        // The window ends at the last captured timestamp, not at the post-inference clock reading:
+        // frame timestamps are taken before pose analysis, so mixing them with `now` would bias FPS low.
         val fps = cameraFrameRate(
-            frameTimes, now, settings.fpsWindowSeconds.toLong() * 1_000_000_000L,
+            frameTimes, frameTimes.last(), settings.fpsWindowSeconds.toLong() * 1_000_000_000L,
         )
         val intervalNanos = settings.refreshMs.toLong() * 1_000_000L
         if (!needsSample && now - lastSampleNanos < intervalNanos) return null

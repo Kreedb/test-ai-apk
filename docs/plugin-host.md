@@ -21,7 +21,7 @@
 - 图像借用为只读。保留 `PluginImage` / `CameraFrame` 引用即可跨回调保活；宿主不会 recycle 已发布图片。禁止修改其 `bitmap`。需要绘制/写入时 `copyBitmap()`，自己拥有并在不再使用时释放该副本。发布图片后也不可 recycle/原地复用，交由 GC 在 Compose 和所有消费者释放引用后回收。不得保留无界帧历史。
 - `Press` 不等长按阈值，包含 pointer ID、预览坐标、单调时间和独立 `PressToken`。释放、出真实照片/视口边界、第二根手指、系统取消、视口改变、切页、后台、停止都会撤回替换。多指后要全松开再按；TalkBack 提供“开始按压预览”与“结束按压，恢复实时画面”动作。停用/改配置的插件失去当前按压资格，重新启用不能接管旧按压。
 - 仅启用且声明相应输入能力的消费者接收帧、姿态、按压、生命周期、权限或 PCM。`Started/ConfigurationChanged/Stopped` 是每个消费者必须处理的控制事件。
-- 音频采集由 #66 实现：宿主已有 `hasSubscribers(AUDIO_PCM/AUDIO_PERMISSION)`、`snapshot.session`、`permissionChanged(sessionId, permission)`、`audio(sessionId, PcmBlock)`。采集/权限请求保留启动时的 session，迟到回调不能借新会话投递。`PcmBlock` 用独立拥有的只读 ByteBuffer，每个读取者有独立 position/limit，声明采样率、1/2 声道、`PCM_16_LE` / `PCM_FLOAT_LE`、时间；一次最多 1 MB。授予权限且会话前台才转发 PCM；停止后重置权限，下一前台必须重查。权限变化使音频消费者 token 更新并清除旧文字，消费者从 `AudioPermissionChanged` 获取新 context，撤权后旧识别结果不可发布。系统 ASR 自占麦克风与共享 PCM 互斥时用 `MICROPHONE_BUSY` 报告，麦克风控制器必须订阅配置/生命周期，在停用/撤权/离开时真正停止采集。这里只有事件协议，没有申请录音权限或启动麦克风。
+- 音频采集由 `AudioCaptureHost` 实现：它持有唯一的 `AudioRecord`（16 kHz 单声道 PCM-16-LE，40 ms 分块），`CameraScreen` 只在启用音频插件时请求 `RECORD_AUDIO`。宿主提供 `hasSubscribers(AUDIO_PCM/AUDIO_PERMISSION)`、`requiresAudioPermission()`、`snapshot.session`、`permissionChanged(sessionId, permission)`、`audio(sessionId, PcmBlock)`。采集/权限请求保留启动时的 session，迟到回调不能借新会话投递。`PcmBlock` 用独立拥有的只读 ByteBuffer，每个读取者有独立 position/limit，声明采样率、1/2 声道、`PCM_16_LE` / `PCM_FLOAT_LE`、时间；一次最多 1 MB。仅在授予权限、会话前台且有音频订阅者时启动采集并转发 PCM；停止/后台/撤权/停用最后一个音频插件都会停止采集，下一前台必须重查权限。权限变化使音频消费者 token 更新并清除旧文字，消费者从 `AudioPermissionChanged` 获取新 context，撤权后旧识别结果不可发布。系统 ASR 自占麦克风与共享 PCM 互斥时用 `MICROPHONE_BUSY` 报告，麦克风控制器必须订阅配置/生命周期，在停用/撤权/离开时真正停止采集。
 
 ## 输出和坐标
 
@@ -66,7 +66,7 @@ JVM 覆盖 settings restore/observable/save、关闭/代次/会话失效、有�
 - [ ] 更新同 ID 工作台 `.properties` 并保存，配置自动重载；快速启停/切配置，旧结果不恢复。
 - [ ] 真机 0/90/180/270 旋转、不同视口比例核对上述坐标；增强替换多帧延迟后松手、滑出、多指、系统取消、切页、后台、停用均恢复最新原图。
 - [ ] 监控内存、CPU/GPU 线程：展示中的 Bitmap 没有提前 recycle，离开后模型/Interpreter/GPU 同线程排空释放；release/R8 APK 能安装并完成相同流程。
-- [ ] #66 接入后：录音拒绝/撤权/隐私静音、系统 ASR 麦克风互斥、前后台与停用释放；未经录音权限时视频仍可用。
+- [ ] #68 音频：录音拒绝/撤权/隐私静音、系统 ASR 麦克风互斥、前后台与停用释放；未经录音权限时视频仍可用。
 - [ ] #68 场景插件：四个卡片分别启用后下载/加载对应示例模型，关键点、检测框、分割掩码与相机预览对齐；阈值修改只影响相机叠加；停用/切页/后台停止推理且不留下旧图层。
 - [ ] #68 声音识别：授予麦克风后约 1 秒窗口持续更新声音/环境声前几类；拒绝/撤权/系统 ASR 占用时停用音频插件但相机继续；启停/切页不残留旧结果，工作台 WAV 路径仍可运行。
 - [ ] #68 语音朗读：系统 TTS 引擎就绪/缺失中文语音包提示正确；只在按下朗读时发声，重复点按不叠加；关闭弹层、切后台、停用插件立即停止，不与声音识别形成回环。

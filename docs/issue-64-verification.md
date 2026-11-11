@@ -18,4 +18,4 @@
 
 `adb devices -l` 未列出设备；没有真机、模拟器或截图证据。统一卡片点击/TalkBack、相机切页与前后台、零模型及加载失败持续预览、Bitmap/GPU/Interpreter 生命周期、不同视口对齐与实际替换按压取消均待测，步骤见 [插件宿主接入](plugin-host.md#验证与设备清单)。
 
-音频为可投递的事件/权限协议，实际麦克风采集和系统 ASR 互斥由 #66 接入；超分替换的 host 仲裁与手势桥已实现，但实际超分消费者/演示由下游接入。JVM 测试使用假图像尺寸验证来源匹配，不替代原生 Bitmap 或设备推理验证。
+音频已由 `AudioCaptureHost` 实现真实 `AudioRecord` 采集（16 kHz 单声道 PCM-16-LE），`SuperResolutionPlugin` 也已接入 ESRGAN 按压替换；两者仍缺真机证据：麦克风采集、拒绝/撤权/后台释放、系统 ASR 占用麦克风时的 `MICROPHONE_BUSY` 互斥，以及超分模型推理与整帧合成效果均待设备验证。JVM 测试使用假图像尺寸验证来源匹配，不替代原生 Bitmap 或设备推理验证。

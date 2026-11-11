@@ -105,6 +105,24 @@ class SystemMonitorPluginTest {
     }
 
     @Test
+    fun fpsUsesRecordedFrameTimestampsNotPostInferenceClock() {
+        var now = 0L
+        val engine = SystemMonitorEngine(FakeUsage()) { now }
+        engine.start(SystemMonitorSettings(refreshMs = 250, fpsWindowSeconds = 2))
+
+        // Capture is 500 ms apart, but the clock is read 200 ms after each capture (inference time).
+        now = 200_000_000
+        engine.onFrame(frame(number = 1, timestamp = 0))
+        now = 700_000_000
+        engine.onFrame(frame(number = 2, timestamp = 500_000_000))
+        now = 1_200_000_000
+        val third = engine.onFrame(frame(number = 3, timestamp = 1_000_000_000))
+
+        // 2 intervals over the 1 s span between captured timestamps; the clock would report 1.7.
+        assertEquals("帧率 2.0 FPS", checkNotNull(third).metricLines.first())
+    }
+
+    @Test
     fun reconfigureAppliesRefreshAndVisibilityLiveAndDisabledShowsNothing() {
         var now = 0L
         val usage = FakeUsage()
