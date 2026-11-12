@@ -151,7 +151,7 @@ class TfliteGraphTest {
     @Test
     fun rejectsBrokenOperatorTensorSignatureAndBufferReferencesBeforeAnyStorageWrite() {
         // Offsets come from the schema-generated fixture below, not production-parser internals.
-        val corruptions = listOf(560 to 99, 188 to 10000, 188 to 1, 400 to 99, 120 to 1, 204 to 0)
+        val corruptions = listOf(560 to 99, 188 to 10000, 188 to 1, 400 to 99, 120 to 3, 204 to 0)
         corruptions.forEach { (offset, value) ->
             val bytes = perAxisFixture().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putInt(offset, value) }
             val directory = folder.newFolder()
@@ -161,6 +161,41 @@ class TfliteGraphTest {
             assertTrue(directory.listFiles()!!.isEmpty())
         }
         assertThrows(IllegalArgumentException::class.java) { TfliteGraph(perAxisFixture().copyOf(190)) }
+    }
+
+    @Test
+    fun importsSignatureOnlyOutputsWithoutSelectingTheSignature() {
+        // Keep ADD/SUB and all four tensors, but expose only sum in the main subgraph's outputs.
+        val bytes = arithmeticFixture().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putInt(864, 1) }
+        val directory = folder.newFolder()
+        val model = ConfiguredModelStore.install(directory, "signature-only output", bytes)
+        val description = ConfiguredModelStore.describe(ConfiguredModelStore.list(directory).single())
+        val main = description.signatures.first()
+        assertEquals("", main.key)
+        assertEquals(listOf("sum"), main.outputs.map { it.name })
+        val configured = ModelConfig.decode(model.configFile.readText(), description)
+        assertEquals("", configured.signature)
+        assertEquals(1, configured.outputs.size)
+        val signature = description.signatures.single { it.key == "calculate" }
+        assertEquals(listOf("delta", "total"), signature.outputs.map { it.name })
+        assertEquals(GraphTensor("delta", listOf(1), listOf(-1), 0), signature.outputs.first())
+        assertArrayEquals(bytes, model.file.readBytes())
+    }
+
+    @Test
+    fun rejectsOutOfBoundsSignatureTensorIndicesBeforeAnyStorageWrite() {
+        // Explicit input/output TensorMap.tensor_index fields in both subgraphs; each has 4 tensors.
+        for (offset in listOf(424, 356, 260, 208)) {
+            for (value in listOf(-1, 4)) {
+                val bytes = arithmeticFixture().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putInt(offset, value) }
+                val directory = folder.newFolder()
+                val error = assertThrows("offset=$offset value=$value", IllegalArgumentException::class.java) {
+                    ConfiguredModelStore.install(directory, "broken signature", bytes)
+                }
+                assertEquals("TFLite 签名张量索引越界", error.message)
+                assertTrue(directory.listFiles()!!.isEmpty())
+            }
+        }
     }
 
     @Test
@@ -196,6 +231,11 @@ class TfliteGraphTest {
         assertArrayEquals(bytes, model.file.readBytes())
         assertTrue(model.configFile.isFile)
     }
+
+    // Same schema-generated ADD/SUB fixture as ConfiguredModelLifecycleTest, including a second subgraph.
+    private fun arithmeticFixture() = Base64.getDecoder().decode(
+        "HAAAAFRGTDMUABgAFAAMABAAAAAIAAAAAAAEABQAAABIAAAAEAAAABgAAACMAQAAAwAAAAEAAAAEAAAAQPz//wIAAAAgAAAAEAAAAAwADAAHAAAAAAAIAAwAAAAAAAApKQAAAGj8//8CAAAAsAAAABQAAAAAAA4AFAAQAAwACAAAAAQADgAAAAEAAAAMAAAAGAAAAFAAAAALAAAAb3RoZXJfZ3JhcGgAAgAAACAAAAAEAAAAGP///wIAAAAEAAAABQAAAHRvdGFsAAAAMP///wMAAAAEAAAABQAAAGRlbHRhAAAAAgAAABgAAAAEAAAAav///wQAAAABAAAAYQAAAGT///8BAAAABAAAAAEAAABiAAoAEAAMAAgABAAKAAAADAAAABgAAABQAAAACQAAAGNhbGN1bGF0ZQAAAAIAAAAgAAAABAAAAKz///8CAAAABAAAAAUAAAB0b3RhbAAAAMT///8DAAAABAAAAAUAAABkZWx0YQAAAAIAAAAoAAAADAAAAAAABgAIAAQABgAAAAQAAAABAAAAYQAAAAgADAAIAAQACAAAAAEAAAAEAAAAAQAAAGIAAAACAAAAgAEAAAQAAACW/v//PAAAACAAAAAoAAAAmAAAAAQAAAAJAAAAc2Vjb25kYXJ5AAAAAgAAAAMAAAACAAAAAgAAAAAAAAABAAAAAgAAADgAAAAEAAAAiv7//ygAAAAAAAAcDAAAABAAAAABAAAAAQAAAAMAAAACAAAAAAAAAAEAAABA/v//ev7//yQAAAAAAAALCAAAAAwAAAABAAAAAgAAAAIAAAAAAAAAAQAAAGz+//8EAAAAlAAAAGQAAAA4AAAABAAAAOT9//8MAAAAEAAAABQAAAABAAAA/////wEAAAABAAAACgAAAGRpZmZlcmVuY2UAABT+//8MAAAAEAAAABQAAAABAAAA/////wEAAAABAAAAAwAAAHN1bQA8/v//DAAAABAAAAAUAAAAAQAAAP////8BAAAAAQAAAAUAAAByaWdodAAAAGj+//8MAAAAEAAAABQAAAABAAAA/////wEAAAABAAAABAAAAGxlZnQAAA4AGAAQAAwACAAEABQADgAAADgAAAAcAAAAJAAAALgAAAAEAAAABAAAAG1haW4AAAAAAgAAAAIAAAADAAAAAgAAAAAAAAABAAAAAgAAAFgAAAAUAAAAAAAOABgAFAAQAAwACwAEAA4AAAAoAAAAAAAAHAwAAAAQAAAAAQAAAAEAAAADAAAAAgAAAAAAAAABAAAAxP///wAADgAUAAAAEAAMAAsABAAOAAAAKAAAAAAAAAsIAAAADAAAAAEAAAACAAAAAgAAAAAAAAABAAAABAAEAAQAAAAEAAAAqAAAAGQAAAA4AAAABAAAAHz///8MAAAAEAAAABQAAAABAAAA/////wEAAAABAAAACgAAAGRpZmZlcmVuY2UAAKz///8MAAAAEAAAABQAAAABAAAA/////wEAAAABAAAAAwAAAHN1bQDU////DAAAABAAAAAUAAAAAQAAAP////8BAAAAAQAAAAUAAAByaWdodAAAABQAEAAIAAAAAAAMAAAAAAAAAAQAFAAAAAwAAAAQAAAAFAAAAAEAAAD/////AQAAAAEAAAAEAAAAbGVmdAAAAAA=",
+    )
 
     private fun perAxisFixture() = Base64.getDecoder().decode(
         "HAAAAFRGTDMUABgAFAAMABAAAAAIAAAAAAAEABQAAAAUAAAAfAAAAKQAAADcAAAAAwAAAAEAAAAQAAAAAAAKABAADAAIAAQACgAAAAwAAAAUAAAANAAAAAUAAABpbmZlcgAAAAEAAAAMAAAACAAMAAgABAAIAAAAAgAAAAQAAAABAAAAeQAAAAEAAAAEAAAA4v///wQAAAABAAAAeAAAAAIAAAAkAAAADAAAAAAABgAIAAQABgAAAAQAAAACAAAADCIAAAQABAAEAAAAAQAAABAAAAAMABQACwAQAAQADAAMAAAAAwAAAAAAACAgAAAABAAAAA4AAABGdXR1cmVDdXN0b21PcAAAAQAAABQAAAAAAA4AGAAUABAADAAIAAQADgAAABQAAAAsAAAAGAAAABwAAABoAAAABAAAAG1haW4AAAAAAQAAAAIAAAABAAAAAAAAAAEAAAAUAAAAEAAQAAAADAAIAAAAAAAEABAAAAAMAAAAEAAAABQAAAAEAAAABQYHCAEAAAACAAAAAwAAAAAAAAABAAAA/////wMAAADgAAAAiAAAAAQAAABA////FAAAAAAAAAk8AAAARAAAAEwAAAAq////AQAAAAgAAAAYAAAAAgAAAP3/////////BwAAAAAAAAACAAAAAACAPgAAAD8CAAAAAQAAAP////8CAAAAAQAAAAIAAAAGAAAAcmVzdWx0AAAUABgAEAALAAQAFAAAAAAAAAAMABQAAAABAAAAAAAACQwAAAAUAAAAHAAAAAIAAAABAAAAAgAAAAIAAAABAAAAAgAAAAgAAABjb25zdGFudAAAAAAUABoAEAALAAAAFAAEAAAAAAAMABQAAAAoAAAAAAAACVQAAABcAAAAZAAAAAAAEgAQAAAAAAAMAAgAAAAAAAQAEgAAAAEAAAAIAAAAHAAAAAIAAAD9/////////wcAAAAAAAAAAAAAAAIAAAAAAIA+AAAAPwIAAAABAAAA/////wIAAAABAAAAAgAAAAgAAABwZXJfYXhpcwAAAAA=",

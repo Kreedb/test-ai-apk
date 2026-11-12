@@ -181,12 +181,12 @@ internal class TfliteGraph(val bytes: ByteArray) {
             require(key.isNotBlank() && keys.add(key)) { "TFLite 签名名称为空或重复" }
             val graphIndex = field(signature, 4)?.let(::i32) ?: 0
             require(graphIndex in graphs.indices) { "TFLite 签名子图索引越界" }
+            val tensors = tableVector(graphs[graphIndex], 0)
             for (index in 0..1) {
                 val names = mutableSetOf<String>()
-                val refs = intVector(graphs[graphIndex], index + 1)?.toSet().orEmpty()
                 tableVector(signature, index).forEach { mapping ->
                     require(names.add(string(mapping, 0)) && string(mapping, 0).isNotBlank()) { "TFLite 签名张量名称为空或重复" }
-                    require((field(mapping, 1)?.let(::i32) ?: 0) in refs) { "TFLite 签名引用不属于子图输入/输出" }
+                    require((field(mapping, 1)?.let(::i32) ?: 0) in tensors.indices) { "TFLite 签名张量索引越界" }
                 }
             }
         }

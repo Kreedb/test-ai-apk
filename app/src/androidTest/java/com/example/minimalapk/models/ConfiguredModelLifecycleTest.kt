@@ -22,10 +22,10 @@ import java.util.concurrent.TimeUnit
 class ConfiguredModelLifecycleTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
 
-    private fun withModel(action: (ConfiguredModel, File) -> Unit) {
+    private fun withModel(bytes: ByteArray = Base64.decode(MODEL, Base64.DEFAULT), action: (ConfiguredModel, File) -> Unit) {
         val directory = File(context.cacheDir, "configured-lifecycle-${System.nanoTime()}").apply { mkdirs() }
         try {
-            action(ConfiguredModelStore.install(directory, "dynamic arithmetic", Base64.decode(MODEL, Base64.DEFAULT)), directory)
+            action(ConfiguredModelStore.install(directory, "dynamic arithmetic", bytes), directory)
         } finally { directory.deleteRecursively() }
     }
 
@@ -53,6 +53,24 @@ class ConfiguredModelLifecycleTest {
             assertEquals("signature=${graph.key}", expected, output.text)
         }
         assertArrayEquals(original, model.file.readBytes()) // Generic import must not staticize.
+    }
+
+    @Test
+    fun unselectedSignatureOnlyOutputKeepsDefaultAndOtherSignatureExecutionWorking() {
+        val bytes = Base64.decode(MODEL, Base64.DEFAULT).also {
+            ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putInt(864, 1) // Main outputs: [2], not [2, 3].
+        }
+        withModel(bytes) { model, _ ->
+            val description = ConfiguredModelStore.describe(model)
+            val main = description.signatures.first()
+            assertEquals("", ModelConfig.decode(model.configFile.readText(), description).signature)
+            assertEquals("输出 0 · sum [3]\n1.75, 1.5, -2.0",
+                ConfiguredModelRunner.run(context, model, config(main), emptyMap()).text)
+            val signature = description.signatures.single { it.key == "other_graph" }
+            assertEquals("输出 0 · delta [3]\n0.75, 3.5, -6.0\n\n输出 1 · total [3]\n1.75, 1.5, -2.0",
+                ConfiguredModelRunner.run(context, model, config(signature), emptyMap()).text)
+            assertArrayEquals(bytes, model.file.readBytes())
+        }
     }
 
     @Test
