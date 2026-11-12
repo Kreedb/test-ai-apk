@@ -9,6 +9,10 @@ import com.example.minimalapk.pose.NpuProbeResult
 import com.example.minimalapk.pose.NpuProbeScheme
 import com.example.minimalapk.pose.NpuProbeState
 import com.example.minimalapk.pose.NpuSource
+import com.example.minimalapk.pose.NpuProbeReader
+import com.example.minimalapk.pose.ProbeFileSystem
+import com.example.minimalapk.pose.ProbeRead
+import com.example.minimalapk.pose.UsageMetrics
 import com.example.minimalapk.pose.PhotoBounds
 import com.example.minimalapk.pose.PoseDetection
 import com.example.minimalapk.pose.PoseKeypoint
@@ -30,8 +34,10 @@ class SystemMonitorPluginTest {
     private class FakeUsage : DeviceUsageSource {
         var samples = 0
         var resets = 0
-        override fun sample(source: NpuSource, nowNanos: Long): DeviceUsage {
+        val requests = mutableListOf<UsageMetrics>()
+        override fun sample(source: NpuSource, nowNanos: Long, metrics: UsageMetrics, stillNeeded: () -> Boolean): DeviceUsage {
             samples++
+            requests += metrics
             return DeviceUsage(
                 cpuPercent = 12f,
                 gpuPercent = 34f,
@@ -258,6 +264,7 @@ class SystemMonitorPluginTest {
         val hidden = engine.onFrame(frame(number = 4, timestamp = 300_000_000))
         assertNotNull(hidden)
         assertTrue(checkNotNull(hidden).metricLines.isEmpty())
+        assertEquals("All hidden means no consumer for device reads", 2, usage.samples)
     }
 
     @Test
@@ -294,32 +301,97 @@ class SystemMonitorPluginTest {
     }
 
     @Test
-    fun testAllDiagnosisListsEverySchemeAndFitsHostLimits() {
-        val results = listOf(
-            probe(NpuProbeScheme.VENDOR_PERCENT, NpuProbeState.OK, 12f),
-            probe(NpuProbeScheme.DEVFREQ, NpuProbeState.MISSING),
-            probe(NpuProbeScheme.ROCKCHIP, NpuProbeState.OK, 7.5f, perCore = listOf(12f, 3f)),
-            probe(NpuProbeScheme.SAMSUNG_RQ_LOAD, NpuProbeState.OK, 25f, scope = "NPU 请求队列忙碌率"),
-            probe(NpuProbeScheme.QUALCOMM_DIAGNOSTIC, NpuProbeState.OK, null, unit = "ticks",
-                scope = "DSP 睡眠统计（非利用率）"),
-            probe(NpuProbeScheme.QUALCOMM_DIAGNOSTIC, NpuProbeState.PERMISSION_DENIED, null,
-                path = "/sys/kernel/debug/qcom_stats/cdsp1", unit = "ticks"),
-            probe(NpuProbeScheme.COUNTER_DELTA, NpuProbeState.UNSUPPORTED, null,
-                detail = "无可证明更新且导出的 busy/total 计数"),
+    fun sourceChangesAndHiddenConsumersCancelQueuedProbesAcrossLeaveAndResume() {
+        val tasks = ArrayDeque<Runnable>()
+        val actual = FakeUsage()
+        var now = 0L
+        val worker = MonitorUsageSampler(actual, { now }, java.util.concurrent.Executor { tasks += it })
+        val plugin = SystemMonitorPlugin(worker, { now }) {
+            MonitorDeviceInfo("Phone", "SoC", "Android", "test")
+        }
+        val config = SystemMonitorSettings(npuSource = NpuSource.ALL)
+        PluginHost(listOf(plugin)).use { host ->
+            host.configure(mapOf(PluginIds.SYSTEM_MONITOR to PluginSettings(true, config.toConfig())))
+            host.lifecycle(CameraLifecycle.ENTER)
+            host.lifecycle(CameraLifecycle.FOREGROUND)
+            host.acceptFrame(frame(session = host.sessionId()!!))
+            host.lifecycle(CameraLifecycle.LEAVE)
+            tasks.removeFirst().run()
+            assertEquals(0, actual.samples)
+            assertTrue(host.snapshot.value.monitors.isEmpty())
+            host.lifecycle(CameraLifecycle.ENTER)
+            host.lifecycle(CameraLifecycle.FOREGROUND)
+            now = 1_000_000_000
+            host.acceptFrame(frame(session = host.sessionId()!!, timestamp = now))
+            val hidden = config.copy(showCpu = false, showGpu = false, showNpu = false)
+            host.configure(mapOf(PluginIds.SYSTEM_MONITOR to PluginSettings(true, hidden.toConfig())))
+            tasks.removeFirst().run()
+            assertEquals(0, actual.samples)
+            now += 1_000_000_000
+            host.acceptFrame(frame(session = host.sessionId()!!, number = 2, timestamp = now))
+            assertTrue(host.snapshot.value.monitors.single().output.messages.any { it.text.startsWith("帧率 1.0 FPS") })
+            assertEquals(0, actual.samples)
+            host.configure(mapOf(PluginIds.SYSTEM_MONITOR to PluginSettings(true,
+                config.copy(npuSource = NpuSource.ROCKCHIP).toConfig())))
+            now += 1_000_000_000
+            host.acceptFrame(frame(session = host.sessionId()!!, number = 3, timestamp = now))
+            tasks.removeFirst().run()
+            assertEquals(1, actual.samples)
+        }
+        while (tasks.isNotEmpty()) tasks.removeFirst().run()
+    }
+
+    @Test
+    fun allSourcesCopyActionRetainsExactOriginalsBeyondOverlayLimitsAndBothRockchipPaths() {
+        val longRaw = "  driver header\r\n" + "long raw line that is not a utilization\n".repeat(60) + "END-OF-SOURCE\n"
+        val originals = mapOf(
+            "/sys/class/misc/npu/device/load" to longRaw,
+            "/sys/devices/platform/npu/load" to "different unknown value\n",
+            "/sys/kernel/debug/rknpu/load" to "NPU load: Core0: 12%, Core1:  %,\n",
+            "/proc/rknpu/load" to "NPU load: Core0: 34%, Core1:  %,\n",
+            "/sys/kernel/debug/qcom_stats/cdsp" to "Count: 123\nLast Entered At: 55\nLast Exited At: 66\nAccumulated Duration: 98765\n",
         )
-        val lines = monitorDiagnosis(
-            MonitorDeviceInfo("Test Phone", "Test SoC", "Android 15 (API 35)", "1.0"),
-            results, 123,
-        )
-        assertEquals(7, lines.size)
-        assertTrue(lines.first().contains("Test Phone"))
-        assertTrue(lines.first().contains("Test SoC"))
-        assertTrue(lines.any { it.startsWith("vendor_percent:") })
-        assertTrue(lines.any { it.startsWith("rockchip:") })
-        assertTrue(lines.any { it.startsWith("samsung_rq_load:") })
-        assertTrue(lines.any { it.startsWith("qualcomm_diag:") })
-        assertTrue(lines.any { it.startsWith("counter_delta:") })
-        assertTrue(lines.all { it.length <= PluginHost.MAX_MESSAGE_CHARS })
+        val reader = NpuProbeReader(object : ProbeFileSystem {
+            override fun read(path: String): ProbeRead = originals[path]?.let(ProbeRead::Content)
+                ?: if (path.endsWith("/cdsp1")) ProbeRead.PermissionDenied else ProbeRead.Missing
+            override fun listDirectories(parent: String): List<String> = emptyList()
+        }, { 123L })
+        val usage = object : DeviceUsageSource {
+            override fun sample(source: NpuSource, nowNanos: Long, metrics: UsageMetrics, stillNeeded: () -> Boolean) = DeviceUsage(
+                npuResults = reader.probe(source, nowNanos), sampledAtNanos = nowNanos,
+            )
+            override fun reset() = Unit
+        }
+        var copied: String? = null
+        val plugin = SystemMonitorPlugin(usage, { 123L }, copyDiagnosis = { copied = it }) {
+            MonitorDeviceInfo("Test Phone", "Test SoC", "Android 15 (API 35)", "1.0")
+        }
+        PluginHost(listOf(plugin)).use { host ->
+            host.configure(mapOf(PluginIds.SYSTEM_MONITOR to PluginSettings(true,
+                SystemMonitorSettings(npuSource = NpuSource.ALL).toConfig())))
+            host.lifecycle(CameraLifecycle.ENTER)
+            host.lifecycle(CameraLifecycle.FOREGROUND)
+            host.acceptFrame(frame(session = host.sessionId()!!))
+            assertNull(copied) // Sampling is not consent to copy/upload.
+            val monitor = host.snapshot.value.monitors.single().output
+            assertTrue(monitor.messages.any { it.text.startsWith("CPU(应用/总算力)") })
+            assertTrue(monitor.messages.all { it.text.length <= PluginHost.MAX_MESSAGE_CHARS })
+            assertTrue(host.action(PluginIds.SYSTEM_MONITOR, SystemMonitorPlugin.COPY_DIAGNOSIS))
+            val report = checkNotNull(copied)
+            assertTrue(report.length > PluginHost.MAX_MESSAGES * PluginHost.MAX_MESSAGE_CHARS)
+            for ((path, raw) in originals) {
+                assertTrue(report.contains(path))
+                assertTrue("Exact original missing for $path", report.contains(raw))
+            }
+            NpuProbeScheme.entries.forEach { assertTrue(report.contains("=== ${it.id} /")) }
+            assertTrue(report.contains("permission_denied"))
+            assertTrue(report.contains("Test Phone") && report.contains("Test SoC") && report.contains("API 35"))
+            assertTrue(host.snapshot.value.reports.all { contribution ->
+                contribution.output.messages.none { it.kind == MessageKind.TEXT }
+            })
+            host.lifecycle(CameraLifecycle.BACKGROUND)
+            assertFalse(host.action(PluginIds.SYSTEM_MONITOR, SystemMonitorPlugin.COPY_DIAGNOSIS))
+        }
     }
 
     @Test

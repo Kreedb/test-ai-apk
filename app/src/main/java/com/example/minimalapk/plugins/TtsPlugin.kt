@@ -13,6 +13,12 @@ internal const val TTS_ENGINE_KEY = "engine"
 
 internal data class TtsEngineChoice(val packageName: String, val label: String)
 
+internal interface TtsSession : AutoCloseable {
+    val ready: Boolean
+    fun speak(text: String): Boolean
+    fun stop()
+}
+
 @Suppress("DEPRECATION")
 internal fun installedTtsEngines(context: Context): List<TtsEngineChoice> {
     val manager = context.packageManager
@@ -91,7 +97,7 @@ internal class TtsEngine(
     requestedEngine: String = "",
     private val onPlayback: (String?) -> Unit = {},
     private val onStatus: (String, Boolean) -> Unit,
-) : AutoCloseable {
+) : TtsSession {
     private val main = Handler(Looper.getMainLooper())
     private val playback = TtsPlayback()
     private var engine: TextToSpeech? = null
@@ -99,7 +105,7 @@ internal class TtsEngine(
     private var focusGeneration = 0L
     @Volatile private var closed = false
 
-    val ready: Boolean get() = !closed && playback.ready
+    override val ready: Boolean get() = !closed && playback.ready
 
     init {
         check(Looper.myLooper() == main.looper) { "TTS 必须在主线程创建" }
@@ -164,7 +170,7 @@ internal class TtsEngine(
     }
 
     /** Called by the UI. Replacing speech invalidates the old ID before QUEUE_FLUSH fires onStop. */
-    fun speak(text: String): Boolean {
+    override fun speak(text: String): Boolean {
         check(Looper.myLooper() == main.looper) { "朗读必须在主线程调用" }
         if (closed) return false
         val tts = engine ?: return false
@@ -196,7 +202,7 @@ internal class TtsEngine(
         return accepted
     }
 
-    fun stop() {
+    override fun stop() {
         onMain {
             if (!closed && playback.stop()) {
                 focusGeneration++
@@ -228,29 +234,83 @@ internal class TtsEngine(
 }
 
 /**
- * TTS is a system capability, not a LiteRT model. The dialog is the only control surface and
- * speaks only when the user presses 朗读; this plugin only reports state while the camera is open.
+ * TTS is a system capability, not a LiteRT model. Camera actions only speak saved user text on an
+ * explicit click; frame events never speak. The same engine/focus owner serves the configuration UI.
  */
-internal class TtsPlugin : CameraPlugin {
-    override val descriptor = PluginDescriptor(PluginIds.TTS, "语音朗读", setOf(PluginCapability.TEXT))
+internal class TtsPlugin(
+    private val application: Context,
+    private val onMain: (() -> Unit) -> Unit = { action ->
+        if (Looper.myLooper() == Looper.getMainLooper()) action() else Handler(Looper.getMainLooper()).post { action() }
+    },
+    private val createEngine: (Context, String, (String?) -> Unit, (String, Boolean) -> Unit) -> TtsSession =
+        { context, name, playback, status -> TtsEngine(context, name, playback, status) },
+) : CameraPlugin {
+    override val descriptor = PluginDescriptor(PluginIds.TTS, "语音朗读",
+        setOf(PluginCapability.TEXT, PluginCapability.ACTIONS), actions = setOf("speak", "stop", "retry"))
+    private var current: PluginContext? = null
+    private var engine: TtsSession? = null
+    private var binding = 0L
+    private var ready = false
+    private var utterance: String? = null
+    private var status = "正在初始化系统语音引擎…"
 
     override fun onEvent(event: PluginEvent, context: PluginContext) {
-        when (event) {
-            PluginEvent.Started, PluginEvent.ConfigurationChanged -> {
-                if (!context.isCurrent()) return
-                val text = clampTtsText(
-                    context.settings.config[TTS_TEXT_KEY].orEmpty(),
-                    TextToSpeech.getMaxSpeechInputLength(),
-                )
-                val status = if (text.isBlank()) {
-                    "语音朗读已启用：未设置文本；请在 插件 → 语音朗读 中朗读"
-                } else {
-                    "语音朗读已启用：系统 TTS，不自动朗读；请在 插件 → 语音朗读 中操作（当前 ${text.length} 字）"
+        onMain {
+            when (event) {
+                PluginEvent.Started, PluginEvent.ConfigurationChanged -> bind(context)
+                is PluginEvent.Stopped -> if (current?.token == context.token) release()
+                is PluginEvent.Action -> if (current?.token == context.token && context.isCurrent()) when (event.id) {
+                    "speak" -> engine?.speak(context.settings.config[TTS_TEXT_KEY].orEmpty())
+                    "stop" -> engine?.stop()
+                    "retry" -> bind(context)
                 }
-                context.publish(PluginOutput(System.nanoTime(), listOf(PluginMessage(status, MessageKind.STATUS))))
+                else -> Unit
             }
-            is PluginEvent.Stopped -> Unit
-            else -> Unit
         }
     }
+
+    private fun bind(context: PluginContext) {
+        if (!context.isCurrent()) return
+        release()
+        current = context
+        val revision = binding
+        status = "正在初始化系统语音引擎…"
+        publish(context)
+        engine = createEngine(application, context.settings.config[TTS_ENGINE_KEY].orEmpty(), { text ->
+            if (binding == revision && context.isCurrent()) {
+                utterance = text
+                publish(context)
+            }
+        }, { message, available ->
+            if (binding == revision && context.isCurrent()) {
+                status = message
+                ready = available
+                publish(context)
+            }
+        })
+    }
+
+    private fun publish(context: PluginContext) {
+        val text = context.settings.config[TTS_TEXT_KEY].orEmpty()
+        context.publish(PluginOutput(System.nanoTime(), buildList {
+            add(PluginMessage("系统 TTS · $status", MessageKind.STATUS))
+            utterance?.let { add(PluginMessage("当前朗读：${it.take(220)}")) }
+            if (text.isBlank()) add(PluginMessage("请在 插件 → 语音朗读 中输入文本并选择引擎", MessageKind.STATUS))
+        }, actions = listOf(
+            PluginAction("speak", "朗读已保存文本", ready && text.isNotBlank()),
+            PluginAction("stop", "停止朗读", utterance != null),
+            PluginAction("retry", "重新连接引擎", !ready),
+        )))
+    }
+
+    private fun release() {
+        binding++
+        current = null
+        engine?.close()
+        engine = null
+        ready = false
+        utterance = null
+    }
+
+    override fun close() { onMain { release() } }
 }

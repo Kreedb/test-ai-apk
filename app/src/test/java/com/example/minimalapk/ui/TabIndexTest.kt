@@ -1,6 +1,8 @@
 package com.example.minimalapk.ui
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class TabIndexTest {
@@ -45,5 +47,24 @@ class TabIndexTest {
         assertEquals(0, tabForRestoredState("v2:9"))
         assertEquals(0, tabForRestoredState("v2:x"))
         assertEquals(0, tabForRestoredState("v2:"))
+    }
+
+    @Test
+    fun pageStateKeysIsolateLegacyPagesAndRetainEachCurrentDestinationOnReturn() {
+        // SaveableStateHolder stores page registries under Any keys. Both ambiguous legacy
+        // numeric entries must remain unreachable even when the selected index is migrated.
+        val restoredPages = mutableMapOf<Any, String>(2 to "old example form", 3 to "old plugin dialog")
+        val plugins = tabPageStateKey(tabForRestoredState(3))
+        val settings = tabPageStateKey(tabForRestoredState(4))
+        assertEquals("page:v2:plugins", plugins)
+        assertEquals("page:v2:settings", settings)
+        assertNull(restoredPages[plugins])
+        assertNull(restoredPages[settings])
+        restoredPages[plugins] = "current plugin dialog"
+        restoredPages[settings] = "current settings form"
+        assertEquals("current plugin dialog", restoredPages[tabPageStateKey(tabForRestoredState("v2:2"))])
+        assertEquals("current settings form", restoredPages[tabPageStateKey(tabForRestoredState("v2:3"))])
+        assertEquals(4, (0..3).map(::tabPageStateKey).distinct().size)
+        assertNotEquals(tabPageStateKey(0), tabPageStateKey(1))
     }
 }

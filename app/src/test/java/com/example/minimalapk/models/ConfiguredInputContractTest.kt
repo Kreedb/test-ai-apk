@@ -51,7 +51,7 @@ class ConfiguredInputContractTest {
             val contract = configuredInputContract(ModelConfig.infer(graph).copy(inputs = listOf(input)), graph)
             assertEquals(ConfiguredInputMode.ON_DEMAND, contract.mode)
             assertNull(contract.pcm)
-            assertTrue(contract.description.contains("麦克风未就绪"))
+            assertTrue(contract.description.contains("未就绪"))
             assertTrue(contract.description.contains("NUMBERS/BINARY") || contract.description.contains("量化"))
             assertNotNull(configuredWaveformProblem(input, graph.inputs.single()))
         }
@@ -101,5 +101,24 @@ class ConfiguredInputContractTest {
             assertEquals(ConfiguredInputMode.ON_DEMAND, contract.mode)
             assertNull(contract.pcm)
         }
+    }
+
+    @Test
+    fun unsupportedDtypesAndImpossibleRenderContractsAreNotAdvertisedAsReady() {
+        val float16 = graph(listOf(1, 8, 8, 3), type = 1)
+        val unsupported = configuredInputContract(ModelConfig.infer(float16), float16)
+        assertEquals(ConfiguredInputMode.ON_DEMAND, unsupported.mode)
+        assertTrue(unsupported.description.contains("未就绪"))
+        assertTrue(unsupported.description.contains("FLOAT16"))
+        val string = graph().copy(outputs = listOf(GraphTensor("words", listOf(1, 2), listOf(1, 2), 5)))
+        assertEquals(OutputRender.VALUES, ModelConfig.infer(string).outputs.single().render)
+        val classifiedString = ModelConfig.infer(string).copy(outputs = listOf(TensorOutputConfig(OutputRender.CLASSIFICATION)))
+        assertTrue(configuredExecutionProblem(classifiedString, string)!!.contains("STRING"))
+        assertNull(configuredExecutionProblem(classifiedString.copy(outputs = listOf(TensorOutputConfig())), string))
+        val boxes = graph().let { it.copy(outputs = List(4) { i -> it.outputs.single().copy(name = "out$i") }) }
+        val wrongSource = ModelConfig.infer(boxes).let {
+            it.copy(outputs = listOf(TensorOutputConfig(OutputRender.BOXES)) + it.outputs.drop(1))
+        }
+        assertTrue(configuredExecutionProblem(wrongSource, boxes)!!.contains("IMAGE"))
     }
 }

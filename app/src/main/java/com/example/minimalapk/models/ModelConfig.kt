@@ -87,6 +87,7 @@ internal data class ModelConfig(
             },
             outputs = graph.outputs.map { tensor ->
                 TensorOutputConfig(render = when {
+                    tensor.type == 5 -> OutputRender.VALUES
                     tensor.shape == listOf(1, 1, 17, 3) -> OutputRender.MOVENET
                     tensor.shape.size == 2 && tensor.shape[0] == 1 -> OutputRender.CLASSIFICATION
                     else -> OutputRender.VALUES

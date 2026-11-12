@@ -64,7 +64,8 @@ class SelfCheckTensorsTest {
 
     @Test
     fun syntheticImageRespectsNchwAndQuantizationWhileAudioHasFiniteNonzeroSignal() {
-        val imageTensor = tensor(type = 9, shape = listOf(1, 3, 2, 2)).copy(scale = 1f / 128, zeroPoint = -1)
+        val imageTensor = tensor(type = 9, shape = listOf(1, 3, 2, 2)).copy(scale = 1f / 128, zeroPoint = -1,
+            scales = listOf(1f / 128), zeroPoints = listOf(-1L))
         val image = syntheticInput(imageTensor, TensorInputConfig(imageTensor.shape, InputSource.IMAGE,
             ImageLayout.NCHW, mean = 127.5f, std = 127.5f))
         assertEquals(12, (image.value as ByteBuffer).remaining())

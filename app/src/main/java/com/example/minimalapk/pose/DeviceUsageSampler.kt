@@ -1,7 +1,6 @@
 package com.example.minimalapk.pose
 
 import android.os.Process
-import java.io.File
 import java.util.Locale
 
 internal data class DeviceUsage(
@@ -10,20 +9,38 @@ internal data class DeviceUsage(
     val npuPercent: Float? = null,
     val gpuSource: String? = null,
     val npuResults: List<NpuProbeResult> = emptyList(),
+    val sampledAtNanos: Long? = null,
+    val gpuState: NpuProbeState? = null,
+    val gpuDetail: String? = null,
+    val gpuEvidence: List<ProbeEvidence> = emptyList(),
+    val samplingFailure: String? = null,
 ) {
     /** First real value wins; a stale value is kept only when no fresh scheme succeeded. */
     val npu: NpuProbeResult?
-        get() = npuResults.firstOrNull { it.state == NpuProbeState.OK }
+        get() = npuResults.firstOrNull { it.state == NpuProbeState.OK && it.value != null && it.unit == "%" }
+            ?: npuResults.firstOrNull { it.state == NpuProbeState.STALE && it.value != null && it.unit == "%" }
+            ?: npuResults.firstOrNull { it.state == NpuProbeState.OK }
             ?: npuResults.firstOrNull { it.state == NpuProbeState.STALE }
             ?: npuResults.firstOrNull { it.state == NpuProbeState.PERMISSION_DENIED }
             ?: npuResults.firstOrNull { it.state == NpuProbeState.PARSE_ERROR }
+            ?: npuResults.firstOrNull { it.state == NpuProbeState.TIMEOUT }
+            ?: npuResults.firstOrNull { it.state == NpuProbeState.TRUNCATED }
             ?: npuResults.firstOrNull { it.state == NpuProbeState.UNSUPPORTED }
             ?: npuResults.firstOrNull()
 }
 
+internal data class UsageMetrics(val cpu: Boolean = true, val gpu: Boolean = true, val npu: Boolean = true) {
+    val any: Boolean get() = cpu || gpu || npu
+}
+
 /** Sampling seam so the monitor plugin can be tested without touching Android sysfs. */
 internal interface DeviceUsageSource {
-    fun sample(source: NpuSource, nowNanos: Long): DeviceUsage
+    fun sample(
+        source: NpuSource,
+        nowNanos: Long,
+        metrics: UsageMetrics = UsageMetrics(),
+        stillNeeded: () -> Boolean = { true },
+    ): DeviceUsage
     fun reset()
 }
 
@@ -37,6 +54,8 @@ internal interface DeviceUsageSource {
  */
 internal class DeviceUsageSampler internal constructor(
     private val files: ProbeFileSystem = RealProbeFileSystem,
+    private val cpuMillis: () -> Long = Process::getElapsedCpuTime,
+    private val cores: () -> Int = { Runtime.getRuntime().availableProcessors() },
 ) : DeviceUsageSource {
     private val npuReader = NpuProbeReader(files)
     private val lastGood = mutableMapOf<String, NpuProbeResult>()
@@ -44,21 +63,28 @@ internal class DeviceUsageSampler internal constructor(
     private var lastCpuMillis = 0L
     private var lastWallMillis = 0L
 
-    fun sample(): DeviceUsage = sample(NpuSource.AUTO, System.nanoTime())
-
-    override fun sample(source: NpuSource, nowNanos: Long): DeviceUsage {
-        val gpu = readGpu()
-        val npuResults = npuReader.probe(source, nowNanos).map { staleOr(it, nowNanos) }
+    override fun sample(source: NpuSource, nowNanos: Long, metrics: UsageMetrics, stillNeeded: () -> Boolean): DeviceUsage {
+        if (!stillNeeded()) return DeviceUsage()
+        val cpu = if (metrics.cpu) readCpuPercent(nowNanos) else { hasCpuBaseline = false; null }
+        val gpuFiles = ProbeRunFileSystem(files, stillNeeded = stillNeeded)
+        val gpu = if (metrics.gpu) readGpu(gpuFiles) else null
+        val npuResults = if (metrics.npu) npuReader.probe(source, nowNanos, stillNeeded).map { staleOr(it, nowNanos) }
+            else { lastGood.clear(); emptyList() }
         // Auto may retain a stale earlier source before finding a fresh known source. Match the
         // diagnostic selection's fresh-first order, and never expose raw values as percentages.
-        val primary = npuResults.firstOrNull { it.state == NpuProbeState.OK }
-            ?: npuResults.firstOrNull { it.state == NpuProbeState.STALE }
+        val percentages = npuResults.filter { it.value != null && it.unit == "%" }
+        val primary = percentages.firstOrNull { it.state == NpuProbeState.OK }
+            ?: percentages.firstOrNull { it.state == NpuProbeState.STALE }
         return DeviceUsage(
-            cpuPercent = readCpuPercent(),
+            cpuPercent = cpu,
             gpuPercent = gpu?.value,
             npuPercent = primary?.takeIf { it.unit == "%" }?.value,
             gpuSource = gpu?.sourcePath,
             npuResults = npuResults,
+            sampledAtNanos = nowNanos,
+            gpuState = gpu?.state,
+            gpuDetail = gpu?.detail,
+            gpuEvidence = gpuFiles.evidence.toList(),
         )
     }
 
@@ -73,6 +99,9 @@ internal class DeviceUsageSampler internal constructor(
             lastGood[key] = result
             return result
         }
+        // A driver-reported stale value already has its own current diagnostic (e.g. a disabled
+        // Samsung scheduler); do not replace it with a previous success and hide that reason.
+        if (result.state == NpuProbeState.STALE) return result
         val cached = lastGood[key] ?: return result
         val age = nowNanos - cached.timestampNanos
         if (age in 0..STALE_NANOS) {
@@ -80,16 +109,17 @@ internal class DeviceUsageSampler internal constructor(
                 state = NpuProbeState.STALE,
                 sourcePath = result.sourcePath ?: cached.sourcePath,
                 rawExcerpt = result.rawExcerpt ?: cached.rawExcerpt,
-                detail = "当前读取失败（${result.state.label}），显示 ${age / 1_000_000L} ms 前上次成功值",
+                detail = "当前读取失败（${result.state.label}${result.detail?.let { ": $it" }.orEmpty()}），显示 ${age / 1_000_000L} ms 前上次成功值",
+                evidence = result.evidence,
             )
         }
         lastGood.remove(key)
         return result
     }
 
-    private fun readCpuPercent(): Float? {
-        val cpuMillis = Process.getElapsedCpuTime()
-        val wallMillis = System.nanoTime() / 1_000_000L
+    private fun readCpuPercent(nowNanos: Long): Float? {
+        val cpuMillis = cpuMillis()
+        val wallMillis = nowNanos / 1_000_000L
         if (!hasCpuBaseline) {
             hasCpuBaseline = true
             lastCpuMillis = cpuMillis
@@ -100,53 +130,52 @@ internal class DeviceUsageSampler internal constructor(
         val wallDelta = wallMillis - lastWallMillis
         lastCpuMillis = cpuMillis
         lastWallMillis = wallMillis
-        return cpuPercent(cpuDelta, wallDelta)
+        return cpuPercent(cpuDelta, wallDelta, cores())
     }
 
-    private fun readGpu(): UtilizationReading? =
-        readNodes(GPU_NODES)
-            ?: readDirectoryLoad(DEV_FREQ, GPU_KEYWORDS, PERCENT_LOAD_FILES)
-            ?: readDirectoryLoad(GPU_CLASS, emptyList(), PERCENT_LOAD_FILES)
-
-    private fun readNodes(nodes: List<UtilizationNode>): UtilizationReading? {
-        for (node in nodes) {
-            val reading = readNode(node)
-            if (reading != null) return reading
+    private fun readGpu(files: ProbeRunFileSystem): UtilizationReading? {
+        val known = GPU_NODES.map { readNode(files, it) }
+        known.firstOrNull { it.value != null }?.let { return it }
+        // A generic "load"/"busy" name cannot establish percentage units for an unknown GPU
+        // driver any more than for an NPU. Retain the source as raw instead of guessing.
+        val rawPaths = GPU_RAW_NODES + listOf(DEV_FREQ, GPU_CLASS).flatMap { root ->
+            files.listDirectories(root).filter { path ->
+                root == GPU_CLASS || GPU_KEYWORDS.any(path.substringAfterLast('/').lowercase(Locale.US)::contains)
+            }.flatMap { path -> RAW_LOAD_FILES.map { "$path/$it" } }
         }
-        return null
+        val unknown = rawPaths.map { readNode(files, UtilizationNode(it, null)) }
+        return unknown.firstOrNull { it.state == NpuProbeState.UNSUPPORTED }
+            ?: (known + unknown).firstOrNull { it.state != NpuProbeState.MISSING }
+            ?: known.firstOrNull()
     }
 
-    private fun readNode(node: UtilizationNode): UtilizationReading? =
-        runCatching { File(node.path).takeIf(File::canRead)?.readText() }
-            .getOrNull()
-            ?.let(node.parse)
-            ?.let { UtilizationReading(it, node.path) }
-
-    private fun readDirectoryLoad(
-        directoryPath: String,
-        keywords: List<String>,
-        fileNames: List<String>,
-    ): UtilizationReading? {
-        val directories = runCatching { File(directoryPath).listFiles() }.getOrNull() ?: return null
-        for (directory in directories.take(64)) {
-            if (keywords.isNotEmpty()) {
-                val name = directory.name.lowercase(Locale.US)
-                if (keywords.none(name::contains)) continue
+    private fun readNode(files: ProbeRunFileSystem, node: UtilizationNode): UtilizationReading {
+        val read = files.read(node.path)
+        val value = (read as? ProbeRead.Content)?.text?.let { node.parse?.invoke(it) }
+        val state = when (read) {
+            is ProbeRead.Content -> when {
+                value != null -> NpuProbeState.OK
+                read.text.isBlank() || node.parse != null -> NpuProbeState.PARSE_ERROR
+                else -> NpuProbeState.UNSUPPORTED
             }
-            for (fileName in fileNames) {
-                val path = File(directory, fileName).path
-                val percent = readNode(UtilizationNode(path, ::parsePercent))
-                if (percent != null) return percent
-            }
+            ProbeRead.Missing -> NpuProbeState.MISSING
+            ProbeRead.PermissionDenied -> NpuProbeState.PERMISSION_DENIED
+            is ProbeRead.Failure -> read.state
         }
-        return null
+        return UtilizationReading(value, node.path, state, when (read) {
+            is ProbeRead.Failure -> read.message
+            is ProbeRead.Content -> if (node.parse == null) "raw（单位/作用域未确认）" else "KGSL 驱动采样窗忙碌时间占比（%）"
+            else -> null
+        })
     }
 
-    private data class UtilizationReading(val value: Float, val sourcePath: String)
+    private data class UtilizationReading(
+        val value: Float?, val sourcePath: String, val state: NpuProbeState, val detail: String?,
+    )
 
     private data class UtilizationNode(
         val path: String,
-        val parse: (String) -> Float?,
+        val parse: ((String) -> Float?)?,
     )
 
     private companion object {
@@ -154,15 +183,20 @@ internal class DeviceUsageSampler internal constructor(
         const val GPU_CLASS = "/sys/class/gpu"
         const val STALE_NANOS = 5_000_000_000L
 
-        val PERCENT_LOAD_FILES = listOf("gpu_busy_percentage", "load", "busy", "utilization")
+        val RAW_LOAD_FILES = listOf("gpu_busy_percentage", "load", "busy", "utilization")
         val GPU_KEYWORDS = listOf("gpu", "kgsl", "mali", "adreno")
 
         val GPU_NODES = listOf(
+            // LineageOS/android_kernel_qcom_sm8250@e3f6acd662618dabb3a7a953e48743019badc373
+            // drivers/gpu/msm/kgsl_pwrctrl.c: gpubusy_show/gpu_busy_percentage_show expose the
+            // SAME completed driver interval (busy_old/total_old), not cumulative counters.
             UtilizationNode("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage", ::parsePercent),
             UtilizationNode("/sys/class/kgsl/kgsl-3d0/gpubusy", ::parseBusyTotal),
-            UtilizationNode("/sys/class/kgsl/kgsl-3d0/devfreq/gpu_load", ::parsePercent),
-            UtilizationNode("/sys/kernel/gpu/gpu_busy", ::parsePercent),
-            UtilizationNode("/sys/class/misc/mali0/device/utilisation", ::parsePercent),
+        )
+        val GPU_RAW_NODES = listOf(
+            "/sys/class/kgsl/kgsl-3d0/devfreq/gpu_load",
+            "/sys/kernel/gpu/gpu_busy",
+            "/sys/class/misc/mali0/device/utilisation",
         )
     }
 }
@@ -173,21 +207,21 @@ internal fun cpuPercent(
     cores: Int = Runtime.getRuntime().availableProcessors(),
 ): Float? {
     if (cpuDeltaMillis < 0L || wallDeltaMillis <= 0L || cores <= 0) return null
-    return (cpuDeltaMillis.toFloat() / (wallDeltaMillis * cores) * 100f).coerceIn(0f, 100f)
+    return (cpuDeltaMillis.toDouble() / (wallDeltaMillis.toDouble() * cores) * 100.0).coerceIn(0.0, 100.0).toFloat()
 }
 
-private val NUMBER_REGEX = Regex("""-?\d+(?:\.\d+)?""")
+private val PERCENT_REGEX = Regex("""(\d+(?:\.\d+)?)\s*%?""")
 
 internal fun parsePercent(raw: String): Float? {
-    val value = NUMBER_REGEX.find(raw)?.value?.toFloatOrNull() ?: return null
+    val value = PERCENT_REGEX.matchEntire(raw.trim())?.groupValues?.get(1)?.toFloatOrNull() ?: return null
     return value.takeIf { it in 0f..100f }
 }
 
 internal fun parseBusyTotal(raw: String): Float? {
     val parts = raw.trim().split(Regex("\\s+"))
-    if (parts.size < 2) return null
-    val busy = parts[0].toFloatOrNull() ?: return null
-    val total = parts[1].toFloatOrNull() ?: return null
-    if (busy < 0f || total <= 0f) return null
-    return (busy / total * 100f).coerceIn(0f, 100f)
+    if (parts.size != 2) return null
+    val busy = parts[0].toDoubleOrNull() ?: return null
+    val total = parts[1].toDoubleOrNull() ?: return null
+    if (!busy.isFinite() || !total.isFinite() || busy < 0 || total <= 0 || busy > total) return null
+    return (busy / total * 100).toFloat()
 }

@@ -1,6 +1,7 @@
 package com.example.minimalapk.models
 
 import android.content.Context
+import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.pose.GraphDescription
 import com.example.minimalapk.pose.ModelDownload
 import com.example.minimalapk.pose.TfliteGraph
@@ -30,7 +31,7 @@ internal object ConfiguredModelStore {
 
     @Synchronized
     fun list(directory: File): List<ConfiguredModel> = directory.listFiles().orEmpty()
-        .filter { it.extension == "tflite" && it.nameWithoutExtension.matches(Regex("[a-f0-9]{64}")) }
+        .filter { it.isFile && it.extension == "tflite" && it.nameWithoutExtension.matches(Regex("[a-f0-9]{64}")) }
         .map { file ->
             val model = ConfiguredModel(file.nameWithoutExtension, file.nameWithoutExtension.take(8), file)
             model.copy(
@@ -50,17 +51,41 @@ internal object ConfiguredModelStore {
         // Inspect without creating an Interpreter: a valid model can be kept even if ops are missing.
         val description = TfliteGraph(bytes).describe()
         val id = bytes.sha256()
-        val model = ConfiguredModel(id, name?.replace(Regex("\\s+"), " ")?.take(80)?.ifBlank { null } ?: "模型 ${id.take(8)}", File(directory, "$id.tflite"))
-        if (!model.configFile.exists()) {
-            model.configFile.writeAtomically(initialConfig(description).encode().toByteArray())
+        val candidate = ConfiguredModel(id, name?.replace(Regex("\\s+"), " ")?.take(80)?.ifBlank { null } ?: "模型 ${id.take(8)}", File(directory, "$id.tflite"))
+        ConfiguredModelAccess.checkAvailable(candidate)
+        val model = candidate.copy(name = if (candidate.nameFile.isFile) candidate.nameFile.readText().take(80) else candidate.name)
+        val targets = listOf(model.configFile, model.nameFile, model.file)
+        check(targets.all { !it.exists() || it.isFile }) { "模型存储位置不是文件，原有内容已保留" }
+        val created = mutableListOf<File>()
+        try {
+            fun create(file: File, bytes: () -> ByteArray) {
+                if (!file.exists()) {
+                    file.writeAtomically(bytes())
+                    created += file
+                }
+            }
+            create(model.configFile) { initialConfig(description).encode().toByteArray() }
+            create(model.nameFile) { model.name.toByteArray() }
+            // The weight file is the list's visibility marker. Failed new installs leave no
+            // orphan properties/name, and re-imports never rewrite any existing sidecar.
+            create(model.file) { bytes }
+        } catch (error: Throwable) {
+            created.asReversed().forEach { it.delete() }
+            throw error
         }
-        model.nameFile.writeAtomically(model.name.toByteArray())
-        if (!model.file.exists()) model.file.writeAtomically(bytes)
-        mutableRevision.update { it + 1 }
+        if (created.isNotEmpty()) mutableRevision.update { it + 1 }
         return model.copy(enabled = model.enabledFile.isFile && model.enabledFile.readText().trim() == "true")
     }
 
     fun describe(model: ConfiguredModel): GraphDescription = TfliteGraph(model.file.readBytes()).describe()
+
+    /** Cheap structural/protocol status only; native operator readiness is proved by a real run. */
+    fun readiness(model: ConfiguredModel): String = try {
+        val description = describe(model)
+        val config = ModelConfig.decode(model.configFile.readText(), description)
+        configuredInputContract(config, description.signatures.single { it.key == config.signature }).description +
+            "；原生算子兼容性以实际运行结果为准"
+    } catch (error: Exception) { "未就绪：${error.message ?: "模型或配置无法读取"}；点击卡片修正或重新导入" }
 
     @Synchronized
     fun version(model: ConfiguredModel): ConfiguredModelVersion? {
@@ -80,6 +105,7 @@ internal object ConfiguredModelStore {
     /** A separate atomic sidecar keeps camera selection out of the user's version-1 properties. */
     @Synchronized
     fun setEnabled(model: ConfiguredModel, enabled: Boolean) {
+        ConfiguredModelAccess.checkAvailable(model)
         check(model.file.isFile) { "模型已删除，请重新导入" }
         if (enabled) {
             // Non-image models are enabled consumers too: explicit PCM runs live, others on demand.
@@ -88,6 +114,7 @@ internal object ConfiguredModelStore {
         }
         if (model.enabledFile.isFile && model.enabledFile.readText().trim() == enabled.toString()) return
         model.enabledFile.writeAtomically(enabled.toString().toByteArray())
+        ConfiguredModelAccess.cancel(model)
         invalidate(model)
     }
 
@@ -108,18 +135,50 @@ internal object ConfiguredModelStore {
 
     @Synchronized
     fun saveConfig(model: ConfiguredModel, text: String, description: GraphDescription) {
+        ConfiguredModelAccess.checkAvailable(model)
         ModelConfig.decode(text, description)
         check(model.file.isFile) { "模型已删除，请重新导入" }
         model.configFile.writeAtomically(text.toByteArray())
+        ConfiguredModelAccess.cancel(model)
         invalidate(model)
     }
 
-    @Synchronized
-    fun delete(model: ConfiguredModel) {
-        check(!model.file.exists() || model.file.delete()) { "无法删除模型" }
-        model.configFile.delete()
-        model.nameFile.delete()
-        model.enabledFile.delete()
-        invalidate(model)
+    fun delete(model: ConfiguredModel, transfer: AssetTransfer = AssetTransfer()) {
+        transfer.checkpoint()
+        try {
+            ConfiguredModelAccess.delete(model) { drain ->
+                // Withdraw results before draining native readers, never unlink under a live runner.
+                synchronized(this) { invalidate(model) }
+                // Cancel while draining without holding the store monitor; observers need it to
+                // stop/reconcile, and a pending manual task may still be reading its version.
+                drain()
+                synchronized(this) {
+                    transfer.checkpoint()
+                    val files = listOf(model.file, model.configFile, model.nameFile, model.enabledFile).filter { it.exists() }
+                    check(files.all { it.isFile }) { "模型或配置路径不是文件，删除失败，原有内容已保留" }
+                    if (files.isNotEmpty()) {
+                        val staging = File.createTempFile(".delete-${model.id.take(8)}-", ".tmp", model.file.parentFile)
+                        check(staging.delete() && staging.mkdir()) { "无法准备删除，原文件已保留" }
+                        val moved = mutableListOf<Pair<File, File>>()
+                        try {
+                            files.forEach { file ->
+                                val target = File(staging, file.name)
+                                check(file.renameTo(target)) { "无法删除 ${file.name}，原文件已保留" }
+                                moved += file to target
+                            }
+                        } catch (error: Throwable) {
+                            moved.asReversed().forEach { (original, staged) ->
+                                if (!staged.renameTo(original)) error.addSuppressed(IllegalStateException("恢复失败：${staged.absolutePath}"))
+                            }
+                            staging.delete()
+                            throw error
+                        }
+                        // All entries are now removed together. Cleanup is after the accepted
+                        // rename transaction, so cancellation cannot expose a half-deleted model.
+                        if (!staging.deleteRecursively()) AppLog.w("Models", "模型已移除，但临时删除目录清理失败：${staging.name}")
+                    }
+                }
+            }
+        } finally { mutableRevision.update { it + 1 } }
     }
 }

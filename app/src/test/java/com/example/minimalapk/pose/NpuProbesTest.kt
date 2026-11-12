@@ -103,6 +103,14 @@ class NpuProbesTest {
         assertNull(parseRockchipLoad("NPU load: Core0: -4%"))
         assertNull(parseRockchipLoad("NPU load: Core0"))
         assertNull(parseRockchipLoad("Core0: 12%"))
+        assertEquals(12f, checkNotNull(parseRockchipLoad("NPU load: 12%\n")).average, .01f)
+        assertEquals(0f, checkNotNull(parseRockchipLoad("NPU load:   %\n")).average, .01f)
+        listOf(
+            "NPU load: Core0: 12%, Core1: -4%",
+            "NPU load: Core0: 12%, Core1: invalid%",
+            "NPU load: Core0: 12%, Core0: 60%",
+            "NPU load: Core0: 12%, Core1: 30% trailing garbage",
+        ).forEach { assertNull(it, parseRockchipLoad(it)) }
     }
 
     @Test
@@ -113,6 +121,8 @@ class NpuProbesTest {
         assertNull(parseSamsungRqLoad("10001"))
         assertNull(parseSamsungRqLoad("-1"))
         assertNull(parseSamsungRqLoad("n/a"))
+        assertNull(parseSamsungRqLoad("2500.5"))
+        assertNull(parseSamsungRqLoad("NaN"))
     }
 
     @Test
@@ -188,7 +198,7 @@ class NpuProbesTest {
         val path = "/proc/rknpu/load"
         val result = NpuProbeReader(FakeFiles(mutableMapOf(
             path to "NPU load: Core0: 12%, Core1:  %",
-        ))).probe(NpuSource.ROCKCHIP, 7).single()
+        ))).probe(NpuSource.ROCKCHIP, 7).single { it.state == NpuProbeState.OK }
         assertEquals(NpuProbeState.OK, result.state)
         assertEquals(path, result.sourcePath)
         assertEquals(listOf(12f, 0f), result.perCore)
@@ -238,6 +248,7 @@ class NpuProbesTest {
                 "$device/device/load" to "50",
                 "$device/device/rq_load" to "50",
                 "$device/device/load_policy" to "3",
+                "$device/device/of_node/compatible" to "samsung,exynos-npu\u0000",
             ),
             mutableMapOf("/sys/class/misc" to listOf(device)),
         )
@@ -258,7 +269,7 @@ class NpuProbesTest {
         assertEquals(
             listOf(NpuProbeScheme.ROCKCHIP, NpuProbeScheme.SAMSUNG_RQ_LOAD,
                 NpuProbeScheme.VENDOR_PERCENT, NpuProbeScheme.DEVFREQ),
-            results.map { it.scheme },
+            results.map { it.scheme }.distinct(),
         )
         assertTrue(results.none { it.state == NpuProbeState.OK || it.value != null })
         assertEquals("50", results.single { it.scheme == NpuProbeScheme.VENDOR_PERCENT }.rawExcerpt)
@@ -296,5 +307,70 @@ class NpuProbesTest {
         assertEquals(NpuProbeState.UNSUPPORTED, result.state)
         assertNull(result.value)
         assertTrue(result.detail!!.contains("1/1"))
+    }
+
+    @Test
+    fun samsungPlatformDriverDiscoveryUsesBoundDeviceAndSelectedPolicyMenu() {
+        val root = "/sys/bus/platform/drivers/exynos-npu"
+        val device = "$root/18200000.npu"
+        val policy = " 0 idle\n 1 fps\n*2 rq\n 3 fps-rq hybrid\n"
+        val files = FakeFiles(mutableMapOf(
+            "$device/rq_load" to "2500\n", "$device/load_policy" to policy,
+            "$device/load" to "4000\n", "$device/fps_load" to "12000\n",
+        ), mutableMapOf(root to listOf("$root/module", device)))
+        val result = NpuProbeReader(files, { 0L }).probe(NpuSource.SAMSUNG_RQ_LOAD, 7).single()
+        assertEquals(25f, result.value!!, .01f)
+        assertTrue(result.detail!!.contains("load_policy=2 rq"))
+        assertEquals(policy, result.evidence.single { it.path == "$device/load_policy" }.text)
+        assertTrue(files.reads.none { it.contains("/module/") })
+        assertEquals(SamsungLoadPolicy.FPS_RQ, parseSamsungLoadPolicy(" 0 idle\n 1 fps\n 2 rq\n*3 fps-rq hybrid\n"))
+        assertNull(parseSamsungLoadPolicy("*1 fps\n*2 rq\n"))
+        assertNull(parseSamsungLoadPolicy("*2 unknown\n"))
+    }
+
+    @Test
+    fun unknownRqLoadDoesNotBorrowSamsungUnitsAndNumericDevfreqIdentityIsDiscovered() {
+        val root = "/sys/class/devfreq"
+        val device = "$root/18200000"
+        val files = FakeFiles(mutableMapOf(
+            "$device/device/of_node/compatible" to "other,npu\u0000",
+            "$device/rq_load" to "50", "$device/load" to "64",
+        ), mutableMapOf(root to listOf(device)))
+        val reader = NpuProbeReader(files, { 0L })
+        val unknown = reader.probe(NpuSource.SAMSUNG_RQ_LOAD, 1).single()
+        assertEquals(NpuProbeState.UNSUPPORTED, unknown.state)
+        assertNull(unknown.value)
+        assertEquals("raw", unknown.unit)
+        val devfreq = reader.probe(NpuSource.DEVFREQ, 1).single()
+        assertEquals("$device/load", devfreq.sourcePath)
+        assertEquals("64", devfreq.rawExcerpt)
+    }
+
+    @Test
+    fun disabledSamsungSchedulerIsStaleEvenIfRqLoadRemainsReadable() {
+        val root = "/sys/bus/platform/drivers/exynos-npu"
+        val device = "$root/18200000.npu"
+        val files = FakeFiles(mutableMapOf(
+            "$device/rq_load" to "2500\n", "$device/scheduler_enable" to "0\n",
+        ), mutableMapOf(root to listOf(device)))
+        val result = NpuProbeReader(files, { 0L }).probe(NpuSource.SAMSUNG_RQ_LOAD, 7).single()
+        assertEquals(NpuProbeState.STALE, result.state)
+        assertEquals(25f, result.value!!, .01f)
+        assertTrue(result.detail!!.contains("停止更新"))
+        assertTrue(files.reads.none { it.endsWith("/busy") || it.endsWith("/total") })
+    }
+
+    @Test
+    fun allKeepsEveryAttemptAndCompleteMultilineRawIncludingFailedSecondaryNodes() {
+        val debug = "/sys/kernel/debug/rknpu/load"
+        val proc = "/proc/rknpu/load"
+        val raw = "NPU load: Core0: 12%, Core1:  %,\n"
+        val files = FakeFiles(mutableMapOf(debug to raw, proc to ProbeRead.PermissionDenied))
+        val results = NpuProbeReader(files, { 0L }).probeAll(1)
+        val evidence = results.flatMap { it.evidence }.distinct()
+        assertEquals(raw, evidence.single { it.path == debug }.text)
+        assertEquals(NpuProbeState.PERMISSION_DENIED, evidence.single { it.path == proc }.state)
+        assertTrue(evidence.any { it.path == "/sys/devices/platform/npu/load" && it.state == NpuProbeState.MISSING })
+        assertEquals(NpuProbeScheme.entries.toSet(), results.map { it.scheme }.toSet())
     }
 }

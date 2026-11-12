@@ -36,6 +36,7 @@ internal fun tensorByteWidth(type: Int): Int = when (type) {
 
 /** Values are real numbers; quantization comes from the model, never a guessed dtype. */
 internal fun encodeTensor(values: DoubleArray, tensor: GraphTensor, source: InputSource = InputSource.NUMBERS): ByteBuffer {
+    tensor.quantizationProblem?.let { error(it) }
     val buffer = ByteBuffer.allocateDirect(values.size * tensorByteWidth(tensor.type)).order(ByteOrder.nativeOrder())
     fun integer(value: Double, min: Long, max: Long): Long {
         val quantized = tensor.scale > 0f
@@ -85,9 +86,12 @@ internal fun decodeTensor(buffer: ByteBuffer, type: Int, scale: Float, zeroPoint
 
 /** PCM16 WAV avoids codec/permission dependencies; audio input is resampled and padded locally. */
 internal fun wavSamples(bytes: ByteArray, sampleRate: Int, count: Int): DoubleArray {
+    require(sampleRate in 8000..192000 && count in 1..MAX_TENSOR_ELEMENTS) { "WAV 目标采样率或窗口长度无效" }
     require(bytes.size >= 12 && String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF" &&
         String(bytes, 8, 4, Charsets.US_ASCII) == "WAVE") { "请选择 PCM16 WAV 音频" }
     val data = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val riffEnd = 8L + (data.getInt(4).toLong() and 0xffffffffL)
+    require(riffEnd == bytes.size.toLong()) { "WAV RIFF 长度不符或文件被截断" }
     var rate = 0
     var channels = 0
     var start = -1
@@ -98,6 +102,7 @@ internal fun wavSamples(bytes: ByteArray, sampleRate: Int, count: Int): DoubleAr
         require(size >= 0 && size <= bytes.size - offset - 8) { "WAV 文件被截断" }
         when (String(bytes, offset, 4, Charsets.US_ASCII)) {
             "fmt " -> {
+                require(rate == 0) { "WAV 包含重复 fmt 块" }
                 require(size >= 16 && data.getShort(offset + 8).toInt() == 1 && data.getShort(offset + 22).toInt() == 16) {
                     "需要未压缩的 16-bit PCM WAV"
                 }
@@ -106,11 +111,17 @@ internal fun wavSamples(bytes: ByteArray, sampleRate: Int, count: Int): DoubleAr
                 require(channels in 1..2 && rate in 8000..192000 && data.getShort(offset + 20).toInt() == channels * 2) {
                     "WAV 需要单声道或双声道、8000–192000 Hz"
                 }
+                require(data.getInt(offset + 16) == rate * channels * 2) { "WAV byteRate 与 PCM 格式不符" }
             }
-            "data" -> { start = offset + 8; length = size }
+            "data" -> {
+                require(start < 0) { "WAV 包含多个 data 块，当前仅支持单个 PCM 数据块" }
+                start = offset + 8; length = size
+            }
         }
+        require(size % 2 == 0 || offset + 8L + size < riffEnd) { "WAV 缺少奇数块的填充字节" }
         offset += 8 + size + size % 2
     }
+    require(offset == bytes.size) { "WAV 尾部块被截断" }
     require(rate > 0 && channels > 0 && start >= 0 && length >= channels * 2 && length % (channels * 2) == 0) { "WAV 缺少有效音频数据" }
     val frames = length / (channels * 2)
     fun at(frame: Int): Double = (0 until channels).sumOf { channel ->

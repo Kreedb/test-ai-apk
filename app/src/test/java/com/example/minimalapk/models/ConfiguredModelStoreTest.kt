@@ -35,10 +35,16 @@ class ConfiguredModelStoreTest {
         val description = ConfiguredModelStore.describe(model)
         val config = ModelConfig.infer(description.signatures.last()).encode()
         ConfiguredModelStore.saveConfig(model, config, description)
+        model.nameFile.writeText("人工命名 · 不可覆盖\n")
+        val name = model.nameFile.readBytes()
+        val revision = ConfiguredModelStore.revision.value
         val importedAgain = ConfiguredModelStore.install(directory, "再次导入", bytes)
         assertEquals(model.id, importedAgain.id)
         assertEquals(config, importedAgain.configFile.readText())
         assertArrayEquals(bytes, importedAgain.file.readBytes())
+        assertArrayEquals(name, importedAgain.nameFile.readBytes())
+        assertEquals("人工命名 · 不可覆盖\n", importedAgain.name)
+        assertEquals(revision, ConfiguredModelStore.revision.value)
         assertEquals(1, ConfiguredModelStore.list(directory).size)
         ConfiguredModelStore.delete(importedAgain)
         assertTrue(ConfiguredModelStore.list(directory).isEmpty())
@@ -65,7 +71,7 @@ class ConfiguredModelStoreTest {
         }
         assertEquals(before + 1, ConfiguredModelStore.revision.value)
         ConfiguredModelStore.delete(model)
-        assertEquals(before + 2, ConfiguredModelStore.revision.value)
+        assertEquals(before + 3, ConfiguredModelStore.revision.value)
     }
 
     @Test
@@ -75,6 +81,34 @@ class ConfiguredModelStoreTest {
         assertThrows(IllegalStateException::class.java) { target.writeAtomically(byteArrayOf(1, 2)) }
         assertEquals("keep", File(target, "previous").readText())
         assertEquals(listOf("model"), folder.root.listFiles()!!.map { it.name })
+    }
+
+    @Test
+    fun failedInstallLeavesExistingNamesAndPropertiesAndNoNewSidecars() {
+        val directory = folder.newFolder()
+        val bytes = fixture()
+        val target = File(directory, "${bytes.sha256()}.tflite").apply { mkdir() }
+        File(target, "previous").writeText("keep")
+        val before = ConfiguredModelStore.revision.value
+        assertThrows(IllegalStateException::class.java) { ConfiguredModelStore.install(directory, "new", bytes) }
+        assertEquals(listOf(target.name), directory.listFiles()!!.map { it.name })
+        assertTrue(ConfiguredModelStore.list(directory).isEmpty())
+        assertEquals("keep", File(target, "previous").readText())
+        assertEquals(before, ConfiguredModelStore.revision.value)
+    }
+
+    @Test
+    fun failedDeletionKeepsTheOriginalWeightAndOtherSidecars() {
+        val model = ConfiguredModelStore.install(folder.newFolder(), "keep name", fixture())
+        val bytes = model.file.readBytes()
+        val name = model.nameFile.readText()
+        model.enabledFile.mkdir() // A failed/broken storage target must not cause partial deletion.
+        File(model.enabledFile, "unrelated").writeText("keep")
+        assertThrows(IllegalStateException::class.java) { ConfiguredModelStore.delete(model) }
+        assertArrayEquals(bytes, model.file.readBytes())
+        assertEquals(name, model.nameFile.readText())
+        assertTrue(model.configFile.isFile)
+        assertEquals("keep", File(model.enabledFile, "unrelated").readText())
     }
 
     @Test

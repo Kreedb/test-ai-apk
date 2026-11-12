@@ -10,11 +10,16 @@ import kotlin.math.roundToInt
 internal const val SR_INPUT_SIZE = 50
 internal const val SR_OUTPUT_SIZE = 200
 
+/** Fixed-shape tile seam shared by the camera pipeline and native/instrumented checks. */
+internal interface SuperResolutionTiles : Closeable {
+    fun runTile(pixels: IntArray, width: Int, height: Int, left: Int, top: Int): Bitmap
+}
+
 /**
  * ESRGAN from tensorflow/examples/lite/examples/super_resolution: float32 RGB in 0..255,
  * 50×50 in, 200×200 out. The model is fixed-shape, so the stock Interpreter is enough.
  */
-internal class SuperResolutionRunner(modelFile: File) : Closeable {
+internal class SuperResolutionRunner(modelFile: File) : SuperResolutionTiles {
     private val interpreter = Interpreter(modelFile, Interpreter.Options().setNumThreads(2))
     private val input = Array(1) { Array(SR_INPUT_SIZE) { Array(SR_INPUT_SIZE) { FloatArray(3) } } }
     private val output = Array(1) { Array(SR_OUTPUT_SIZE) { Array(SR_OUTPUT_SIZE) { FloatArray(3) } } }
@@ -44,7 +49,7 @@ internal class SuperResolutionRunner(modelFile: File) : Closeable {
     }
 
     @Synchronized
-    fun runTile(pixels: IntArray, width: Int, height: Int, left: Int, top: Int): Bitmap {
+    override fun runTile(pixels: IntArray, width: Int, height: Int, left: Int, top: Int): Bitmap {
         require(width > 0 && height > 0 && pixels.size == width * height)
         for (y in 0 until SR_INPUT_SIZE) for (x in 0 until SR_INPUT_SIZE) {
             // Repeat edge pixels only beyond the photo; neighboring tiles share real context.

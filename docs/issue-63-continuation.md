@@ -1,5 +1,7 @@
 # #63 接续审计
 
+后续 #66/#67/#68 的修复与新设备证据见 [本轮三项验收](issue-63-three-issues.md)；下文保留 #80 的历史基线与验证记录。
+
 ## 基线与关闭原则
 
 审计基线为 `dc8792db2a386c1168f9e806942002933e1481d6`，已包含合并的 [#78](https://github.com/Kreedb/test-ai-apk/pull/78) 和 [#79](https://github.com/Kreedb/test-ai-apk/pull/79)。旧 issue 的要求按 #63 后续真机反馈校准：删除模型工作台、模型逐项开关、整幅画面超分。

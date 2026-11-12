@@ -72,6 +72,10 @@ internal object ExampleScenes {
     val all = listOf(moveNet, classification, detection, segmentation)
 }
 
+internal const val SCENE_MASK_OPACITY_KEY = "mask_opacity"
+internal fun sceneMaskOpacity(settings: PluginSettings): Float = settings.config[SCENE_MASK_OPACITY_KEY]?.toFloatOrNull()
+    ?.takeIf { it in 0.15f..0.85f } ?: (120f / 255)
+
 /** Fixed, hash-pinned scene contracts, independent of user-edited custom-model configurations. */
 internal fun sceneModelConfig(id: String, graph: GraphSignature): ModelConfig {
     val (inputSize, inputType, outputs) = when (id) {
@@ -181,7 +185,7 @@ internal class ExampleScenePlugin(
                 val threshold = context.settings.config[SCENE_THRESHOLD_KEY]?.toFloatOrNull()
                     ?.takeIf { it in SceneThresholdSettings.MIN_THRESHOLD..SceneThresholdSettings.MAX_THRESHOLD }
                     ?: spec.recommendedThreshold
-                val output = renderScene(spec, scene, tensors, input.fit, frame, threshold)
+                val output = renderScene(spec, scene, tensors, input.fit, frame, threshold, sceneMaskOpacity(context.settings))
                 if (scene.firstFrame) {
                     scene.firstFrame = false
                     AppLog.i("ScenePlugin", "${spec.id} first inference+render=${(System.nanoTime() - started) / 1_000_000}ms " +
@@ -205,6 +209,7 @@ internal class ExampleScenePlugin(
         fit: ImageFit,
         frame: CameraFrame,
         threshold: Float,
+        maskOpacity: Float,
     ): PluginOutput {
         val messages = mutableListOf<PluginMessage>()
         spec.textHint?.let { messages += PluginMessage(it, MessageKind.STATUS) }
@@ -215,6 +220,7 @@ internal class ExampleScenePlugin(
                 val position = armPosition(points, fit.sourceWidth, fit.sourceHeight)
                 val progress = scene.raises.update(position, frame.timestampNanos)
                 messages += PluginMessage("已完成 ${progress.repetitions} 次 · ${progress.message}")
+                messages += PluginMessage(moveNetConfidenceMessage(points), MessageKind.STATUS)
                 overlay = drawScenePose(points, fit, frame.source)
             }
             PluginIds.OBJECT_DETECTION_SCENE -> {
@@ -237,7 +243,7 @@ internal class ExampleScenePlugin(
                 if (ranked.size > 5) messages += PluginMessage("其他前景类别：${coverage(ranked.drop(5).sumOf { mask.counts[it] }, mask.photoPixels)}")
                 messages += PluginMessage("背景：${coverage(mask.counts[0], mask.photoPixels)} · 21 类最高响应划分", MessageKind.STATUS)
                 if (ranked.isEmpty()) messages += PluginMessage("当前只分出背景；请对准支持的人、宠物、家具或交通工具", MessageKind.STATUS)
-                overlay = drawSceneMask(mask, scene.labels, fit, frame.source)
+                overlay = drawSceneMask(mask, scene.labels, fit, frame.source, maskOpacity)
             }
             PluginIds.IMAGE_CLASSIFICATION_SCENE -> {
                 val scores = tensors.single().values
@@ -254,16 +260,24 @@ internal class ExampleScenePlugin(
     override fun close() = model.close()
 }
 
-internal data class ScenePoint(val x: Float, val y: Float)
+internal data class ScenePoint(val x: Float, val y: Float, val confidence: Float = 1f)
 
 internal fun moveNetPoints(values: DoubleArray, fit: ImageFit, threshold: Float): List<ScenePoint?> {
     require(values.size == 51 && values.all { it.isFinite() }) { "MoveNet 关键点无效" }
     return List(17) { index ->
         val x = values[index * 3 + 1].toFloat()
         val y = values[index * 3].toFloat()
-        if (values[index * 3 + 2] < threshold || !fit.contains(x, y)) null
-        else ScenePoint(fit.sourceX(x), fit.sourceY(y))
+        val confidence = values[index * 3 + 2].toFloat()
+        require(confidence in 0f..1f) { "MoveNet 关键点得分无效" }
+        if (confidence < threshold || !fit.contains(x, y)) null
+        else ScenePoint(fit.sourceX(x), fit.sourceY(y), confidence)
     }
+}
+
+internal fun moveNetConfidenceMessage(points: List<ScenePoint?>): String {
+    val required = listOf(5, 6, 9, 10, 11, 12).mapNotNull { points.getOrNull(it) }
+    return "计次关键点 ${required.size}/6 可见" +
+        (required.minOfOrNull { it.confidence }?.let { " · 最低模型得分 ${(it * 100).roundToInt()}%" } ?: "")
 }
 
 internal enum class ArmPosition { LOWERED, RAISED, MOVING }
@@ -483,8 +497,9 @@ private fun drawSceneObjects(objects: List<SceneObject>, source: ImageSource): B
     return bitmap
 }
 
-private fun drawSceneMask(mask: SceneMask, labels: List<String>, fit: ImageFit, source: ImageSource): Bitmap {
-    val pixels = IntArray(mask.classes.size) { if (mask.classes[it] <= 0) 0 else (0x78 shl 24) or sceneColor(mask.classes[it]) }
+private fun drawSceneMask(mask: SceneMask, labels: List<String>, fit: ImageFit, source: ImageSource, opacity: Float): Bitmap {
+    val alpha = (opacity.coerceIn(0.15f, 0.85f) * 255).roundToInt()
+    val pixels = IntArray(mask.classes.size) { if (mask.classes[it] <= 0) 0 else (alpha shl 24) or sceneColor(mask.classes[it]) }
     val small = Bitmap.createBitmap(pixels, mask.width, mask.height, Bitmap.Config.ARGB_8888)
     val bitmap = Bitmap.createBitmap(source.space.width, source.space.height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)

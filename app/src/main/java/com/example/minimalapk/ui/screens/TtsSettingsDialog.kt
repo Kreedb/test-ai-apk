@@ -115,7 +115,7 @@ internal fun TtsSettingsDialog(
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
-                    "使用设备 TextToSpeech；是否离线取决于语音包。只在按下朗读时发声，不需要麦克风权限。",
+                    "使用设备 TextToSpeech；是否离线取决于语音包。只在按下朗读时发声，不需要麦克风权限。保存后也可在相机中点击“朗读已保存文本”或“停止朗读”。",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 SettingRow(
@@ -154,6 +154,7 @@ internal fun TtsSettingsDialog(
                     "切换引擎、离开本页或进入后台会停止朗读。",
                     style = MaterialTheme.typography.bodySmall,
                 )
+                Text("朗读申请临时音频焦点；共享麦克风在播放期间暂停，结束后恢复。", style = MaterialTheme.typography.bodySmall)
             }
         },
         confirmButton = { TextButton(onClick = { save(); dismiss() }) { Text("保存") } },

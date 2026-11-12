@@ -82,6 +82,7 @@ object ModelStore {
         ),
     )
 
+    @Synchronized
     fun load(context: Context): List<ModelSpec> {
         val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY, null)
@@ -107,10 +108,26 @@ object ModelStore {
         return specs + builtIn.filter { bundled -> specs.none { it.id == bundled.id } }
     }
 
+    @Synchronized
     fun save(context: Context, specs: List<ModelSpec>) {
         requireEnabledCapacity(specs)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit { putString(KEY, encode(specs)) }
+    }
+
+    /** Used only by the accepted delete transaction, off the UI thread; failure restores memory
+     * as well as disk so a failed SharedPreferences commit cannot silently unregister a model. */
+    @Synchronized
+    internal fun saveDeletion(context: Context, specs: List<ModelSpec>) {
+        requireEnabledCapacity(specs)
+        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val old = preferences.getString(KEY, null)
+        if (!preferences.edit().putString(KEY, encode(specs)).commit()) {
+            val restore = preferences.edit()
+            if (old == null) restore.remove(KEY) else restore.putString(KEY, old)
+            check(restore.commit()) { "保存删除列表及恢复旧偏好失败，模型文件已保留，请检查存储" }
+            error("无法保存删除列表，原模型与偏好已保留")
+        }
     }
 
     internal fun requireEnabledCapacity(specs: List<ModelSpec>) {

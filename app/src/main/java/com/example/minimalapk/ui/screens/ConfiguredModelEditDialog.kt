@@ -20,6 +20,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -34,20 +35,29 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.minimalapk.log.AppLog
 import com.example.minimalapk.models.ConfiguredModel
+import com.example.minimalapk.models.AssetTransfer
 import com.example.minimalapk.models.ConfiguredModelResults
 import com.example.minimalapk.models.ConfiguredModelRunner
 import com.example.minimalapk.models.ConfiguredModelStore
+import com.example.minimalapk.models.ConfiguredRunTicket
 import com.example.minimalapk.models.InputSource
 import com.example.minimalapk.models.MAX_CONFIG_BYTES
 import com.example.minimalapk.models.ModelConfig
 import com.example.minimalapk.models.ModelRunResult
 import com.example.minimalapk.models.configuredInputContract
+import com.example.minimalapk.models.configuredExecutionProblem
+import com.example.minimalapk.models.recycle
+import com.example.minimalapk.models.runAssetTransfer
 import com.example.minimalapk.pose.GraphDescription
 import com.example.minimalapk.pose.readCapped
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -60,6 +70,8 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
     var description by remember(model.id) { mutableStateOf<GraphDescription?>(null) }
     var text by remember(model.id) { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var operation by remember { mutableStateOf<Job?>(null) }
+    var cancellation by remember { mutableStateOf<AssetTransfer?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var result by remember { mutableStateOf<ModelRunResult?>(null) }
     var files by remember { mutableStateOf(emptyMap<Int, Uri>()) }
@@ -70,6 +82,18 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
     var showFileRun by remember { mutableStateOf(false) }
     val parsed = remember(text, description) { description?.let { runCatching { ModelConfig.decode(text, it) } } }
     val signature = remember(text, description) { description?.let { modelConfigSignature(text, it) } }
+    val executionProblem = remember(parsed, signature) {
+        parsed?.getOrNull()?.let { config -> signature?.let { configuredExecutionProblem(config, it) } }
+    }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    fun cancelOperation() { cancellation?.cancel(); operation?.cancel() }
+    DisposableEffect(lifecycle, model.id) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) cancelOperation()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer); cancelOperation() }
+    }
 
     LaunchedEffect(model.id) {
         try {
@@ -79,17 +103,21 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
         } catch (e: CancellationException) { throw e
         } catch (e: Exception) { message = "读取失败：${e.message}" }
     }
-    fun action(block: suspend () -> Unit) {
+    fun action(block: suspend (AssetTransfer) -> Unit) {
         if (busy) return
         busy = true
         message = null
-        scope.launch {
-            try { block()
-            } catch (e: CancellationException) { throw e
+        val transfer = AssetTransfer().also { cancellation = it }
+        operation = scope.launch {
+            try { transfer.checkpoint(); block(transfer)
+            } catch (e: CancellationException) {
+                transfer.cancel()
+                message = "已取消，旧任务不会回传相机"
+                throw e
             } catch (e: Throwable) {
                 AppLog.w("ModelConfig", "操作失败", e)
                 message = "操作失败：${e.message}\n请检查签名、固定/动态维度、输入来源及归一化；缺失 Flex/自定义算子需要兼容运行时或重新导出，配置不能增加算子。"
-            } finally { busy = false }
+            } finally { busy = false; cancellation = null; operation = null }
         }
     }
     val inputPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -97,9 +125,9 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
     }
     val configPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) action {
-            val loaded = withContext(Dispatchers.IO) {
-                context.contentResolver.openInputStream(uri)?.use { it.readCapped(MAX_CONFIG_BYTES) }?.toString(Charsets.UTF_8)
-                    ?: error("无法读取配置")
+            val loaded = runAssetTransfer { transfer ->
+                val stream = context.contentResolver.openInputStream(uri) ?: error("无法读取配置")
+                transfer.use(stream) { it.readCapped(MAX_CONFIG_BYTES, transfer::checkpoint) }.toString(Charsets.UTF_8)
             }
             ModelConfig.decode(loaded, checkNotNull(description))
             text = loaded
@@ -109,20 +137,22 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
         }
     }
     val configExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-        if (uri != null) action {
+        if (uri != null) action { cancellation ->
             val snapshot = text
-            withContext(Dispatchers.IO) {
-                context.contentResolver.openOutputStream(uri)?.use { it.write(snapshot.toByteArray()) } ?: error("无法写入配置")
+            runAssetTransfer { transfer ->
+                cancellation.checkpoint()
+                val stream = context.contentResolver.openOutputStream(uri) ?: error("无法写入配置")
+                transfer.use(stream) { it.write(snapshot.toByteArray()) }
             }
             message = "配置已导出"
         }
     }
     AlertDialog(
-        onDismissRequest = { if (!busy) onDismiss() },
+        onDismissRequest = { cancelOperation(); onDismiss() },
         title = { Text(model.name) },
         text = {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("开启的图片模型实时接收相机；明确配置的单输入 AUDIO 原始波形使用共享麦克风。其它输入在本页按需运行。保存配置并开启此模型及自定义模型总开关后，单次结果会同步到相机；未保存参数仍可在本页测试。",
+                Text("开启的图片模型实时接收相机；明确配置的单输入 AUDIO 原始波形使用共享麦克风。其它输入在本页按需运行。保存配置并开启此模型及自定义模型总开关后，单次结果会同步到相机；未保存参数仍可在本页测试。\n自动生成的来源、布局、归一化与输出含义均为推断；labels、tokenizer、采样率需按模型说明配置，不保证推断正确。",
                     style = MaterialTheme.typography.bodySmall)
                 parsed?.getOrNull()?.let { config ->
                     signature?.let { graph ->
@@ -150,8 +180,9 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
                             Text(buildString {
                                 appendLine("可用签名：${graph.signatures.joinToString { it.key.ifEmpty { "主子图" } }}")
                                 appendLine("签名：${active.key.ifEmpty { "主子图" }}")
-                                active.inputs.forEachIndexed { index, tensor -> appendLine("输入 $index ${tensor.name} ${tensor.typeName} 形状 ${tensor.shape} 签名 ${tensor.signature} 量化 scale=${tensor.scale} zero-point=${tensor.zeroPoint}") }
-                                active.outputs.forEachIndexed { index, tensor -> appendLine("输出 $index ${tensor.name} ${tensor.typeName} 形状 ${tensor.shape} 签名 ${tensor.signature}") }
+                                active.inputs.forEachIndexed { index, tensor -> appendLine("输入 $index ${tensor.name} ${tensor.typeName} 形状 ${tensor.shape} 签名 ${tensor.signature} 量化 ${tensor.quantizationSummary}") }
+                                active.outputs.forEachIndexed { index, tensor -> appendLine("输出 $index ${tensor.name} ${tensor.typeName} 形状 ${tensor.shape} 签名 ${tensor.signature} 量化 ${tensor.quantizationSummary}") }
+                                if (graph.operators.isNotEmpty()) appendLine("算子代码/版本：${graph.operators.joinToString()}")
                                 if (graph.customOps.isNotEmpty()) appendLine("自定义算子：${graph.customOps.joinToString()}；如运行失败，请提供兼容运行时或重新导出。")
                             }, style = MaterialTheme.typography.bodySmall)
                         }
@@ -173,7 +204,7 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
                 TextButton(onClick = { showRawConfig = !showRawConfig }) { Text(if (showRawConfig) "收起配置文件" else "高级：编辑 properties 配置文件") }
                 if (showRawConfig) {
                     Text("UTF-8 properties：IMAGE 按配置尺寸缩放，mean/std 控制 (像素−mean)/std；NUMBERS 单值填充或逗号分隔；" +
-                        "TEXT 每行一个字符串（不含 tokenizer）；AUDIO 为单声道 [-1,1] 原始波形，读取 PCM16 WAV 或共享麦克风，sampleRate 按模型说明填写，mean/std=0/1，不生成 mel/频谱；BINARY 为 little-endian 张量。",
+                        "TEXT 每行一个 STRING（不含 tokenizer；首项不可为空）；NUMBERS 使用 double 精度，超过 2^53 的整数请用 BINARY；AUDIO 为单声道 [-1,1] 原始波形，读取 PCM16 WAV 或共享麦克风，sampleRate 按模型说明填写，mean/std=0/1，不生成 mel/频谱；BINARY 为 little-endian 原始张量，不自动归一化或量化。",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     OutlinedTextField(
                         value = text, onValueChange = { if (it.length <= MAX_CONFIG_BYTES) { text = it; result = null } },
@@ -182,6 +213,7 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
                     )
                 }
                 parsed?.exceptionOrNull()?.let { Text("配置待修正：${it.message}", color = MaterialTheme.colorScheme.error) }
+                executionProblem?.let { Text("未就绪：$it", color = MaterialTheme.colorScheme.error) }
                 Row {
                     TextButton(enabled = !busy && description != null, onClick = { configPicker.launch(arrayOf("*/*")) }) { Text("导入配置") }
                     TextButton(enabled = !busy && text.isNotEmpty(), onClick = { configExport.launch("${model.id.take(8)}.properties") }) { Text("导出配置") }
@@ -200,23 +232,42 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
                             }) { Text("输入 $index ${input.source}：${if (files.containsKey(index)) "已选择（点击更换）" else "选择文件"}") }
                         }
                     }
-                    Button(enabled = !busy && parsed?.isSuccess == true, onClick = { action {
+                    Button(enabled = !busy && parsed?.isSuccess == true && executionProblem == null, onClick = { action { transfer ->
                         result = null
                         val config = parsed!!.getOrThrow()
                         val configText = text
                         val selected = files.toMap()
-                        val (output, published) = withContext(Dispatchers.IO) {
-                            val ticket = ConfiguredModelResults.begin(context, model, configText)
-                            val output = ConfiguredModelRunner.run(context, model, config, selected)
-                            currentCoroutineContext().ensureActive()
-                            output to (ticket?.let { ConfiguredModelResults.publish(it, output) } == true)
+                        var completed: ModelRunResult? = null
+                        var ticket: ConfiguredRunTicket? = null
+                        var registration: AutoCloseable? = null
+                        var accepted = false
+                        try {
+                            val (output, published) = withContext(Dispatchers.IO) {
+                                ticket = ConfiguredModelResults.begin(context, model, configText, transfer)
+                                registration = ticket?.let { transfer.onCancel { ConfiguredModelResults.cancel(it) } }
+                                val output = ConfiguredModelRunner.run(context, model, config, selected, transfer)
+                                completed = output
+                                currentCoroutineContext().ensureActive()
+                                transfer.checkpoint()
+                                output to (ticket?.let { ConfiguredModelResults.publish(it, output) } == true)
+                            }
+                            transfer.checkpoint()
+                            result = output
+                            completed = null
+                            accepted = true
+                            message = if (published) "CPU 推理完成；已同步结果到相机（最多保留一份摘要及首个图像输出）"
+                                else "CPU 推理完成；仅在本页显示。请保存当前参数并开启模型及自定义模型总开关，再运行以同步到相机；开关/配置变化会使旧结果失效。"
+                        } finally {
+                            if (!accepted) ticket?.let(ConfiguredModelResults::cancel)
+                            registration?.close()
+                            completed?.recycle()
                         }
-                        result = output
-                        message = if (published) "CPU 推理完成；已同步结果到相机（最多保留一份摘要及首个图像输出）"
-                            else "CPU 推理完成；仅在本页显示。请保存当前参数并开启模型及自定义模型总开关，再运行以同步到相机；开关/配置变化会使旧结果失效。"
                     } }) { Text(if (busy) "处理中…" else "运行当前参数") }
                 }
-                if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (busy) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    TextButton(onClick = ::cancelOperation) { Text("取消操作") }
+                }
                 message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 result?.let { output ->
                     SelectionContainer { Text(output.text, style = MaterialTheme.typography.bodySmall) }
@@ -225,19 +276,19 @@ internal fun ConfiguredModelEditDialog(model: ConfiguredModel, onDismiss: () -> 
                         Image(bitmap.asImageBitmap(), label, modifier = Modifier.fillMaxWidth(), contentScale = ContentScale.Fit)
                     }
                 }
-                TextButton(enabled = !busy, onClick = { action {
-                    withContext(Dispatchers.IO) { ConfiguredModelStore.delete(model) }
+                TextButton(enabled = !busy, onClick = { action { transfer ->
+                    withContext(Dispatchers.IO) { ConfiguredModelStore.delete(model, transfer) }
                     onDelete()
                 } }) { Text("删除此模型及配置") }
             }
         },
         confirmButton = {
-            TextButton(enabled = !busy && parsed?.isSuccess == true, onClick = { action {
+            TextButton(enabled = !busy && parsed?.isSuccess == true, onClick = { action { transfer ->
                 val snapshot = text
-                withContext(Dispatchers.IO) { ConfiguredModelStore.saveConfig(model, snapshot, checkNotNull(description)) }
+                withContext(Dispatchers.IO) { transfer.checkpoint(); ConfiguredModelStore.saveConfig(model, snapshot, checkNotNull(description)) }
                 message = "配置已保存，相机自动更新"
             } }) { Text("保存") }
         },
-        dismissButton = { TextButton(enabled = !busy, onClick = onDismiss) { Text("关闭") } },
+        dismissButton = { TextButton(onClick = { cancelOperation(); onDismiss() }) { Text("关闭") } },
     )
 }

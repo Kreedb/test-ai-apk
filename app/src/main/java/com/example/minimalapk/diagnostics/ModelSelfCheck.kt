@@ -16,6 +16,9 @@ import com.example.minimalapk.examples.SuperResolutionRunner
 import com.example.minimalapk.examples.rankedSoundLabels
 import com.example.minimalapk.examples.SoftmaxHead
 import com.example.minimalapk.models.InputSource
+import com.example.minimalapk.models.ConfiguredModel
+import com.example.minimalapk.models.ConfiguredModelAccess
+import com.example.minimalapk.models.ConfiguredInspection
 import com.example.minimalapk.models.MAX_CONFIG_BYTES
 import com.example.minimalapk.models.MAX_TENSOR_ELEMENTS
 import com.example.minimalapk.models.ModelConfig
@@ -32,6 +35,7 @@ import com.example.minimalapk.pose.GraphTensor
 import com.example.minimalapk.pose.LiteRtBackend
 import com.example.minimalapk.pose.OutputLayout
 import com.example.minimalapk.pose.PoseDecoder
+import com.example.minimalapk.pose.PoseModelAccess
 import com.example.minimalapk.pose.TfliteGraph
 import com.example.minimalapk.pose.validatePoseModelConfig
 import org.tensorflow.lite.Interpreter
@@ -39,6 +43,8 @@ import org.tensorflow.lite.Tensor
 import java.io.File
 import java.io.FileNotFoundException
 import java.util.Properties
+import java.util.concurrent.Executors
+import java.util.concurrent.ExecutionException
 
 /** One target, fresh native handles, closed on this worker before the next target starts. */
 internal class ModelSelfCheck(
@@ -58,9 +64,12 @@ internal class ModelSelfCheck(
     private var metadataLabels = emptyList<String>()
     private var knownExample = target.example
     private var interpretation = ""
+    private var inspection: ConfiguredInspection? = null
+
+    private fun checkActive() { checkpoint(); inspection?.checkpoint() }
 
     private fun <T> step(name: String, block: () -> T): T {
-        checkpoint()
+        checkActive()
         stage = name
         onStage(name)
         log("stage=$name begin")
@@ -72,6 +81,14 @@ internal class ModelSelfCheck(
     }
 
     fun run(): CheckResult {
+        val configured = target.configured
+        return if (configured == null) runChecked() else ConfiguredModelAccess.inspect(configured) { lease ->
+            inspection = lease
+            try { runChecked() } finally { inspection = null }
+        }
+    }
+
+    private fun runChecked(): CheckResult {
         log("model=${target.name} source=${target.source} kind=${target.kind} " +
             "backend=CPU expectedBytes=${target.expectedBytes} expectedSha256=${target.expectedHash}")
         target.inventoryError?.let { throw it }
@@ -95,7 +112,7 @@ internal class ModelSelfCheck(
             throw CheckSkipped("MISSING ${file.absolutePath}；请在模型/资源设置中下载或重新导入，本次未下载")
         }
         val digest = step("hash") {
-            val digest = try { openInput().use { checkDigest(it, checkpoint) } }
+            val digest = try { openInput().use { checkDigest(it, ::checkActive) } }
             catch (error: FileNotFoundException) {
                 if (file?.isFile == true) throw error
                 throw CheckSkipped("MISSING ${target.source}；请重新安装/导入模型")
@@ -196,6 +213,7 @@ internal class ModelSelfCheck(
             }) throw CheckSkipped("模型含文件持久化算子 ${graph.customOps}，不能确认此入口无副作用，未执行")
             checkSignature(selected, personalization, graph.signatures.map { it.key })
             logGraph(selected)
+            (selected.inputs + selected.outputs).forEach { tensor -> tensor.quantizationProblem?.let { throw CheckSkipped(it) } }
             (selected.inputs + selected.outputs).forEach { checkTensorType(it.type) }
             selected.inputs.filter { tensor -> tensor.shape.all { it > 0 } }
                 .forEach { checkInputElements(it.shape) }
@@ -217,7 +235,7 @@ internal class ModelSelfCheck(
             if (target.kind == CheckKind.EXAMPLE) checkExamplePipeline()
             if (target.configured != null && knownExample == ExampleCatalog.audio) checkAudioPipeline()
         }
-        checkpoint()
+        checkActive()
         return CheckResult(target.id, CheckStatus.PASS, "validated",
             "独立 CPU 合成输入推理及输出校验通过；${coverageDetail()}；" +
                 "不代表真实场景准确率、GPU/NPU 或多组件端到端通过",
@@ -247,19 +265,24 @@ internal class ModelSelfCheck(
     ) {
         val modelFile = checkNotNull(target.file)
         val options = Interpreter.Options().setNumThreads(2).setUseXNNPACK(false)
+        val selected = target.configured ?: ConfiguredModel(target.id, target.name, modelFile)
         // LiteRT caches output shapes in Tensor wrappers. Inspect large models on a separate
         // interpreter so the execution interpreter first reads its outputs after invoke.
         val inspected = description ?: step("inspect-runtime") {
-            val inspector = Interpreter(modelFile, options)
+            val owner = ConfiguredModelAccess.open(selected, options)
             try {
-                val key = chooseCheckSignature(inspector.signatureKeys.toList(), requestedSignature, personalization)
-                GraphDescription(listOf(runtimeGraph(inspector, key)), emptyList())
-            } finally { stepClose { inspector.close() } }
+                owner.run { inspector ->
+                    checkActive()
+                    val key = chooseCheckSignature(inspector.signatureKeys.toList(), requestedSignature, personalization)
+                    GraphDescription(listOf(runtimeGraph(inspector, key)), emptyList())
+                }
+            } finally { stepClose { owner.close() } }
         }
-        val interpreter = step("load") {
-            Interpreter(modelFile, options)
+        val owner = step("load") {
+            ConfiguredModelAccess.open(selected, options)
         }
         try {
+          owner.run { interpreter ->
             val keys = interpreter.signatureKeys.toList()
             val key = chooseCheckSignature(keys, requestedSignature, personalization)
             val graph = inspected.signatures.single { it.key == key }
@@ -328,7 +351,7 @@ internal class ModelSelfCheck(
                 step("validate") {
                     var nonemptyOutputs = 0
                     graph.outputs.forEachIndexed { index, expected ->
-                        checkpoint()
+                        checkActive()
                         val output = if (key.isEmpty()) interpreter.getOutputTensor(index)
                         else interpreter.getOutputTensorFromSignature(expected.name, key)
                         require(output.dataType().toString() == expected.typeName) {
@@ -339,7 +362,7 @@ internal class ModelSelfCheck(
                             "actualType=${output.dataType()} bytes=${output.numBytes()} " +
                             "quantization=${quantization.scale}/${quantization.zeroPoint}")
                         val stats = checkOutputBuffer(expected, output.shape().toList(), output.asReadOnlyBuffer(),
-                            quantization.scale, quantization.zeroPoint.toLong(), checkpoint)
+                            quantization.scale, quantization.zeroPoint.toLong(), ::checkActive)
                         checkKnownOutput(index, output.shape().toList(), key)
                         if (output.numElements() > 0) nonemptyOutputs++
                         if (knownExample == ExampleCatalog.audio && index == 0) {
@@ -355,9 +378,10 @@ internal class ModelSelfCheck(
             } finally {
                 (images.values + rendered).distinct().forEach { it.recycle() }
             }
+          }
         } finally {
             // Never close native handles on the UI thread, including after lifecycle cancellation.
-            stepClose { interpreter.close() }
+            stepClose { owner.close() }
         }
     }
 
@@ -369,6 +393,8 @@ internal class ModelSelfCheck(
                 else -> throw CheckSkipped("运行时张量 $alias 类型 ${dataType()} 尚无合成输入/输出转换器")
             }
             val quantization = quantizationParams()
+            if (type in listOf(3, 7, 9)) throw CheckSkipped(
+                "大模型运行时 API 只提供标量量化参数，无法核对 $alias 的逐轴向量；请使用可读取完整量化信息的检查器，未按 scale=0 当作未量化运行")
             return GraphTensor(alias, shape().toList(), shapeSignature().toList(), type,
                 quantization.scale, quantization.zeroPoint.toLong())
         }
@@ -436,9 +462,16 @@ internal class ModelSelfCheck(
             logGraph(graph)
         }
         val pixels = step("prepare") { syntheticPixels(spec.inputSize, spec.inputSize) }
-        val backend = step("load") { LiteRtBackend.open(context, spec, useGpu = false) }
+        val worker = Executors.newSingleThreadExecutor { Thread(it, "PoseSelfCheck").apply { isDaemon = true } }
+        fun <T> onWorker(action: () -> T): T = try { worker.submit<T> { action() }.get() }
+            catch (error: ExecutionException) { throw error.cause ?: error }
+        val backend = try { step("load") { onWorker {
+            if (spec.imported) checkNotNull(PoseModelAccess.open(com.example.minimalapk.pose.modelFile(context, spec), spec.id, worker) {
+                LiteRtBackend.open(context, spec, useGpu = false)
+            }) else LiteRtBackend.open(context, spec, useGpu = false)
+        } } } catch (error: Throwable) { worker.shutdown(); throw error }
         try {
-            val output = step("inference") { backend.analyze(pixels).also { inferenceRan = true } }
+            val output = step("inference") { onWorker { backend.analyze(pixels) }.also { inferenceRan = true } }
             step("validate+decode") {
                 require(output.size == spec.anchors * spec.valuesPerAnchor) { "姿态输出元素数量不符" }
                 require(output.all { it.isFinite() }) { "姿态输出包含 NaN/Infinity" }
@@ -451,7 +484,7 @@ internal class ModelSelfCheck(
                 log("backend=${backend.name} outputShape=${graph.outputs.single().shape} elements=${output.size} " +
                     "finite=true detections=${decoded.size}; 合成图允许零检测")
             }
-        } finally { stepClose { backend.close() } }
+        } finally { try { stepClose { onWorker { backend.close() } } } finally { worker.shutdown() } }
     }
 
     private fun checkExamplePipeline() {
@@ -481,6 +514,8 @@ internal class ModelSelfCheck(
 
     private fun checkAudioPipeline() {
         step("audio-pipeline") {
+            // run() holds the configured-path inspection lease through this runner's finally;
+            // deletion cannot unlink its mapped file between the generic and fixed audio checks.
             AudioClassificationRunner(checkNotNull(target.configured)).use { runner ->
                 checkInputElements(listOf(runner.windowSamples))
                 val scores = runner.classify(FloatArray(runner.windowSamples) { index ->
